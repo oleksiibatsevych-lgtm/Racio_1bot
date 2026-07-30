@@ -1,7 +1,6 @@
 import time
 import sqlite3
 import datetime
-import asyncio
 import threading
 import pandas as pd
 import numpy as np
@@ -10,18 +9,16 @@ from flask import Flask, request
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ==================== НАЛАШТУВАННЯ ====================
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
 CHAT_ID = 859749941
 
 SYMBOLS = {
     "EURUSD=X": "EUR/USD", "GBPUSD=X": "GBP/USD", "USDJPY=X": "USD/JPY",
     "AUDUSD=X": "AUD/USD", "USDCAD=X": "USD/CAD", "USDCHF=X": "USD/CHF",
-    "NZDUSD=X": "NZD/USD", "EURGBP=X": "EUR/GBP", "EURJPY=X": "EUR/JPY",
-    "GBPJPY=X": "GBP/JPY", "AUDJPY=X": "AUD/JPY", "CADJPY=X": "CAD/JPY",
-    "EURAUD=X": "EUR/AUD", "EURCAD=X": "EUR/CAD", "GBPCAD=X": "GBP/CAD",
-    "GBPAUD=X": "GBP/AUD", "AUDNZD=X": "AUD/NZD", "AUDCAD=X": "AUD/CAD",
-    "NZDJPY=X": "NZD/JPY", "CHFJPY=X": "CHF/JPY", "EURCHF=X": "EUR/CHF"
+    "EURGBP=X": "EUR/GBP", "EURJPY=X": "EUR/JPY", "GBPJPY=X": "GBP/JPY", 
+    "AUDJPY=X": "AUD/JPY", "CADJPY=X": "CAD/JPY", "EURAUD=X": "EUR/AUD", 
+    "EURCAD=X": "EUR/CAD", "GBPCAD=X": "GBP/CAD", "GBPAUD=X": "GBP/AUD", 
+    "AUDCAD=X": "AUD/CAD", "CHFJPY=X": "CHF/JPY", "EURCHF=X": "EUR/CHF"
 }
 
 NIGHT_MODE = True
@@ -58,7 +55,6 @@ def get_stats(days=None):
         cursor.execute("SELECT status FROM signals WHERE timestamp >= ? AND status != 'PENDING'", (date_limit,))
     else:
         cursor.execute("SELECT status FROM signals WHERE status != 'PENDING'")
-        
     rows = cursor.fetchall()
     conn.close()
     
@@ -67,10 +63,6 @@ def get_stats(days=None):
     losses = sum(1 for r in rows if r[0] == 'LOSS')
     winrate = (wins / total * 100) if total > 0 else 0.0
     return total, wins, losses, winrate
-
-def is_night_time():
-    current_hour = datetime.datetime.now().hour
-    return current_hour >= 22 or current_hour < 8
 
 def fetch_forex_data(ticker, interval, period="5d"):
     try:
@@ -144,29 +136,6 @@ def analyze_forex_symbol(ticker_code, display_name):
         "score": max_score, "full_signal": max_score >= 5
     }
 
-async def background_scanner(application):
-    await asyncio.sleep(15)
-    while True:
-        try:
-            if not (NIGHT_MODE and is_night_time()):
-                for ticker, name in SYMBOLS.items():
-                    res = analyze_forex_symbol(ticker, name)
-                    if res and res["full_signal"]:
-                        msg = (
-                            f"🚀 **АВТО-СИГНАЛ (H1/H4 Trend): {res['type']}**\n\n"
-                            f"🔹 **Пара:** `{res['symbol']}`\n"
-                            f"💰 **Ціна входу:** `{res['price']}`\n"
-                            f"⏳ **Експірація:** `10–15 хвилин`\n\n"
-                            f"🎯 **Мультитаймфрейм підтверджено! ✅**"
-                        )
-                        await application.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-                        save_signal(res['symbol'], res['type'], res['price'])
-                        await asyncio.sleep(60)
-            await asyncio.sleep(300)
-        except Exception as e:
-            print(f"Помилка сканера: {e}")
-            await asyncio.sleep(60)
-
 def main_keyboard():
     night_status = "УВІМК 🟢" if NIGHT_MODE else "ВИМК 🔴"
     keyboard = [
@@ -176,69 +145,64 @@ def main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+app = Flask(__name__)
+application = Application.builder().token(BOT_TOKEN).build()
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Бот запущено у хмарі!", reply_markup=main_keyboard())
+    await update.message.reply_text("👋 Головне меню активне!", reply_markup=main_keyboard())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global NIGHT_MODE
     text = update.message.text
 
-    if text == "🔍 СКАНУВАТИ РИНОК ЗАРАЗ":
-        if NIGHT_MODE and is_night_time():
-            await update.message.reply_text("🌙 Зараз нічний час (22:00-08:00).")
-            return
-        await update.message.reply_text("🔎 Сканую 21 пару...")
-        
-        perfect_signals = []
+    if text and "СКАНУВАТИ" in text:
+        await update.message.reply_text(f"🔎 Сканую {len(SYMBOLS)} пар...")
+        found = 0
         for ticker, name in SYMBOLS.items():
             res = analyze_forex_symbol(ticker, name)
             if res and res["full_signal"]:
-                perfect_signals.append(res)
-
-        if perfect_signals:
-            for sig in perfect_signals:
-                msg = f"🚀 **СИГНАЛ: {sig['type']}**\n🔹 Пара: `{sig['symbol']}`\n💰 Ціна: `{sig['price']}`"
+                found += 1
+                msg = f"🚀 **СИГНАЛ: {res['type']}**\n🔹 Пара: `{res['symbol']}`\n💰 Ціна: `{res['price']}`"
                 await update.message.reply_text(msg, parse_mode="Markdown")
-        else:
-            await update.message.reply_text("😴 Зараз немає сильних сигналів.")
-
-    elif text == "📅 День":
+        if found == 0:
+            await update.message.reply_text("😴 Зараз сильних сигналів немає.")
+    elif text and "День" in text:
         t, w, l, wr = get_stats(1)
         await update.message.reply_text(f"📅 День: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif "🗓 Тиждень" in text:
+    elif text and "Тиждень" in text:
         t, w, l, wr = get_stats(7)
         await update.message.reply_text(f"🗓 Тиждень: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif "♾ Увесь час" in text:
+    elif text and "Увесь час" in text:
         t, w, l, wr = get_stats(None)
         await update.message.reply_text(f"♾ За весь час: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif "🌙 Нічний режим" in text:
+    elif text and "Нічний режим" in text:
         NIGHT_MODE = not NIGHT_MODE
-        await update.message.reply_text(f"🌙 Нічний режим змінено!", reply_markup=main_keyboard())
-
-# Ініціалізація додатку Telegram та Flask
-app = Flask(__name__)
-application = Application.builder().token(BOT_TOKEN).build()
+        await update.message.reply_text("🌙 Режим змінено!", reply_markup=main_keyboard())
+    else:
+        await update.message.reply_text("Скористайтеся кнопками нижче 👇", reply_markup=main_keyboard())
 
 application.add_handler(CommandHandler("start", start_cmd))
-application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 @app.route('/')
 def home():
-    return "Bot is alive and running!"
+    return "Bot is running!"
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
-    return 'ok'
-
-def run_scanner():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(background_scanner(application))
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = Update.de_json(json_string, application.bot)
+        
+        async def process():
+            await application.initialize()
+            await application.process_update(update)
+            
+        import asyncio
+        asyncio.run(process())
+        return 'ok'
+    return 'Invalid format'
 
 if __name__ == '__main__':
     init_db()
-    t = threading.Thread(target=run_scanner, daemon=True)
-    t.start()
     app.run(host='0.0.0.0', port=10000)
