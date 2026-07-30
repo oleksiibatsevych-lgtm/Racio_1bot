@@ -1,7 +1,7 @@
 import time
 import sqlite3
 import datetime
-import threading
+import asyncio
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -36,14 +36,6 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    conn.commit()
-    conn.close()
-
-def save_signal(symbol, signal_type, entry_price):
-    conn = sqlite3.connect('stats.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT INTO signals (symbol, signal_type, entry_price, status) VALUES (?, ?, ?, ?)',
-                   (symbol, signal_type, entry_price, 'PENDING'))
     conn.commit()
     conn.close()
 
@@ -153,9 +145,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global NIGHT_MODE
+    if not update.message or not update.message.text:
+        return
     text = update.message.text
 
-    if text and "СКАНУВАТИ" in text:
+    if "СКАНУВАТИ" in text:
         await update.message.reply_text(f"🔎 Сканую {len(SYMBOLS)} пар...")
         found = 0
         for ticker, name in SYMBOLS.items():
@@ -166,16 +160,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg, parse_mode="Markdown")
         if found == 0:
             await update.message.reply_text("😴 Зараз сильних сигналів немає.")
-    elif text and "День" in text:
+    elif "День" in text:
         t, w, l, wr = get_stats(1)
         await update.message.reply_text(f"📅 День: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif text and "Тиждень" in text:
+    elif "Тиждень" in text:
         t, w, l, wr = get_stats(7)
         await update.message.reply_text(f"🗓 Тиждень: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif text and "Увесь час" in text:
+    elif "Увесь час" in text:
         t, w, l, wr = get_stats(None)
         await update.message.reply_text(f"♾ За весь час: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif text and "Нічний режим" in text:
+    elif "Нічний режим" in text:
         NIGHT_MODE = not NIGHT_MODE
         await update.message.reply_text("🌙 Режим змінено!", reply_markup=main_keyboard())
     else:
@@ -190,18 +184,16 @@ def home():
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = Update.de_json(json_string, application.bot)
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), application.bot)
         
-        async def process():
+        async def run_update():
             await application.initialize()
             await application.process_update(update)
             
-        import asyncio
-        asyncio.run(process())
+        asyncio.run(run_update())
         return 'ok'
-    return 'Invalid format'
+    return 'ok'
 
 if __name__ == '__main__':
     init_db()
