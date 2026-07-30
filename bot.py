@@ -6,23 +6,9 @@ import threading
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from flask import Flask
+from flask import Flask, request
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# ==================== WEB SERVER (ДЛЯ RENDER) ====================
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is alive and running!"
-
-def run_web():
-    app.run(host='0.0.0.0', port=10000)
-
-def keep_alive():
-    t = threading.Thread(target=run_web)
-    t.start()
 
 # ==================== НАЛАШТУВАННЯ ====================
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
@@ -219,7 +205,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "📅 День":
         t, w, l, wr = get_stats(1)
         await update.message.reply_text(f"📅 День: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif text == "🗓 Тиждень":
+    elif "🗓 Тиждень" in text:
         t, w, l, wr = get_stats(7)
         await update.message.reply_text(f"🗓 Тиждень: Всього: {t} | Win Rate: {wr:.1f}%")
     elif "♾ Увесь час" in text:
@@ -229,13 +215,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         NIGHT_MODE = not NIGHT_MODE
         await update.message.reply_text(f"🌙 Нічний режим змінено!", reply_markup=main_keyboard())
 
-async def post_init(application: Application):
-    asyncio.create_task(background_scanner(application))
+# Ініціалізація додатку Telegram та Flask
+app = Flask(__name__)
+application = Application.builder().token(BOT_TOKEN).build()
+
+application.add_handler(CommandHandler("start", start_cmd))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+@app.route('/')
+def home():
+    return "Bot is alive and running!"
+
+@app.route(f'/{BOT_TOKEN}', methods=['POST'])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    asyncio.run(application.process_update(update))
+    return 'ok'
+
+def run_scanner():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(background_scanner(application))
 
 if __name__ == '__main__':
     init_db()
-    keep_alive()
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
+    # Запускаємо фоновий сканер у окремому потоці
+    t = threading.Thread(target=run_scanner, daemon=True)
+    t.start()
+    
+    # Запуск вебсервера для Render
+    app.run(host='0.0.0.0', port=10000)
