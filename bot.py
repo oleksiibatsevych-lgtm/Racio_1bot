@@ -1,3 +1,4 @@
+import os
 import time
 import sqlite3
 import datetime
@@ -8,7 +9,8 @@ import yfinance as yf
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
+# Токен береться з налаштувань Render (Environment), або використовується ваш
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg")
 
 SYMBOLS = {
     "EURUSD=X": "EUR/USD", "GBPUSD=X": "GBP/USD", "USDJPY=X": "USD/JPY",
