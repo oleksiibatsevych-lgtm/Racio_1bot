@@ -220,7 +220,7 @@ app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start_cmd))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
 @app.route('/')
 def home():
@@ -239,9 +239,6 @@ def run_scanner():
 
 if __name__ == '__main__':
     init_db()
-    # Запускаємо фоновий сканер у окремому потоці
     t = threading.Thread(target=run_scanner, daemon=True)
     t.start()
-    
-    # Запуск вебсервера для Render
     app.run(host='0.0.0.0', port=10000)
