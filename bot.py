@@ -4,9 +4,11 @@ import sqlite3
 import datetime
 import logging
 import asyncio
+import threading
 import pandas as pd
 import numpy as np
 import yfinance as yf
+from flask import Flask
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -24,6 +26,18 @@ NIGHT_MODE = True
 SUBSCRIBED_CHATS = set()
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# --- МІКРО-СЕРВЕР FLASK ДЛЯ RENDER (Щоб уникнути Timed Out) ---
+web_app = Flask('')
+
+@web_app.route('/')
+def home():
+    return "Bot is active and running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host='0.0.0.0', port=port)
+# -------------------------------------------------------------
 
 def init_db():
     conn = sqlite3.connect('stats.db')
@@ -52,7 +66,6 @@ def save_signal_to_db(symbol, signal_type, price):
     conn.close()
 
 async def check_pending_signals():
-    """Фонова перевірка результатів через 15 хвилин для підрахунку статистики (Win/Loss)"""
     while True:
         await asyncio.sleep(60)
         try:
@@ -126,7 +139,6 @@ def analyze_forex_symbol(ticker_code, display_name):
 
     current_price = df_m5['Close'].iloc[-1]
     
-    # Трендові фільтри по EMA 50
     ema50_h4 = df_h4['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     h4_bull = current_price > ema50_h4
     h4_bear = current_price < ema50_h4
@@ -139,30 +151,25 @@ def analyze_forex_symbol(ticker_code, display_name):
     m15_bull = current_price > ema50_m15
     m15_bear = current_price < ema50_m15
 
-    # RSI (14)
     delta = df_m5['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     rsi = round((100 - (100 / (1 + rs))).iloc[-1], 1)
 
-    # Bollinger Bands
     sma20 = df_m5['Close'].rolling(20).mean().iloc[-1]
     std20 = df_m5['Close'].rolling(20).std().iloc[-1]
     upper_bb = sma20 + (2 * std20)
     lower_bb = sma20 - (2 * std20)
 
-    # Об'єми
     vol_ma = df_m5['Volume'].rolling(20).mean().iloc[-1]
     vol_surge = df_m5['Volume'].iloc[-1] >= vol_ma if vol_ma > 0 else True
 
-    # Рівні підтримки/опору за 100 свічок
     min_support = df_m5['Low'].tail(100).min()
     max_resistance = df_m5['High'].tail(100).max()
     near_support = abs(current_price - min_support) / current_price <= 0.003
     near_resistance = abs(current_price - max_resistance) / current_price <= 0.003
 
-    # Підрахунок балів
     score_call = sum([h4_bull, h1_bull, m15_bull, rsi <= 30, current_price <= lower_bb, near_support, vol_surge])
     score_put = sum([h4_bear, h1_bear, m15_bear, rsi >= 70, current_price >= upper_bb, near_resistance, vol_surge])
 
@@ -176,7 +183,6 @@ def analyze_forex_symbol(ticker_code, display_name):
         signal_header = "🔴⚓ ТОП-СИГНАЛ (H1/H4 Trend): ВНИЗ"
         signal_text_type = "ВНИЗ"
 
-    # Суворі фільтри якості: сигнал пройде тільки при високій кількості балів та екстремальному RSI
     is_valid_call = (score_call >= 6) and (rsi <= 35)
     is_valid_put = (score_put >= 6) and (rsi >= 65)
     strict_full_signal = is_valid_call if is_call else is_valid_put
@@ -199,7 +205,7 @@ def main_keyboard():
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     SUBSCRIBED_CHATS.add(chat_id)
-    await update.message.reply_text("👋 Бот запущено! Фоновий сканер активний і надсилатиме лише найкращі сигнали.", reply_markup=main_keyboard())
+    await update.message.reply_text("👋 Бот запущено! Фоновий сканер активний.", reply_markup=main_keyboard())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global NIGHT_MODE
@@ -266,12 +272,16 @@ async def background_scanner(application):
                     await asyncio.sleep(15)
         except Exception as e:
             logging.error(f"Background scanner error: {e}")
-        
-        # Пауза перед наступним колом сканування ринку
         await asyncio.sleep(300)
 
 if __name__ == '__main__':
     init_db()
+    
+    # Запускаємо вебсервер у фоновому потоці для Render
+    t = threading.Thread(target=run_web)
+    t.daemon = True
+    t.start()
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_cmd))
