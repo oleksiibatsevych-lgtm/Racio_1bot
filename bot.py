@@ -287,7 +287,13 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    loop = asyncio.get_event_loop()
+    # Безпечне створення циклу подій для нових версій Python
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     loop.create_task(background_scanner(app))
     loop.create_task(check_pending_signals())
     
