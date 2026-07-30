@@ -1,27 +1,26 @@
 import time
 import sqlite3
 import datetime
-import asyncio
+import logging
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from flask import Flask, request
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
-CHAT_ID = 859749941
 
 SYMBOLS = {
     "EURUSD=X": "EUR/USD", "GBPUSD=X": "GBP/USD", "USDJPY=X": "USD/JPY",
-    "AUDUSD=X": "AUD/USD", "USDCAD=X": "USD/CAD", "USDCHF=X": "USD/CHF",
+    "USDCAD=X": "USD/CAD", "USDCHF=X": "USD/CHF",
     "EURGBP=X": "EUR/GBP", "EURJPY=X": "EUR/JPY", "GBPJPY=X": "GBP/JPY", 
-    "AUDJPY=X": "AUD/JPY", "CADJPY=X": "CAD/JPY", "EURAUD=X": "EUR/AUD", 
-    "EURCAD=X": "EUR/CAD", "GBPCAD=X": "GBP/CAD", "GBPAUD=X": "GBP/AUD", 
-    "AUDCAD=X": "AUD/CAD", "CHFJPY=X": "CHF/JPY", "EURCHF=X": "EUR/CHF"
+    "CADJPY=X": "CAD/JPY", "EURCAD=X": "EUR/CAD", "GBPCAD=X": "GBP/CAD", 
+    "CHFJPY=X": "CHF/JPY", "EURCHF=X": "EUR/CHF"
 }
 
 NIGHT_MODE = True
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 def init_db():
     conn = sqlite3.connect('stats.db')
@@ -137,9 +136,6 @@ def main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-app = Flask(__name__)
-application = Application.builder().token(BOT_TOKEN).build()
-
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Головне меню активне!", reply_markup=main_keyboard())
 
@@ -175,26 +171,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Скористайтеся кнопками нижче 👇", reply_markup=main_keyboard())
 
-application.add_handler(CommandHandler("start", start_cmd))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-@app.route('/')
-def home():
-    return "Bot is running!"
-
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def webhook():
-    if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        
-        async def run_update():
-            await application.initialize()
-            await application.process_update(update)
-            
-        asyncio.run(run_update())
-        return 'ok'
-    return 'ok'
-
 if __name__ == '__main__':
     init_db()
-    app.run(host='0.0.0.0', port=10000)
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    app.run_polling()
