@@ -176,6 +176,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    if not text:
+        return
 
     if text == "📅 День":
         t, w, l, wr = get_stats(1)
@@ -199,8 +201,14 @@ def home():
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
+    json_data = request.get_json(force=True)
+    update = Update.de_json(json_data, application.bot)
+    
+    # Використовуємо коректний цикл подій для обробки вебхука в Flask
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.process_update(update))
     return 'ok'
 
 def run_scanner():
