@@ -3,6 +3,7 @@ import sqlite3
 import datetime
 import asyncio
 import threading
+import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -69,21 +70,17 @@ def is_night_time():
     current_hour = datetime.datetime.now().hour
     return current_hour >= 22 or current_hour < 8
 
-def fetch_forex_data(ticker, interval, period="5d"):
+def fetch_forex_data(ticker, interval, period="30d"):
     try:
-        if interval == "5m":
-            period = "30d"  # Оптимальний період для уникнення таймаутів
-        elif interval in ["1h", "60m", "1d"]:
-            period = "60d"
         data = yf.Ticker(ticker).history(period=period, interval=interval)
         return None if data.empty else data
     except:
         return None
 
 def analyze_forex_symbol(ticker_code, display_name):
-    df_m5_raw = fetch_forex_data(ticker_code, "5m")
-    df_m15 = fetch_forex_data(ticker_code, "15m")
-    df_h1 = fetch_forex_data(ticker_code, "1h")
+    df_m5_raw = fetch_forex_data(ticker_code, "5m", period="10d")
+    df_m15 = fetch_forex_data(ticker_code, "15m", period="15d")
+    df_h1 = fetch_forex_data(ticker_code, "1h", period="30d")
     df_h4_raw = fetch_forex_data(ticker_code, "1h", period="60d")
     
     if df_m5_raw is None or df_m15 is None or df_h1 is None or df_h4_raw is None:
@@ -170,37 +167,17 @@ async def background_scanner(application):
 
 def main_keyboard():
     keyboard = [
-        [KeyboardButton("🔍 СКАНУВАТИ РИНОК ЗАРАЗ")],
         [KeyboardButton("📅 День"), KeyboardButton("🗓 Тиждень"), KeyboardButton("♾ Увесь час")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Бот запущено у хмарі!", reply_markup=main_keyboard())
+    await update.message.reply_text("👋 Автоматичного бота запущено у хмарі!", reply_markup=main_keyboard())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    if text == "🔍 СКАНУВАТИ РИНОК ЗАРАЗ":
-        if is_night_time():
-            await update.message.reply_text("🌙 Зараз нічний час (22:00–08:00). Ручне сканування заблоковано.")
-            return
-        await update.message.reply_text("🔎 Сканую 13 пар...")
-        
-        perfect_signals = []
-        for ticker, name in SYMBOLS.items():
-            res = analyze_forex_symbol(ticker, name)
-            if res and res["full_signal"]:
-                perfect_signals.append(res)
-
-        if perfect_signals:
-            for sig in perfect_signals:
-                msg = f"🚀 **СИГНАЛ: {sig['type']}**\n🔹 Пара: `{sig['symbol']}`\n💰 Ціна: `{sig['price']}`"
-                await update.message.reply_text(msg, parse_mode="Markdown")
-        else:
-            await update.message.reply_text("😴 Зараз немає сильних сигналів.")
-
-    elif text == "📅 День":
+    if text == "📅 День":
         t, w, l, wr = get_stats(1)
         await update.message.reply_text(f"📅 День: Всього: {t} | Win Rate: {wr:.1f}%")
     elif "🗓 Тиждень" in text:
@@ -233,6 +210,10 @@ def run_scanner():
 
 if __name__ == '__main__':
     init_db()
+    
+    webhook_url = f"https://racio-1bot.onrender.com/{BOT_TOKEN}"
+    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
+    
     t = threading.Thread(target=run_scanner, daemon=True)
     t.start()
     
