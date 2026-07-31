@@ -15,14 +15,15 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
 CHAT_ID = 859749941
 
+# Усі пари з NZD вилучено зі списку
 SYMBOLS = {
     "EURUSD=X": "EUR/USD", "GBPUSD=X": "GBP/USD", "USDJPY=X": "USD/JPY",
     "AUDUSD=X": "AUD/USD", "USDCAD=X": "USD/CAD", "USDCHF=X": "USD/CHF",
-    "NZDUSD=X": "NZD/USD", "EURGBP=X": "EUR/GBP", "EURJPY=X": "EUR/JPY",
+    "EURGBP=X": "EUR/GBP", "EURJPY=X": "EUR/JPY",
     "GBPJPY=X": "GBP/JPY", "AUDJPY=X": "AUD/JPY", "CADJPY=X": "CAD/JPY",
     "EURAUD=X": "EUR/AUD", "EURCAD=X": "EUR/CAD", "GBPCAD=X": "GBP/CAD",
-    "GBPAUD=X": "GBP/AUD", "AUDNZD=X": "AUD/NZD", "AUDCAD=X": "AUD/CAD",
-    "NZDJPY=X": "NZD/JPY", "CHFJPY=X": "CHF/JPY", "EURCHF=X": "EUR/CHF"
+    "GBPAUD=X": "GBP/AUD", "AUDCAD=X": "AUD/CAD",
+    "CHFJPY=X": "CHF/JPY", "EURCHF=X": "EUR/CHF"
 }
 
 def init_db():
@@ -46,6 +47,15 @@ def save_signal(symbol, signal_type, entry_price):
     cursor = conn.cursor()
     cursor.execute('INSERT INTO signals (symbol, signal_type, entry_price, status) VALUES (?, ?, ?, ?)',
                    (symbol, signal_type, entry_price, 'PENDING'))
+    signal_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return signal_id
+
+def update_signal_status(signal_id, status):
+    conn = sqlite3.connect('stats.db')
+    cursor = conn.cursor()
+    cursor.execute('UPDATE signals SET status = ? WHERE id = ?', (status, signal_id))
     conn.commit()
     conn.close()
 
@@ -168,7 +178,6 @@ def analyze_forex_symbol(ticker_code, display_name):
     score_call = sum([h4_bull, h1_bull, m15_bull, oversold_m5 or price_at_lower_bb, h1_rsi_bull_ok, near_support, vol_surge, atr_sufficient])
     score_put = sum([h4_bear, h1_bear, m15_bear, overbought_m5 or price_at_upper_bb, h1_rsi_bear_ok, near_resistance, vol_surge, atr_sufficient])
 
-    # ВИМАГАЄМО ТІЛЬКИ 7/8 або 8/8
     required_score = 7
 
     if score_call >= required_score:
@@ -181,11 +190,34 @@ def analyze_forex_symbol(ticker_code, display_name):
         return None
 
     return {
-        "symbol": display_name, "type": signal_type,
+        "symbol": display_name, "ticker": ticker_code, "type": signal_type,
         "price": round(current_price, 5), "rsi_m5": rsi_m5, "rsi_h1": rsi_h1,
         "score": final_score, "max_score": 8,
         "atr": round(current_atr_percent, 4)
     }
+
+async def check_signal_result(application, signal_id, ticker, display_name, signal_type, entry_price):
+    await asyncio.sleep(900)
+    try:
+        df = fetch_forex_data(ticker, "5m", period="2d")
+        if df is not None and not df.empty:
+            exit_price = df['Close'].iloc[-1]
+            if "CALL" in signal_type:
+                is_win = exit_price > entry_price
+            else:
+                is_win = exit_price < entry_price
+                
+            status = "WIN" if is_win else "LOSS"
+            update_signal_status(signal_id, status)
+            
+            result_msg = (
+                f"📊 **РЕЗУЛЬТАТ СИГНАЛУ: {status}**\n\n"
+                f"🔹 **Пара:** `{display_name}`\n"
+                f"💰 **Вхід:** `{entry_price}` | **Вихід:** `{exit_price}`"
+            )
+            await application.bot.send_message(chat_id=CHAT_ID, text=result_msg, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Помилка перевірки результату: {e}")
 
 async def background_scanner(application):
     await asyncio.sleep(15)
@@ -204,7 +236,8 @@ async def background_scanner(application):
                             f"🎯 **Score:** {res['score']}/{res['max_score']}"
                         )
                         await application.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-                        save_signal(res['symbol'], res['type'], res['price'])
+                        signal_id = save_signal(res['symbol'], res['type'], res['price'])
+                        asyncio.create_task(check_signal_result(application, signal_id, ticker, res['symbol'], res['type'], res['price']))
                         await asyncio.sleep(60)
             await asyncio.sleep(300)
         except Exception as e:
@@ -218,7 +251,7 @@ def main_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Бот налаштований на пошук топ-сигналів (7/8 та 8/8)!", reply_markup=main_keyboard())
+    await update.message.reply_text("👋 Бот працює без NZD пар (тільки топ 7/8 та 8/8)!", reply_markup=main_keyboard())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
