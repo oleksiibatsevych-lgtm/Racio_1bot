@@ -11,6 +11,7 @@ from flask import Flask, request
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# ==================== НАЛАШТУВАННЯ ====================
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
 CHAT_ID = 859749941
 
@@ -77,20 +78,39 @@ def fetch_forex_data(ticker, interval, period="30d"):
     except:
         return None
 
+def calculate_atr(df, period=14):
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+    
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    
+    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    
+    # Беремо ATR відносно ціни, щоб нормалізувати для різних пар
+    atr_percent = (atr / df['Close'].iloc[-1]) * 100
+    return atr_percent.iloc[-1]
+
 def analyze_forex_symbol(ticker_code, display_name):
+    # Завантажуємо дані з меншим періодом для стабільності
     df_m5_raw = fetch_forex_data(ticker_code, "5m", period="10d")
     df_m15 = fetch_forex_data(ticker_code, "15m", period="15d")
-    df_h1 = fetch_forex_data(ticker_code, "1h", period="30d")
-    df_h4_raw = fetch_forex_data(ticker_code, "1h", period="60d")
+    df_h1_raw = fetch_forex_data(ticker_code, "1h", period="30d")
+    df_h4_raw = fetch_forex_data(ticker_code, "1h", period="60d") # Використовуємо 1h для resample в 4h
     
-    if df_m5_raw is None or df_m15 is None or df_h1 is None or df_h4_raw is None:
+    if df_m5_raw is None or df_m15 is None or df_h1_raw is None or df_h4_raw is None:
         return None
         
     df_m5 = df_m5_raw.tail(500)
+    df_h1 = df_h1_raw.tail(200)
 
     if len(df_m5) < 50 or len(df_m15) < 50 or len(df_h1) < 50:
         return None
 
+    # Resample в H4
     df_h4 = df_h4_raw.resample('4h').agg({
         'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
     }).dropna()
@@ -99,6 +119,8 @@ def analyze_forex_symbol(ticker_code, display_name):
         return None
 
     current_price = df_m5['Close'].iloc[-1]
+    
+    # 1. ТРЕНДИ СТАРШИХ ТАЙМФРЕЙМІВ (без змін)
     ema50_h4 = df_h4['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     h4_bull = current_price > ema50_h4
     h4_bear = current_price < ema50_h4
@@ -111,35 +133,74 @@ def analyze_forex_symbol(ticker_code, display_name):
     m15_bull = current_price > ema50_m15
     m15_bear = current_price < ema50_m15
 
-    delta = df_m5['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    rsi = round((100 - (100 / (1 + rs))).iloc[-1], 1)
+    # 2. ФІЛЬТР ВОЛАТИЛЬНОСТІ (ATR)
+    # Розраховуємо ATR відносно поточної ціни (у відсотках)
+    current_atr_percent = calculate_atr(df_m5)
+    # Встановлюємо мінімальний поріг волатильності (значення підбирається емпірично, наприклад 0.05%)
+    min_required_atr = 0.06
+    atr_sufficient = current_atr_percent >= min_required_atr
+    
+    # 3. RSI НА M5 (ТОЧКА ВХОДУ) (без змін)
+    delta_m5 = df_m5['Close'].diff()
+    gain_m5 = (delta_m5.where(delta_m5 > 0, 0)).rolling(window=14).mean()
+    loss_m5 = (-delta_m5.where(delta_m5 < 0, 0)).rolling(window=14).mean()
+    rs_m5 = gain_m5 / loss_m5
+    rsi_m5 = round((100 - (100 / (1 + rs_m5))).iloc[-1], 1)
+    oversold_m5 = rsi_m5 <= 30
+    overbought_m5 = rsi_m5 >= 70
 
+    # 4. RSI НА H1 (ФІЛЬТР ТРЕНДУ) (ДОДАНО)
+    delta_h1 = df_h1['Close'].diff()
+    gain_h1 = (delta_h1.where(delta_h1 > 0, 0)).rolling(window=14).mean()
+    loss_h1 = (-delta_h1.where(delta_h1 < 0, 0)).rolling(window=14).mean()
+    rs_h1 = gain_h1 / loss_h1
+    rsi_h1 = round((100 - (100 / (1 + rs_h1))).iloc[-1], 1)
+    
+    # Фільтр: RSI H1 не повинен бути перекуплений, якщо ми купуємо, і навпаки
+    h1_rsi_bull_ok = rsi_h1 < 60
+    h1_rsi_bear_ok = rsi_h1 > 40
+
+    # 5. Bollinger Bands (M5) (без змін)
     sma20 = df_m5['Close'].rolling(20).mean().iloc[-1]
     std20 = df_m5['Close'].rolling(20).std().iloc[-1]
     upper_bb = sma20 + (2 * std20)
     lower_bb = sma20 - (2 * std20)
+    price_at_lower_bb = current_price <= lower_bb
+    price_at_upper_bb = current_price >= upper_bb
 
+    # 6. Об'єм (без змін)
     vol_ma = df_m5['Volume'].rolling(20).mean().iloc[-1]
     vol_surge = df_m5['Volume'].iloc[-1] >= vol_ma if vol_ma > 0 else True
 
+    # 7. Рівні (без змін)
     min_support = df_m5['Low'].tail(500).min()
     max_resistance = df_m5['High'].tail(500).max()
     near_support = abs(current_price - min_support) / current_price <= 0.003
     near_resistance = abs(current_price - max_resistance) / current_price <= 0.003
 
-    score_call = sum([h4_bull, h1_bull, m15_bull, rsi <= 25 or current_price <= lower_bb, near_support, vol_surge])
-    score_put = sum([h4_bear, h1_bear, m15_bear, rsi >= 75 or current_price >= upper_bb, near_resistance, vol_surge])
+    # ПІДРАХУНОК БАЛІВ (Score)
+    # Умови CALL (ВГОРУ): Тренд H4+H1+M15 + M5 перепроданий + H1 RSI ок + Підтримка + Об'єм + Волатильність
+    score_call = sum([h4_bull, h1_bull, m15_bull, oversold_m5 or price_at_lower_bb, h1_rsi_bull_ok, near_support, vol_surge, atr_sufficient])
+    # Умови PUT (ВНИЗ): Тренд H4+H1+M15 + M5 перекуплений + H1 RSI ок + Опір + Об'єм + Волатильність
+    score_put = sum([h4_bear, h1_bear, m15_bear, overbought_m5 or price_at_upper_bb, h1_rsi_bear_ok, near_resistance, vol_surge, atr_sufficient])
 
-    max_score = max(score_call, score_put)
-    signal_type = "CALL (ВГОРУ)" if score_call >= score_put else "PUT (ВНИЗ)"
+    # Оновлений поріг: Тепер потрібно набрати 6 з 8 балів замість 5
+    required_score = 6
+
+    if score_call >= required_score:
+        signal_type = "CALL (ВГОРУ)"
+        final_score = score_call
+    elif score_put >= required_score:
+        signal_type = "PUT (ВНИЗ)"
+        final_score = score_put
+    else:
+        return None
 
     return {
         "symbol": display_name, "type": signal_type,
-        "price": round(current_price, 5), "rsi": rsi,
-        "score": max_score, "full_signal": max_score >= 5
+        "price": round(current_price, 5), "rsi_m5": rsi_m5, "rsi_h1": rsi_h1,
+        "score": final_score, "max_score": 8,
+        "atr": round(current_atr_percent, 4)
     }
 
 async def background_scanner(application):
@@ -149,18 +210,19 @@ async def background_scanner(application):
             if not is_night_time():
                 for ticker, name in SYMBOLS.items():
                     res = analyze_forex_symbol(ticker, name)
-                    if res and res["full_signal"]:
+                    if res: # Якщо res не None, значить full_signal підтверджено
                         msg = (
-                            f"🚀 **АВТО-СИГНАЛ (H1/H4 Trend): {res['type']}**\n\n"
+                            f"🚀 **АВТО-СИГНАЛ: {res['type']}**\n\n"
                             f"🔹 **Пара:** `{res['symbol']}`\n"
                             f"💰 **Ціна входу:** `{res['price']}`\n"
-                            f"⏳ **Експірація:** `10–15 хвилин`\n\n"
-                            f"🎯 **Мультитаймфрейм підтверджено! ✅**"
+                            f"📊 **RSI (M5):** {res['rsi_m5']} | **RSI (H1):** {res['rsi_h1']}\n"
+                            f"📏 **ATR (Volat.):** {res['atr']}%\n"
+                            f"🎯 **Score:** {res['score']}/{res['max_score']}"
                         )
                         await application.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
                         save_signal(res['symbol'], res['type'], res['price'])
-                        await asyncio.sleep(60)
-            await asyncio.sleep(300)
+                        await asyncio.sleep(60) # Пауза між сигналами
+            await asyncio.sleep(300) # Загальна пауза сканера
         except Exception as e:
             print(f"Помилка сканера: {e}")
             await asyncio.sleep(60)
@@ -201,28 +263,3 @@ def home():
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
-    json_data = request.get_json(force=True)
-    update = Update.de_json(json_data, application.bot)
-    
-    # Використовуємо коректний цикл подій для обробки вебхука в Flask
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.initialize())
-    loop.run_until_complete(application.process_update(update))
-    return 'ok'
-
-def run_scanner():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(background_scanner(application))
-
-if __name__ == '__main__':
-    init_db()
-    
-    webhook_url = f"https://racio-1bot.onrender.com/{BOT_TOKEN}"
-    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
-    
-    t = threading.Thread(target=run_scanner, daemon=True)
-    t.start()
-    
-    app.run(host='0.0.0.0', port=10000)
