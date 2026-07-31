@@ -10,7 +10,6 @@ from flask import Flask, request
 from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ==================== НАЛАШТУВАННЯ ====================
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
 CHAT_ID = 859749941
 
@@ -73,8 +72,7 @@ def is_night_time():
 def fetch_forex_data(ticker, interval, period="5d"):
     try:
         if interval == "5m":
-            # Збільшуємо період для завантаження 2000 свічок на таймфреймі 5m
-            period = "60d"
+            period = "30d"  # Оптимальний період для уникнення таймаутів
         elif interval in ["1h", "60m", "1d"]:
             period = "60d"
         data = yf.Ticker(ticker).history(period=period, interval=interval)
@@ -91,8 +89,7 @@ def analyze_forex_symbol(ticker_code, display_name):
     if df_m5_raw is None or df_m15 is None or df_h1 is None or df_h4_raw is None:
         return None
         
-    # Беремо останні 2000 свічок для аналізу на M5
-    df_m5 = df_m5_raw.tail(2000)
+    df_m5 = df_m5_raw.tail(500)
 
     if len(df_m5) < 50 or len(df_m15) < 50 or len(df_h1) < 50:
         return None
@@ -131,9 +128,8 @@ def analyze_forex_symbol(ticker_code, display_name):
     vol_ma = df_m5['Volume'].rolling(20).mean().iloc[-1]
     vol_surge = df_m5['Volume'].iloc[-1] >= vol_ma if vol_ma > 0 else True
 
-    # Рівні підтримки та опору тепер розраховуються на глибині до 2000 свічок
-    min_support = df_m5['Low'].tail(2000).min()
-    max_resistance = df_m5['High'].tail(2000).max()
+    min_support = df_m5['Low'].tail(500).min()
+    max_resistance = df_m5['High'].tail(500).max()
     near_support = abs(current_price - min_support) / current_price <= 0.003
     near_resistance = abs(current_price - max_resistance) / current_price <= 0.003
 
@@ -189,7 +185,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_night_time():
             await update.message.reply_text("🌙 Зараз нічний час (22:00–08:00). Ручне сканування заблоковано.")
             return
-        await update.message.reply_text("🔎 Сканую 13 пар (глибина 2000 свічок)...")
+        await update.message.reply_text("🔎 Сканую 13 пар...")
         
         perfect_signals = []
         for ticker, name in SYMBOLS.items():
@@ -214,7 +210,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t, w, l, wr = get_stats(None)
         await update.message.reply_text(f"♾ За весь час: Всього: {t} | Win Rate: {wr:.1f}%")
 
-# Ініціалізація додатку Telegram та Flask
 app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
 
