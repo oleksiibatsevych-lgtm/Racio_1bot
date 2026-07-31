@@ -168,7 +168,8 @@ def analyze_forex_symbol(ticker_code, display_name):
     score_call = sum([h4_bull, h1_bull, m15_bull, oversold_m5 or price_at_lower_bb, h1_rsi_bull_ok, near_support, vol_surge, atr_sufficient])
     score_put = sum([h4_bear, h1_bear, m15_bear, overbought_m5 or price_at_upper_bb, h1_rsi_bear_ok, near_resistance, vol_surge, atr_sufficient])
 
-    required_score = 6
+    # ВИМАГАЄМО ТІЛЬКИ 7/8 або 8/8
+    required_score = 7
 
     if score_call >= required_score:
         signal_type = "CALL (ВГОРУ)"
@@ -195,7 +196,7 @@ async def background_scanner(application):
                     res = analyze_forex_symbol(ticker, name)
                     if res:
                         msg = (
-                            f"🚀 **АВТО-СИГНАЛ: {res['type']}**\n\n"
+                            f"🚀 **ТОП-СИГНАЛ: {res['type']}**\n\n"
                             f"🔹 **Пара:** `{res['symbol']}`\n"
                             f"💰 **Ціна входу:** `{res['price']}`\n"
                             f"📊 **RSI (M5):** {res['rsi_m5']} | **RSI (H1):** {res['rsi_h1']}\n"
@@ -217,22 +218,22 @@ def main_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Автоматичного бота запущено у хмарі!", reply_markup=main_keyboard())
+    await update.message.reply_text("👋 Бот налаштований на пошук топ-сигналів (7/8 та 8/8)!", reply_markup=main_keyboard())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if not text:
         return
 
-    if text == "📅 День":
+    if "День" in text:
         t, w, l, wr = get_stats(1)
-        await update.message.reply_text(f"📅 День: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif "🗓 Тиждень" in text:
+        await update.message.reply_text(f"📅 Статистика за день:\nВсього сигналів: {t}\nВиграші: {w} | Програші: {l}\nWin Rate: {wr:.1f}%")
+    elif "Тиждень" in text:
         t, w, l, wr = get_stats(7)
-        await update.message.reply_text(f"🗓 Тиждень: Всього: {t} | Win Rate: {wr:.1f}%")
-    elif "♾ Увесь час" in text:
+        await update.message.reply_text(f"🗓 Статистика за тиждень:\nВсього сигналів: {t}\nВиграші: {w} | Програші: {l}\nWin Rate: {wr:.1f}%")
+    elif "Увесь час" in text or "Увесь" in text:
         t, w, l, wr = get_stats(None)
-        await update.message.reply_text(f"♾ За весь час: Всього: {t} | Win Rate: {wr:.1f}%")
+        await update.message.reply_text(f"♾ Статистика за весь час:\nВсього сигналів: {t}\nВиграші: {w} | Програші: {l}\nWin Rate: {wr:.1f}%")
 
 app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
