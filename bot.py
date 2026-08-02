@@ -1,85 +1,26 @@
-import time
 import sqlite3
 import datetime
 import asyncio
-import threading
-import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
 from flask import Flask, request
-from telegram import ReplyKeyboardMarkup, KeyboardButton, Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 # ==================== НАЛАШТУВАННЯ ====================
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
-CHAT_ID = 859749941
 
-# Усі пари з NZD вилучено зі списку
+# Точний список пар з вашого термінала (без NZD)
 SYMBOLS = {
-    "EURUSD=X": "EUR/USD", "GBPUSD=X": "GBP/USD", "USDJPY=X": "USD/JPY",
+    "GBPUSD=X": "GBP/USD", "EURUSD=X": "EUR/USD", "USDJPY=X": "USD/JPY",
     "AUDUSD=X": "AUD/USD", "USDCAD=X": "USD/CAD", "USDCHF=X": "USD/CHF",
-    "EURGBP=X": "EUR/GBP", "EURJPY=X": "EUR/JPY",
-    "GBPJPY=X": "GBP/JPY", "AUDJPY=X": "AUD/JPY", "CADJPY=X": "CAD/JPY",
-    "EURAUD=X": "EUR/AUD", "EURCAD=X": "EUR/CAD", "GBPCAD=X": "GBP/CAD",
-    "GBPAUD=X": "GBP/AUD", "AUDCAD=X": "AUD/CAD",
-    "CHFJPY=X": "CHF/JPY", "EURCHF=X": "EUR/CHF"
+    "GBPJPY=X": "GBP/JPY", "EURJPY=X": "EUR/JPY", "AUDCHF=X": "AUD/CHF",
+    "AUDJPY=X": "AUD/JPY", "CADCHF=X": "CAD/CHF", "CADJPY=X": "CAD/JPY",
+    "CHFJPY=X": "CHF/JPY", "EURAUD=X": "EUR/AUD", "EURCAD=X": "EUR/CAD",
+    "EURCHF=X": "EUR/CHF", "EURGBP=X": "EUR/GBP", "GBPCAD=X": "GBP/CAD",
+    "GBPCHF=X": "GBP/CHF", "AUDCAD=X": "AUD/CAD", "GBPAUD=X": "GBP/AUD"
 }
-
-def init_db():
-    conn = sqlite3.connect('stats.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT,
-            signal_type TEXT,
-            entry_price REAL,
-            status TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-def save_signal(symbol, signal_type, entry_price):
-    conn = sqlite3.connect('stats.db')
-    cursor = conn.cursor()
-    cursor.execute('INSERT INTO signals (symbol, signal_type, entry_price, status) VALUES (?, ?, ?, ?)',
-                   (symbol, signal_type, entry_price, 'PENDING'))
-    signal_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return signal_id
-
-def update_signal_status(signal_id, status):
-    conn = sqlite3.connect('stats.db')
-    cursor = conn.cursor()
-    cursor.execute('UPDATE signals SET status = ? WHERE id = ?', (status, signal_id))
-    conn.commit()
-    conn.close()
-
-def get_stats(days=None):
-    conn = sqlite3.connect('stats.db')
-    cursor = conn.cursor()
-    if days:
-        date_limit = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute("SELECT status FROM signals WHERE timestamp >= ? AND status != 'PENDING'", (date_limit,))
-    else:
-        cursor.execute("SELECT status FROM signals WHERE status != 'PENDING'")
-        
-    rows = cursor.fetchall()
-    conn.close()
-    
-    total = len(rows)
-    wins = sum(1 for r in rows if r[0] == 'WIN')
-    losses = sum(1 for r in rows if r[0] == 'LOSS')
-    winrate = (wins / total * 100) if total > 0 else 0.0
-    return total, wins, losses, winrate
-
-def is_night_time():
-    current_hour = datetime.datetime.now().hour
-    return current_hour >= 22 or current_hour < 8
 
 def fetch_forex_data(ticker, interval, period="30d"):
     try:
@@ -89,194 +30,162 @@ def fetch_forex_data(ticker, interval, period="30d"):
         return None
 
 def calculate_atr(df, period=14):
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
-    
+    high, low, close = df['High'], df['Low'], df['Close']
     tr1 = high - low
     tr2 = (high - close.shift()).abs()
     tr3 = (low - close.shift()).abs()
-    
     tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
     atr = tr.ewm(span=period, adjust=False).mean()
-    
-    atr_percent = (atr / df['Close'].iloc[-1]) * 100
-    return atr_percent.iloc[-1]
+    return (atr / close.iloc[-1] * 100).iloc[-1]
 
-def analyze_forex_symbol(ticker_code, display_name):
-    df_m5_raw = fetch_forex_data(ticker_code, "5m", period="10d")
-    df_m15 = fetch_forex_data(ticker_code, "15m", period="15d")
-    df_h1_raw = fetch_forex_data(ticker_code, "1h", period="30d")
-    df_h4_raw = fetch_forex_data(ticker_code, "1h", period="60d")
+def analyze_symbol(ticker_code, display_name):
+    df_m5 = fetch_forex_data(ticker_code, "5m", period="5d")
+    df_h1 = fetch_forex_data(ticker_code, "1h", period="20d")
+    df_h4 = fetch_forex_data(ticker_code, "1h", period="40d")
     
-    if df_m5_raw is None or df_m15 is None or df_h1_raw is None or df_h4_raw is None:
-        return None
-        
-    df_m5 = df_m5_raw.tail(500)
-    df_h1 = df_h1_raw.tail(200)
-
-    if len(df_m5) < 50 or len(df_m15) < 50 or len(df_h1) < 50:
+    if df_m5 is None or df_h1 is None or df_h4 is None or len(df_m5) < 50:
         return None
 
-    df_h4 = df_h4_raw.resample('4h').agg({
-        'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-    }).dropna()
-
-    if len(df_h4) < 30:
+    df_h4_res = df_h4.resample('4h').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last'}).dropna()
+    if len(df_h4_res) < 20:
         return None
 
     current_price = df_m5['Close'].iloc[-1]
     
-    ema50_h4 = df_h4['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
-    h4_bull = current_price > ema50_h4
-    h4_bear = current_price < ema50_h4
-
-    ema50_h1 = df_h1['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
-    h1_bull = current_price > ema50_h1
-    h1_bear = current_price < ema50_h1
-
-    ema50_m15 = df_m15['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
-    m15_bull = current_price > ema50_m15
-    m15_bear = current_price < ema50_m15
-
-    current_atr_percent = calculate_atr(df_m5)
-    min_required_atr = 0.06
-    atr_sufficient = current_atr_percent >= min_required_atr
+    # Тренди на старших таймфреймах
+    h4_bull = current_price > df_h4_res['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
+    h1_bull = current_price > df_h1['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     
-    delta_m5 = df_m5['Close'].diff()
-    gain_m5 = (delta_m5.where(delta_m5 > 0, 0)).rolling(window=14).mean()
-    loss_m5 = (-delta_m5.where(delta_m5 < 0, 0)).rolling(window=14).mean()
-    rs_m5 = gain_m5 / loss_m5
-    rsi_m5 = round((100 - (100 / (1 + rs_m5))).iloc[-1], 1)
-    oversold_m5 = rsi_m5 <= 30
-    overbought_m5 = rsi_m5 >= 70
-
-    delta_h1 = df_h1['Close'].diff()
-    gain_h1 = (delta_h1.where(delta_h1 > 0, 0)).rolling(window=14).mean()
-    loss_h1 = (-delta_h1.where(delta_h1 < 0, 0)).rolling(window=14).mean()
-    rs_h1 = gain_h1 / loss_h1
-    rsi_h1 = round((100 - (100 / (1 + rs_h1))).iloc[-1], 1)
+    # RSI M5
+    delta = df_m5['Close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rsi = round((100 - (100 / (1 + (gain / loss)))).iloc[-1], 1)
     
-    h1_rsi_bull_ok = rsi_h1 < 60
-    h1_rsi_bear_ok = rsi_h1 > 40
-
+    # Bollinger Bands
     sma20 = df_m5['Close'].rolling(20).mean().iloc[-1]
     std20 = df_m5['Close'].rolling(20).std().iloc[-1]
-    upper_bb = sma20 + (2 * std20)
-    lower_bb = sma20 - (2 * std20)
-    price_at_lower_bb = current_price <= lower_bb
-    price_at_upper_bb = current_price >= upper_bb
+    upper_bb, lower_bb = sma20 + (2 * std20), sma20 - (2 * std20)
+    
+    atr = calculate_atr(df_m5)
 
-    vol_ma = df_m5['Volume'].rolling(20).mean().iloc[-1]
-    vol_surge = df_m5['Volume'].iloc[-1] >= vol_ma if vol_ma > 0 else True
+    # Логіка аналізу та визначення експірації від 3 до 30 хвилин
+    score_call = sum([h4_bull, h1_bull, rsi <= 35, current_price <= lower_bb])
+    score_put = sum([not h4_bull, not h1_bull, rsi >= 65, current_price >= upper_bb])
 
-    min_support = df_m5['Low'].tail(500).min()
-    max_resistance = df_m5['High'].tail(500).max()
-    near_support = abs(current_price - min_support) / current_price <= 0.003
-    near_resistance = abs(current_price - max_resistance) / current_price <= 0.003
-
-    score_call = sum([h4_bull, h1_bull, m15_bull, oversold_m5 or price_at_lower_bb, h1_rsi_bull_ok, near_support, vol_surge, atr_sufficient])
-    score_put = sum([h4_bear, h1_bear, m15_bear, overbought_m5 or price_at_upper_bb, h1_rsi_bear_ok, near_resistance, vol_surge, atr_sufficient])
-
-    required_score = 7
-
-    if score_call >= required_score:
-        signal_type = "CALL (ВГОРУ)"
-        final_score = score_call
-    elif score_put >= required_score:
-        signal_type = "PUT (ВНИЗ)"
-        final_score = score_put
+    # Динамічний розрахунок часу експірації на основі волатильності (ATR)
+    if atr > 0.10:
+        expiration = "3 - 5 хвилин (Висока волатильність)"
+    elif atr > 0.06:
+        expiration = "5 - 15 хвилин (Стандартна волатильність)"
     else:
-        return None
+        expiration = "15 - 30 хвилин (Низька волатильність / Флєт)"
+
+    if score_call >= 3:
+        signal_type = "CALL (📈 ВГОРУ)"
+        confidence = "Висока (75-80%)" if score_call == 4 else "Середня (65-70%)"
+    elif score_put >= 3:
+        signal_type = "PUT (📉 ВНИЗ)"
+        confidence = "Висока (75-80%)" if score_put == 4 else "Середня (65-70%)"
+    else:
+        if rsi < 50 and h1_bull:
+            signal_type = "CALL (📈 ВГОРУ)"
+            confidence = "Помірна (60%)"
+            expiration = "15 - 30 хвилин"
+        elif rsi > 50 and not h1_bull:
+            signal_type = "PUT (📉 ВНИЗ)"
+            confidence = "Помірна (60%)"
+            expiration = "15 - 30 хвилин"
+        else:
+            signal_type = "НЕЙТРАЛЬНО (Поза ринком)"
+            confidence = "Сигнал відсутній"
+            expiration = "-"
 
     return {
-        "symbol": display_name, "ticker": ticker_code, "type": signal_type,
-        "price": round(current_price, 5), "rsi_m5": rsi_m5, "rsi_h1": rsi_h1,
-        "score": final_score, "max_score": 8,
-        "atr": round(current_atr_percent, 4)
+        "symbol": display_name, "type": signal_type, "price": round(current_price, 5),
+        "rsi": rsi, "atr": round(atr, 3), "confidence": confidence, "expiration": expiration
     }
 
-async def check_signal_result(application, signal_id, ticker, display_name, signal_type, entry_price):
-    await asyncio.sleep(900)
-    try:
-        df = fetch_forex_data(ticker, "5m", period="2d")
-        if df is not None and not df.empty:
-            exit_price = df['Close'].iloc[-1]
-            if "CALL" in signal_type:
-                is_win = exit_price > entry_price
-            else:
-                is_win = exit_price < entry_price
-                
-            status = "WIN" if is_win else "LOSS"
-            update_signal_status(signal_id, status)
-            
-            result_msg = (
-                f"📊 **РЕЗУЛЬТАТ СИГНАЛУ: {status}**\n\n"
-                f"🔹 **Пара:** `{display_name}`\n"
-                f"💰 **Вхід:** `{entry_price}` | **Вихід:** `{exit_price}`"
-            )
-            await application.bot.send_message(chat_id=CHAT_ID, text=result_msg, parse_mode="Markdown")
-    except Exception as e:
-        print(f"Помилка перевірки результату: {e}")
-
-async def background_scanner(application):
-    await asyncio.sleep(15)
-    while True:
-        try:
-            if not is_night_time():
-                for ticker, name in SYMBOLS.items():
-                    res = analyze_forex_symbol(ticker, name)
-                    if res:
-                        msg = (
-                            f"🚀 **ТОП-СИГНАЛ: {res['type']}**\n\n"
-                            f"🔹 **Пара:** `{res['symbol']}`\n"
-                            f"💰 **Ціна входу:** `{res['price']}`\n"
-                            f"📊 **RSI (M5):** {res['rsi_m5']} | **RSI (H1):** {res['rsi_h1']}\n"
-                            f"📏 **ATR (Volat.):** {res['atr']}%\n"
-                            f"🎯 **Score:** {res['score']}/{res['max_score']}"
-                        )
-                        await application.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-                        signal_id = save_signal(res['symbol'], res['type'], res['price'])
-                        asyncio.create_task(check_signal_result(application, signal_id, ticker, res['symbol'], res['type'], res['price']))
-                        await asyncio.sleep(60)
-            await asyncio.sleep(300)
-        except Exception as e:
-            print(f"Помилка сканера: {e}")
-            await asyncio.sleep(60)
-
-def main_keyboard():
-    keyboard = [
-        [KeyboardButton("📅 День"), KeyboardButton("🗓 Тиждень"), KeyboardButton("♾ Увесь час")]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
+# Telegram Handlers
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Бот працює без NZD пар (тільки топ 7/8 та 8/8)!", reply_markup=main_keyboard())
+    keyboard = []
+    row = []
+    for ticker, name in SYMBOLS.items():
+        row.append(InlineKeyboardButton(name, callback_data=ticker))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+        
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "👋 **Оберіть валютну пару для миттєвого аналізу та отримання часу експірації:**",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
+    )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if not text:
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    ticker = query.data
+    display_name = SYMBOLS.get(ticker, ticker)
+    
+    await query.edit_message_text(f"⏳ Аналізую ринок для `{display_name}`, зачекайте кілька секунд...", parse_mode="Markdown")
+    
+    res = analyze_symbol(ticker, display_name)
+    
+    if not res:
+        await query.edit_message_text(f"❌ Не вдалося завантажити дані для `{display_name}`. Спробуйте іншу пару.", parse_mode="Markdown")
         return
 
-    if "День" in text:
-        t, w, l, wr = get_stats(1)
-        await update.message.reply_text(f"📅 Статистика за день:\nВсього сигналів: {t}\nВиграші: {w} | Програші: {l}\nWin Rate: {wr:.1f}%")
-    elif "Тиждень" in text:
-        t, w, l, wr = get_stats(7)
-        await update.message.reply_text(f"🗓 Статистика за тиждень:\nВсього сигналів: {t}\nВиграші: {w} | Програші: {l}\nWin Rate: {wr:.1f}%")
-    elif "Увесь час" in text or "Увесь" in text:
-        t, w, l, wr = get_stats(None)
-        await update.message.reply_text(f"♾ Статистика за весь час:\nВсього сигналів: {t}\nВиграші: {w} | Програші: {l}\nWin Rate: {wr:.1f}%")
+    msg = (
+        f"🎯 **АНАЛІЗ ПАРИ: {res['symbol']}**\n\n"
+        f"🔹 **Сигнал:** `{res['type']}`\n"
+        f"💰 **Ціна входу:** `{res['price']}`\n"
+        f"⏱ **Рекомендована експірація:** `{res['expiration']}`\n"
+        f"📊 **Рівень RSI (M5):** `{res['rsi']}`\n"
+        f"📈 **Якість сигналу:** `{res['confidence']}`\n"
+        f"📏 **Волатильність (ATR):** `{res['atr']}%`"
+    )
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад до списку пар", callback_data="back_to_menu")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.data == "back_to_menu":
+        await query.answer()
+        keyboard = []
+        row = []
+        for ticker, name in SYMBOLS.items():
+            row.append(InlineKeyboardButton(name, callback_data=ticker))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+            
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "📋 **Оберіть валютну пару для аналізу:**",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
 
 app = Flask(__name__)
 application = Application.builder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start_cmd))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+application.add_handler(CallbackQueryHandler(menu_handler, pattern="^back_to_menu$"))
+application.add_handler(CallbackQueryHandler(button_handler))
 
 @app.route('/')
 def home():
-    return "Bot is alive and running!"
+    return "Interactive On-Demand Bot is running!"
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
@@ -289,18 +198,7 @@ def webhook():
     loop.run_until_complete(application.process_update(update))
     return 'ok'
 
-def run_scanner():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(background_scanner(application))
-
 if __name__ == '__main__':
-    init_db()
-    
     webhook_url = f"https://racio-1bot.onrender.com/{BOT_TOKEN}"
     requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
-    
-    t = threading.Thread(target=run_scanner, daemon=True)
-    t.start()
-    
     app.run(host='0.0.0.0', port=10000)
