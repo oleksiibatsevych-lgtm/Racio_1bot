@@ -1,6 +1,7 @@
 import sqlite3
 import datetime
 import asyncio
+import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -52,28 +53,23 @@ def analyze_symbol(ticker_code, display_name):
 
     current_price = df_m5['Close'].iloc[-1]
     
-    # Тренди на старших таймфреймах
     h4_bull = current_price > df_h4_res['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     h1_bull = current_price > df_h1['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     
-    # RSI M5
     delta = df_m5['Close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rsi = round((100 - (100 / (1 + (gain / loss)))).iloc[-1], 1)
     
-    # Bollinger Bands
     sma20 = df_m5['Close'].rolling(20).mean().iloc[-1]
     std20 = df_m5['Close'].rolling(20).std().iloc[-1]
     upper_bb, lower_bb = sma20 + (2 * std20), sma20 - (2 * std20)
     
     atr = calculate_atr(df_m5)
 
-    # Логіка аналізу та визначення експірації від 3 до 30 хвилин
     score_call = sum([h4_bull, h1_bull, rsi <= 35, current_price <= lower_bb])
     score_put = sum([not h4_bull, not h1_bull, rsi >= 65, current_price >= upper_bb])
 
-    # Динамічний розрахунок часу експірації на основі волатильності (ATR)
     if atr > 0.10:
         expiration = "3 - 5 хвилин (Висока волатильність)"
     elif atr > 0.06:
@@ -106,7 +102,6 @@ def analyze_symbol(ticker_code, display_name):
         "rsi": rsi, "atr": round(atr, 3), "confidence": confidence, "expiration": expiration
     }
 
-# Telegram Handlers
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
     row = []
@@ -120,7 +115,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "👋 **Оберіть валютну пару для миттєвого аналізу та отримання часу експірації:**",
+        "👋 **Оберіть валютну пару для міттєвого аналізу та отримання часу експірації:**",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
