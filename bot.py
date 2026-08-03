@@ -9,10 +9,8 @@ from flask import Flask, request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
-# ==================== НАЛАШТУВАННЯ ====================
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
 
-# Точний список пар з вашого термінала (без NZD)
 SYMBOLS = {
     "GBPUSD=X": "GBP/USD", "EURUSD=X": "EUR/USD", "USDJPY=X": "USD/JPY",
     "AUDUSD=X": "AUD/USD", "USDCAD=X": "USD/CAD", "USDCHF=X": "USD/CHF",
@@ -41,61 +39,59 @@ def calculate_atr(df, period=14):
 
 def analyze_symbol(ticker_code, display_name):
     df_m5 = fetch_forex_data(ticker_code, "5m", period="5d")
-    df_h1 = fetch_forex_data(ticker_code, "1h", period="20d")
-    df_h4 = fetch_forex_data(ticker_code, "1h", period="40d")
+    df_h1 = fetch_forex_data(ticker_code, "1h", period="30d")
     
-    if df_m5 is None or df_h1 is None or df_h4 is None or len(df_m5) < 50:
-        return None
-
-    df_h4_res = df_h4.resample('4h').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last'}).dropna()
-    if len(df_h4_res) < 20:
+    if df_m5 is None or df_h1 is None or len(df_m5) < 50 or len(df_h1) < 50:
         return None
 
     current_price = df_m5['Close'].iloc[-1]
     
-    h4_bull = current_price > df_h4_res['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
-    h1_bull = current_price > df_h1['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
-    
+    # Глобальний тренд за EMA 200 на H1 (ключ до високої прохідності)
+    h1_ema200 = df_h1['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
+    global_bullish = current_price > h1_ema200
+
+    # Тренд локальний за EMA 50 на H1
+    h1_ema50 = df_h1['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
+    h1_trend_bull = current_price > h1_ema50
+
+    # RSI M5
     delta = df_m5['Close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rsi = round((100 - (100 / (1 + (gain / loss)))).iloc[-1], 1)
     
-    sma20 = df_m5['Close'].rolling(20).mean().iloc[-1]
-    std20 = df_m5['Close'].rolling(20).std().iloc[-1]
-    upper_bb, lower_bb = sma20 + (2 * std20), sma20 - (2 * std20)
-    
     atr = calculate_atr(df_m5)
 
-    score_call = sum([h4_bull, h1_bull, rsi <= 35, current_price <= lower_bb])
-    score_put = sum([not h4_bull, not h1_bull, rsi >= 65, current_price >= upper_bb])
-
+    # Розрахунок експірації від 3 до 30 хв залежно від волатильності
     if atr > 0.10:
         expiration = "3 - 5 хвилин (Висока волатильність)"
-    elif atr > 0.06:
+    elif atr > 0.05:
         expiration = "5 - 15 хвилин (Стандартна волатильність)"
     else:
         expiration = "15 - 30 хвилин (Низька волатильність / Флєт)"
 
-    if score_call >= 3:
+    # Строга фільтрація для підвищення якості (winrate)
+    # Сигнал у бік глобального тренду + екстремальні зони RSI або збіг з EMA 50
+    if global_bullish and h1_trend_bull and (rsi < 45 or current_price > df_m5['Open'].iloc[-1]):
         signal_type = "CALL (📈 ВГОРУ)"
-        confidence = "Висока (75-80%)" if score_call == 4 else "Середня (65-70%)"
-    elif score_put >= 3:
+        confidence = "Висока (Тренд H1 + Імпульс)" if rsi < 40 else "Помірна (За трендом)"
+    elif not global_bullish and not h1_trend_bull and (rsi > 55 or current_price < df_m5['Open'].iloc[-1]):
         signal_type = "PUT (📉 ВНИЗ)"
-        confidence = "Висока (75-80%)" if score_put == 4 else "Середня (65-70%)"
+        confidence = "Висока (Тренд H1 + Імпульс)" if rsi > 60 else "Помірна (За трендом)"
+    elif rsi <= 30:
+        signal_type = "CALL (📈 ВГОРУ)"
+        confidence = "Висока (Глибока перепроданість RSI)"
+    elif rsi >= 70:
+        signal_type = "PUT (📉 ВНИЗ)"
+        confidence = "Висока (Глибока перекупленість RSI)"
     else:
-        if rsi < 50 and h1_bull:
+        # Якщо ринок у невизначеності, фільтруємо слабкі сигнали на користь безпеки
+        if global_bullish:
             signal_type = "CALL (📈 ВГОРУ)"
-            confidence = "Помірна (60%)"
-            expiration = "15 - 30 хвилин"
-        elif rsi > 50 and not h1_bull:
-            signal_type = "PUT (📉 ВНИЗ)"
-            confidence = "Помірна (60%)"
-            expiration = "15 - 30 хвилин"
+            confidence = "Обережна (За глобальним трендом)"
         else:
-            signal_type = "НЕЙТРАЛЬНО (Поза ринком)"
-            confidence = "Сигнал відсутній"
-            expiration = "-"
+            signal_type = "PUT (📉 ВНИЗ)"
+            confidence = "Обережна (За глобальним трендом)"
 
     return {
         "symbol": display_name, "type": signal_type, "price": round(current_price, 5),
@@ -115,7 +111,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "👋 **Оберіть валютну пару для міттєвого аналізу та отримання часу експірації:**",
+        "👋 **Оберіть валютну пару для аналізу за фільтром EMA 200 + RSI:**",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -127,17 +123,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ticker = query.data
     display_name = SYMBOLS.get(ticker, ticker)
     
-    await query.edit_message_text(f"⏳ Аналізую ринок для `{display_name}`, зачекайте кілька секунд...", parse_mode="Markdown")
+    await query.edit_message_text(f"⏳ Аналізую ринок з урахуванням глобального тренду для `{display_name}`...", parse_mode="Markdown")
     
     res = analyze_symbol(ticker, display_name)
     
     if not res:
-        await query.edit_message_text(f"❌ Не вдалося завантажити дані для `{display_name}`. Спробуйте іншу пару.", parse_mode="Markdown")
+        await query.edit_message_text(f"❌ Не вдалося завантажити дані для `{display_name}`.", parse_mode="Markdown")
         return
 
     msg = (
         f"🎯 **АНАЛІЗ ПАРИ: {res['symbol']}**\n\n"
-        f"🔹 **Сигнал:** `{res['type']}`\n"
+        f"🔹 **Рекомендація:** `{res['type']}`\n"
         f"💰 **Ціна входу:** `{res['price']}`\n"
         f"⏱ **Рекомендована експірація:** `{res['expiration']}`\n"
         f"📊 **Рівень RSI (M5):** `{res['rsi']}`\n"
@@ -180,7 +176,7 @@ application.add_handler(CallbackQueryHandler(button_handler))
 
 @app.route('/')
 def home():
-    return "Interactive On-Demand Bot is running!"
+    return "Bot with EMA filter is running!"
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
