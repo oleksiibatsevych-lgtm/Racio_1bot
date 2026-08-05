@@ -37,6 +37,13 @@ def calculate_atr(df, period=14):
     atr = tr.ewm(span=period, adjust=False).mean()
     return (atr / close.iloc[-1] * 100).iloc[-1]
 
+def calculate_macd(df):
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    return macd_line.iloc[-1], signal_line.iloc[-1]
+
 def analyze_symbol(ticker_code, display_name):
     df_m5 = fetch_forex_data(ticker_code, "5m", period="5d")
     df_h1 = fetch_forex_data(ticker_code, "1h", period="30d")
@@ -46,13 +53,9 @@ def analyze_symbol(ticker_code, display_name):
 
     current_price = df_m5['Close'].iloc[-1]
     
-    # Глобальний тренд за EMA 200 на H1 (ключ до високої прохідності)
+    # Тренд H1 за EMA 200
     h1_ema200 = df_h1['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
     global_bullish = current_price > h1_ema200
-
-    # Тренд локальний за EMA 50 на H1
-    h1_ema50 = df_h1['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
-    h1_trend_bull = current_price > h1_ema50
 
     # RSI M5
     delta = df_m5['Close'].diff()
@@ -60,38 +63,43 @@ def analyze_symbol(ticker_code, display_name):
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rsi = round((100 - (100 / (1 + (gain / loss)))).iloc[-1], 1)
     
+    # MACD M5
+    macd_val, signal_val = calculate_macd(df_m5)
+    macd_bullish = macd_val > signal_val
+
     atr = calculate_atr(df_m5)
 
-    # Розрахунок експірації від 3 до 30 хв залежно від волатильності
-    if atr > 0.10:
-        expiration = "3 - 5 хвилин (Висока волатильність)"
-    elif atr > 0.05:
-        expiration = "5 - 15 хвилин (Стандартна волатильність)"
+    # Точний розрахунок часу експірації залежно від волатильності та тренду (від 3 до 30 хв)
+    if atr > 0.12:
+        expiration = "3 хвилини (Висока волатильність/Імпульс)"
+    elif atr > 0.08:
+        expiration = "5 хвилин (Динамічний рух)"
+    elif atr > 0.04:
+        expiration = "10 - 15 хвилин (Стандартний рух)"
     else:
-        expiration = "15 - 30 хвилин (Низька волатильність / Флєт)"
+        expiration = "20 - 30 хвилин (Низька волатильність / Флєт)"
 
-    # Строга фільтрація для підвищення якості (winrate)
-    # Сигнал у бік глобального тренду + екстремальні зони RSI або збіг з EMA 50
-    if global_bullish and h1_trend_bull and (rsi < 45 or current_price > df_m5['Open'].iloc[-1]):
+    # Комплексна логіка сигналів з використанням EMA, RSI та MACD для високої прохідності
+    if global_bullish and macd_bullish and rsi < 60:
         signal_type = "CALL (📈 ВГОРУ)"
-        confidence = "Висока (Тренд H1 + Імпульс)" if rsi < 40 else "Помірна (За трендом)"
-    elif not global_bullish and not h1_trend_bull and (rsi > 55 or current_price < df_m5['Open'].iloc[-1]):
+        confidence = "Висока (Тренд H1 + MACD + RSI)" if rsi < 45 else "Помірна (Тренд + MACD)"
+    elif not global_bullish and not macd_bullish and rsi > 40:
         signal_type = "PUT (📉 ВНИЗ)"
-        confidence = "Висока (Тренд H1 + Імпульс)" if rsi > 60 else "Помірна (За трендом)"
+        confidence = "Висока (Тренд H1 + MACD + RSI)" if rsi > 55 else "Помірна (Тренд + MACD)"
     elif rsi <= 30:
         signal_type = "CALL (📈 ВГОРУ)"
-        confidence = "Висока (Глибока перепроданість RSI)"
+        confidence = "Висока (Зона глибокої перепроданості RSI)"
     elif rsi >= 70:
         signal_type = "PUT (📉 ВНИЗ)"
-        confidence = "Висока (Глибока перекупленість RSI)"
+        confidence = "Висока (Зона глибокої перекупленості RSI)"
     else:
-        # Якщо ринок у невизначеності, фільтруємо слабкі сигнали на користь безпеки
-        if global_bullish:
+        # Страховка за поточним імпульсом MACD
+        if macd_bullish:
             signal_type = "CALL (📈 ВГОРУ)"
-            confidence = "Обережна (За глобальним трендом)"
+            confidence = "Обережна (За імпульсом MACD)"
         else:
             signal_type = "PUT (📉 ВНИЗ)"
-            confidence = "Обережна (За глобальним трендом)"
+            confidence = "Обережна (За імпульсом MACD)"
 
     return {
         "symbol": display_name, "type": signal_type, "price": round(current_price, 5),
@@ -111,7 +119,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "👋 **Оберіть валютну пару для аналізу за фільтром EMA 200 + RSI:**",
+        "👋 **Оберіть валютну пару для аналізу за системою (EMA + RSI + MACD):**",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -123,7 +131,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ticker = query.data
     display_name = SYMBOLS.get(ticker, ticker)
     
-    await query.edit_message_text(f"⏳ Аналізую ринок з урахуванням глобального тренду для `{display_name}`...", parse_mode="Markdown")
+    await query.edit_message_text(f"⏳ Аналізую ринок (EMA + RSI + MACD) для `{display_name}`...", parse_mode="Markdown")
     
     res = analyze_symbol(ticker, display_name)
     
@@ -176,7 +184,7 @@ application.add_handler(CallbackQueryHandler(button_handler))
 
 @app.route('/')
 def home():
-    return "Bot with EMA filter is running!"
+    return "Bot with MACD is running!"
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
