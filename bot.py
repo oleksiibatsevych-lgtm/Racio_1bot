@@ -66,6 +66,15 @@ def update_signal_status(signal_id, status):
     except Exception as e:
         print(f"Помилка оновлення статусу: {e}")
 
+# ==================== ДОПОМІЖНІ ФУНКЦІЇ ====================
+def format_minutes(n):
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} хвилина"
+    elif 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
+        return f"{n} хвилини"
+    else:
+        return f"{n} хвилин"
+
 # ==================== АНАЛІЗ РИНКУ ====================
 def fetch_forex_data(ticker, interval, period="30d"):
     try:
@@ -116,14 +125,12 @@ def analyze_symbol(ticker_code, display_name):
 
     atr = calculate_atr(df_m5)
 
-    if atr > 0.10 and vol_ratio > 1.3:
-        expiration = "3 хвилини (Сплеск об'єму + Імпульс)"
-    elif atr > 0.07 or vol_ratio > 1.1:
-        expiration = "5 хвилин (Активна фаза руху)"
-    elif atr > 0.04:
-        expiration = "10 - 15 хвилин (Стандартний робочий рух)"
-    else:
-        expiration = "20 - 30 хвилин (Низький об'єм / Флєт)"
+    # Точний розрахунок часу експірації від 3 до 17 хвилин
+    score = (atr / 0.10) * 0.5 + (min(vol_ratio, 2.0) / 2.0) * 0.5
+    score = float(np.clip(score, 0.0, 1.0))
+    exact_mins = int(round(17 - score * (17 - 3)))
+    exact_mins = max(3, min(17, exact_mins))
+    expiration = format_minutes(exact_mins)
 
     if global_bullish and macd_bullish and rsi < 60:
         signal_type = "CALL (📈 ВГОРУ)"
@@ -177,7 +184,6 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = sqlite3.connect('bot_stats.db')
         cursor = conn.cursor()
         
-        # Загальна статистика
         cursor.execute("SELECT COUNT(*) FROM signals WHERE user_id = ? AND status != 'PENDING'", (user_id,))
         total_finished = cursor.fetchone()[0]
         
@@ -189,7 +195,6 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         total_winrate = round((wins / total_finished * 100), 1) if total_finished > 0 else 0
 
-        # Статистика згрупована по валютних парах
         cursor.execute('''
             SELECT symbol, 
                    COUNT(*) as total, 
@@ -230,6 +235,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     
+    # Обробка натискання кнопок результату угоди
     if data.startswith("win_") or data.startswith("loss_"):
         status = "WIN" if data.startswith("win_") else "LOSS"
         signal_id = data.split("_")[1]
@@ -237,56 +243,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_signal_status(signal_id, status)
         
         status_text = "🟢 Зараховано як ПЛЮС (Win)" if status == "WIN" else "🔴 Зараховано як МІНУС (Loss)"
+        # Зберігаємо повідомлення і просто оновлюємо його кнопки на статус
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton(f"Статус: {status_text}", callback_data="none")
-        ], [
-            InlineKeyboardButton("🔙 Назад до списку пар", callback_data="back_to_menu")
         ]]))
         return
 
-    ticker = data
-    display_name = SYMBOLS.get(ticker, ticker)
-    user_id = query.from_user.id
-    
-    await query.edit_message_text(f"⏳ Розраховую об'єми та індикатори для `{display_name}`...", parse_mode="Markdown")
-    
-    res = analyze_symbol(ticker, display_name)
-    
-    if not res:
-        await query.edit_message_text(f"❌ Не вдалося завантажити дані для `{display_name}`.", parse_mode="Markdown")
-        return
-
-    signal_id = save_signal_to_db(user_id, res['symbol'], res['type'], res['price'], res['confidence'])
-
-    msg = (
-        f"🎯 **АНАЛІЗ ПАРИ: {res['symbol']}**\n\n"
-        f"🔹 **Рекомендація:** `{res['type']}`\n"
-        f"💰 **Ціна входу:** `{res['price']}`\n"
-        f"⏱ **Рекомендована експірація:** `{res['expiration']}`\n"
-        f"📊 **Рівень RSI (M5):** `{res['rsi']}`\n"
-        f"📈 **Якість сигналу:** `{res['confidence']}`\n"
-        f"📦 **Співвідношення об'єму:** `{res['vol_ratio']}x від середнього`\n"
-        f"📏 **Волатильність (ATR):** `{res['atr']}%`\n\n"
-        f"👇 **Позначте результат угоди після її завершення:**"
-    )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Плюс (Win)", callback_data=f"win_{signal_id}"),
-            InlineKeyboardButton("❌ Мінус (Loss)", callback_data=f"loss_{signal_id}")
-        ],
-        [
-            InlineKeyboardButton("🔙 Назад до списку пар", callback_data="back_to_menu")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
-
-async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.data == "back_to_menu":
-        await query.answer()
+    # Якщо натиснуто кнопку меню "Назад"
+    if data == "back_to_menu":
         keyboard = []
         row = []
         for ticker, name in SYMBOLS.items():
@@ -303,6 +267,53 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
+        return
+
+    # Генерація нового сигналу (надсилаємо ОСОБЛИВЕ НОВЕ ПОВІДОМЛЕННЯ, щоб старі залишалися)
+    ticker = data
+    display_name = SYMBOLS.get(ticker, ticker)
+    user_id = query.from_user.id
+    
+    # Сповіщаємо користувача в поточному меню, що розраховуємо
+    await query.edit_message_text(f"⏳ Розраховую точний час та об'єми для `{display_name}`...", parse_mode="Markdown")
+    
+    res = analyze_symbol(ticker, display_name)
+    
+    if not res:
+        await query.edit_message_text(f"❌ Не вдалося завантажити дані для `{display_name}`.", parse_mode="Markdown")
+        return
+
+    signal_id = save_signal_to_db(user_id, res['symbol'], res['type'], res['price'], res['confidence'])
+
+    msg = (
+        f"🎯 **АНАЛІЗ ПАРИ: {res['symbol']}**\n\n"
+        f"🔹 **Рекомендація:** `{res['type']}`\n"
+        f"💰 **Ціна входу:** `{res['price']}`\n"
+        f"⏱ **Точна експірація:** `{res['expiration']}`\n"
+        f"📊 **Рівень RSI (M5):** `{res['rsi']}`\n"
+        f"📈 **Якість сигналу:** `{res['confidence']}`\n"
+        f"📦 **Співвідношення об'єму:** `{res['vol_ratio']}x від середнього`\n"
+        f"📏 **Волатильність (ATR):** `{res['atr']}%`\n\n"
+        f"👇 **Позначте результат після завершення угоди:**"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Плюс (Win)", callback_data=f"win_{signal_id}"),
+            InlineKeyboardButton("❌ Мінус (Loss)", callback_data=f"loss_{signal_id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Відправляємо сигнал як ПОВНІСТЮ НОВЕ повідомлення, а меню замінюємо на кнопку повернення
+    await query.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+    
+    menu_keyboard = [[InlineKeyboardButton("🔙 Обрати іншу пару", callback_data="back_to_menu")]]
+    await query.edit_message_text(
+        f"✅ Сигнал для **{display_name}** сформовано вище в чаті.\n\n📋 **Оберіть наступну пару або поверніться до списку:**", 
+        reply_markup=InlineKeyboardMarkup(menu_keyboard), 
+        parse_mode="Markdown"
+    )
 
 # ==================== FLASK & TELEGRAM SETUP ====================
 app = Flask(__name__)
@@ -310,12 +321,11 @@ application = Application.builder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start_cmd))
 application.add_handler(CommandHandler("stats", stats_cmd))
-application.add_handler(CallbackQueryHandler(menu_handler, pattern="^back_to_menu$"))
 application.add_handler(CallbackQueryHandler(button_handler))
 
 @app.route('/')
 def home():
-    return "Bot with Detailed Pair Statistics is running!"
+    return "Bot with Permanent Signal Messages is running!"
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
