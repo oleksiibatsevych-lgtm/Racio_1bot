@@ -31,6 +31,20 @@ SCAN_TIMEFRAMES = {
 
 stats_history = []
 
+# --- Автоматичне встановлення вебхука ---
+def setup_webhook():
+    if TELEGRAM_TOKEN:
+        webhook_url = f"{RENDER_URL}/webhook"
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}"
+        try:
+            resp = requests.get(url, timeout=10)
+            print("Webhook setup response:", resp.json())
+        except Exception as e:
+            print(f"Помилка встановлення вебхука: {e}")
+
+# Викликаємо одразу при завантаженні модуля на сервері
+setup_webhook()
+
 # --- Функція для запобігання засинанню на Render ---
 def self_ping():
     while True:
@@ -284,7 +298,7 @@ class TelegramSignalSender:
 
         emoji = "🟢" if signal_data["signal"] == "CALL" else "🔴"
         caption = (
-            f"{emoji} **СИГНАЛ: {signal_data['signal']}**\n\n"
+            f"{emoji} **СІГНАЛ: {signal_data['signal']}**\n\n"
             f"📊 **Актив:** `{asset}`\n"
             f"⏳ **Експірація:** `{signal_data['expiration']} хв`\n"
             f"📈 **RSI:** `{signal_data['rsi']}`\n"
@@ -336,7 +350,7 @@ def telegram_webhook():
     if not update:
         return "OK", 200
         
-    print(333, update)  # Щоб у логах Render було видно вхідні повідомлення
+    print("Вхідний запит від Telegram:", update)
 
     main_menu_keyboard = {
         "keyboard": [
