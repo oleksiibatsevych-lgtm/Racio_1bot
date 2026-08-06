@@ -15,6 +15,7 @@ from flask import Flask, request
 app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://racio-1bot.onrender.com")
 
 PAIRS = [
     "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "USDCAD=X", 
@@ -29,6 +30,18 @@ SCAN_TIMEFRAMES = {
 }
 
 stats_history = []
+
+# --- Функція для запобігання засинанню на Render ---
+def self_ping():
+    while True:
+        try:
+            time.sleep(600)  # кожні 10 хвилин
+            requests.get(RENDER_URL)
+        except Exception:
+            pass
+
+threading.Thread(target=self_ping, daemon=True).start()
+
 
 def log_stat(pair, signal_type):
     global stats_history
@@ -323,6 +336,8 @@ def telegram_webhook():
     if not update:
         return "OK", 200
         
+    print(333, update)  # Щоб у логах Render було видно вхідні повідомлення
+
     main_menu_keyboard = {
         "keyboard": [
             [{"text": "📊 Аналізувати пару"}, {"text": "📈 Статистика"}]
