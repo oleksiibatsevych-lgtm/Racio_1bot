@@ -1,346 +1,423 @@
-import sqlite3
-import datetime
-import asyncio
-import requests
-import pandas as pd
+import io
+import os
+import time
+import matplotlib
+matplotlib.use('Agg')  # Обов'язково для роботи matplotlib у фоновому режимі на сервері
+import matplotlib.pyplot as plt
 import numpy as np
-import yfinance as yf
+import pandas as pd
+import requests
+from datetime import datetime, timedelta
 from flask import Flask, request
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes
 
-BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
+app = Flask(__name__)
 
-SYMBOLS = {
-    "GBP/USD": "GBPUSD=X", "EUR/USD": "EURUSD=X", "USD/JPY": "USDJPY=X",
-    "AUD/USD": "AUDUSD=X", "USD/CAD": "USDCAD=X", "USD/CHF": "USDCHF=X",
-    "GBP/JPY": "GBPJPY=X", "EUR/JPY": "EURJPY=X", "AUD/CHF": "AUDCHF=X",
-    "AUD/JPY": "AUDJPY=X", "CAD/CHF": "CADCHF=X", "CAD/JPY": "CADJPY=X",
-    "CHF/JPY": "CHFJPY=X", "EUR/AUD": "EURAUD=X", "EUR/CAD": "EURCAD=X",
-    "EUR/CHF": "EURCHF=X", "EUR/GBP": "EURGBP=X", "GBP/CAD": "GBPCAD=X",
-    "GBP/CHF": "GBPCHF=X", "AUD/CAD": "AUDCAD=X", "GBP/AUD": "GBPAUD=X"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+
+PAIRS = [
+    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "USDCAD=X", 
+    "USDCHF=X", "EURGBP=X", "EURJPY=X", "EURCHF=X", "GBPJPY=X", 
+    "AUDJPY=X", "AUDCAD=X", "EURAUD=X", "CADJPY=X", "GBPCHF=X"
+]
+
+SCAN_TIMEFRAMES = {
+    "5m": "5d",
+    "15m": "1mo",
+    "1h": "3mo"
 }
 
-# ==================== РОБОТА З БД (SQLITE) ====================
-def init_db():
-    conn = sqlite3.connect('bot_stats.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            symbol TEXT,
-            signal_type TEXT,
-            price REAL,
-            confidence TEXT,
-            status TEXT DEFAULT 'PENDING',
-            timestamp TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+stats_history = []
 
-def save_signal_to_db(user_id, symbol, signal_type, price, confidence):
-    try:
-        conn = sqlite3.connect('bot_stats.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO signals (user_id, symbol, signal_type, price, confidence, status, timestamp)
-            VALUES (?, ?, ?, ?, ?, 'PENDING', ?)
-        ''', (user_id, symbol, signal_type, price, confidence, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-        signal_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        return signal_id
-    except Exception as e:
-        print(f"Помилка збереження в БД: {e}")
-        return None
+def log_stat(pair, signal_type):
+    global stats_history
+    stats_history.append({
+        "timestamp": datetime.now(),
+        "pair": pair.replace("=X", ""),
+        "signal": signal_type
+    })
 
-def update_signal_status(signal_id, status):
-    try:
-        conn = sqlite3.connect('bot_stats.db')
-        cursor = conn.cursor()
-        cursor.execute('UPDATE signals SET status = ? WHERE id = ?', (status, signal_id))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Помилка оновлення статусу: {e}")
-
-# ==================== ДОПОМІЖНІ ФУНКЦІЇ ====================
-def format_minutes(n):
-    if n % 10 == 1 and n % 100 != 11:
-        return f"{n} хвилина"
-    elif 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
-        return f"{n} хвилини"
-    else:
-        return f"{n} хвилин"
-
-def get_main_keyboard():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("💱 Обрати валютну пару")],
-        [KeyboardButton("📊 Статистика")]
-    ], resize_keyboard=True)
-
-def get_pairs_inline_keyboard():
-    symbols_list = list(SYMBOLS.keys())
-    keyboard = []
-    for i in range(0, len(symbols_list), 2):
-        row = [InlineKeyboardButton(symbols_list[i], callback_data=f"pair_{symbols_list[i]}")]
-        if i + 1 < len(symbols_list):
-            row.append(InlineKeyboardButton(symbols_list[i + 1], callback_data=f"pair_{symbols_list[i + 1]}"))
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("❌ Закрити", callback_data="close_pairs")])
-    return InlineKeyboardMarkup(keyboard)
-
-# ==================== АНАЛІЗ РИНКУ ====================
-def fetch_forex_data(ticker, interval, period="30d"):
-    try:
-        data = yf.Ticker(ticker).history(period=period, interval=interval)
-        return None if data.empty else data
-    except:
-        return None
-
-def calculate_atr(df, period=14):
-    high, low, close = df['High'], df['Low'], df['Close']
-    tr1 = high - low
-    tr2 = (high - close.shift()).abs()
-    tr3 = (low - close.shift()).abs()
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
-    atr = tr.ewm(span=period, adjust=False).mean()
-    return (atr / close.iloc[-1] * 100).iloc[-1]
-
-def calculate_macd(df):
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    macd_line = exp1 - exp2
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    return macd_line.iloc[-1], signal_line.iloc[-1]
-
-def analyze_symbol(ticker_code, display_name):
-    df_m5 = fetch_forex_data(ticker_code, "5m", period="5d")
-    df_h1 = fetch_forex_data(ticker_code, "1h", period="30d")
+def get_statistics():
+    now = datetime.now()
+    day_ago = now - timedelta(days=1)
+    week_ago = now - timedelta(days=7)
     
-    if df_m5 is None or df_h1 is None or len(df_m5) < 50 or len(df_h1) < 50:
-        return None
-
-    current_price = df_m5['Close'].iloc[-1]
+    stats_day = {}
+    stats_week = {}
+    stats_all = {}
     
-    h1_ema200 = df_h1['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-    global_bullish = current_price > h1_ema200
+    for item in stats_history:
+        pair = item["pair"]
+        t = item["timestamp"]
+        sig = item["signal"]
+        
+        for s_dict in [stats_day, stats_week, stats_all]:
+            if pair not in s_dict:
+                s_dict[pair] = {"requests": 0, "call": 0, "put": 0, "hold": 0}
+                
+        stats_all[pair]["requests"] += 1
+        if sig == "CALL": stats_all[pair]["call"] += 1
+        elif sig == "PUT": stats_all[pair]["put"] += 1
+        else: stats_all[pair]["hold"] += 1
+        
+        if t >= week_ago:
+            stats_week[pair]["requests"] += 1
+            if sig == "CALL": stats_week[pair]["call"] += 1
+            elif sig == "PUT": stats_week[pair]["put"] += 1
+            else: stats_week[pair]["hold"] += 1
+            
+        if t >= day_ago:
+            stats_day[pair]["requests"] += 1
+            if sig == "CALL": stats_day[pair]["call"] += 1
+            elif sig == "PUT": stats_day[pair]["put"] += 1
+            else: stats_day[pair]["hold"] += 1
+            
+    return stats_day, stats_week, stats_all
 
-    delta = df_m5['Close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rsi = round((100 - (100 / (1 + (gain / loss)))).iloc[-1], 1)
+def format_stats_text(title, data):
+    if not data:
+        return f"📊 *{title}*:\n\nЗа цей період ще немає збережених даних по запитах."
     
-    macd_val, signal_val = calculate_macd(df_m5)
-    macd_bullish = macd_val > signal_val
+    text = f"📊 *{title} (по парах)*:\n\n"
+    for pair, counts in data.items():
+        text += f"🌟 *{pair}*:\n"
+        text += f"  • Перевірок: `{counts['requests']}` | CALL: `{counts['call']}` | PUT: `{counts['put']}` | HOLD: `{counts['hold']}`\n\n"
+    return text
 
-    current_vol = df_m5['Volume'].iloc[-1] if 'Volume' in df_m5.columns else 0
-    avg_vol = df_m5['Volume'].rolling(20).mean().iloc[-1] if 'Volume' in df_m5.columns else 1
-    vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
 
-    atr = calculate_atr(df_m5)
+# --- Клас технічного аналізу ---
+class AdvancedTechnicalAnalysis:
+    def __init__(
+        self,
+        fast_ema: int = 9,
+        slow_ema: int = 21,
+        trend_ema: int = 50,
+        atr_window: int = 14,
+        rsi_window: int = 14,
+        volume_window: int = 20,
+    ):
+        self.fast_ema = fast_ema
+        self.slow_ema = slow_ema
+        self.trend_ema = trend_ema
+        self.atr_window = atr_window
+        self.rsi_window = rsi_window
+        self.volume_window = volume_window
 
-    score = (atr / 0.10) * 0.5 + (min(vol_ratio, 2.0) / 2.0) * 0.5
-    score = float(np.clip(score, 0.0, 1.0))
-    exact_mins = int(round(17 - score * (17 - 3)))
-    exact_mins = max(3, min(17, exact_mins))
-    expiration = format_minutes(exact_mins)
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        required_columns = ["open", "high", "low", "close", "volume"]
+        if not all(col in df.columns for col in required_columns):
+            raise ValueError(f"DataFrame обов'язково повинен містити колонки: {required_columns}")
 
-    if global_bullish and macd_bullish and rsi < 60:
-        signal_type = "CALL (📈 ВГОРУ)"
-        confidence = "Висока (Тренд H1 + MACD + RSI)" if rsi < 45 else "Помірна (Тренд + MACD)"
-    elif not global_bullish and not macd_bullish and rsi > 40:
-        signal_type = "PUT (📉 ВНИЗ)"
-        confidence = "Висока (Тренд H1 + MACD + RSI)" if rsi > 55 else "Помірна (Тренд + MACD)"
-    elif rsi <= 30:
-        signal_type = "CALL (📈 ВГОРУ)"
-        confidence = "Висока (Зона глибокої перепроданості RSI)"
-    elif rsi >= 70:
-        signal_type = "PUT (📉 ВНИЗ)"
-        confidence = "Висока (Зона глибокої перекупленості RSI)"
-    else:
-        if macd_bullish:
-            signal_type = "CALL (📈 ВГОРУ)"
-            confidence = "Обережна (За імпульсом MACD)"
+        res_df = df.copy()
+
+        res_df["EMA_fast"] = res_df["close"].ewm(span=self.fast_ema, adjust=False).mean()
+        res_df["EMA_slow"] = res_df["close"].ewm(span=self.slow_ema, adjust=False).mean()
+        res_df["EMA_trend"] = res_df["close"].ewm(span=self.trend_ema, adjust=False).mean()
+
+        delta = res_df["close"].diff()
+        gain = delta.clip(lower=0)
+        loss = -1 * delta.clip(upper=0.0)
+        com_val = self.rsi_window - 1
+        avg_gain = gain.ewm(com=com_val, adjust=False).mean()
+        avg_loss = loss.ewm(com=com_val, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        res_df["RSI"] = 100 - (100 / (1 + rs))
+
+        high_low = res_df["high"].values - res_df["low"].values
+        high_close = np.abs(res_df["high"].values - res_df["close"].shift(1).values)
+        low_close = np.abs(res_df["low"].values - res_df["close"].shift(1).values)
+
+        true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+        res_df["ATR"] = pd.Series(true_range, index=res_df.index).rolling(window=self.atr_window).mean()
+
+        res_df["Volume_MA"] = res_df["volume"].rolling(window=self.volume_window).mean()
+        res_df["Volume_Confirm"] = res_df["volume"] > res_df["Volume_MA"]
+
+        body_size = np.abs(res_df["close"] - res_df["open"])
+        total_candle_size = res_df["high"] - res_df["low"]
+        total_candle_size = np.where(total_candle_size == 0, 1e-9, total_candle_size)
+        res_df["Wick_Ratio"] = (total_candle_size - body_size) / total_candle_size
+
+        return res_df
+
+    def calculate_dynamic_expiration(self, df: pd.DataFrame, window: int = 200) -> int:
+        min_exp = 3
+        max_exp = 30
+        default_exp = 15
+
+        if len(df) < 20 or "ATR" not in df.columns:
+            return default_exp
+
+        last_row = df.iloc[-1]
+        if pd.isna(last_row["ATR"]) or pd.isna(last_row["close"]):
+            return default_exp
+
+        volatility_pct = (last_row["ATR"] / last_row["close"]) * 100
+        recent_vol = ((df["ATR"] / df["close"]) * 100).tail(window)
+        high_vol_threshold = recent_vol.quantile(0.75)
+        low_vol_threshold = recent_vol.quantile(0.25)
+
+        if volatility_pct > high_vol_threshold:
+            recommended_time = 3
+        elif volatility_pct < low_vol_threshold:
+            recommended_time = 30
         else:
-            signal_type = "PUT (📉 ВНИЗ)"
-            confidence = "Обережна (За імпульсом MACD)"
+            recommended_time = 15
 
-    return {
-        "symbol": display_name, "type": signal_type, "price": round(current_price, 5),
-        "rsi": rsi, "atr": round(atr, 3), "vol_ratio": round(vol_ratio, 2),
-        "confidence": confidence, "expiration": expiration
+        return max(min_exp, min(recommended_time, max_exp))
+
+    def generate_signal(self, df: pd.DataFrame) -> dict:
+        default_response = {
+            "signal": "HOLD",
+            "expiration": 15,
+            "rsi": None,
+            "atr": None,
+            "reason": "Insufficient data or unconfirmed filters"
+        }
+
+        if len(df) < self.trend_ema:
+            return default_response
+
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        critical_cols = ["EMA_fast", "EMA_slow", "EMA_trend", "RSI", "ATR", "Volume_Confirm", "Wick_Ratio"]
+        if any(pd.isna(last[col]) for col in critical_cols):
+            return default_response
+
+        if last["Wick_Ratio"] > 0.50:
+            default_response["reason"] = "High wick ratio (market noise)"
+            return default_response
+
+        expiration_time = self.calculate_dynamic_expiration(df)
+
+        bullish_cross = (prev["EMA_fast"] <= prev["EMA_slow"]) and (last["EMA_fast"] > last["EMA_slow"])
+        bearish_cross = (prev["EMA_fast"] >= prev["EMA_slow"]) and (last["EMA_fast"] < last["EMA_slow"])
+
+        uptrend = last["close"] > last["EMA_trend"]
+        downtrend = last["close"] < last["EMA_trend"]
+        volume_ok = last["Volume_Confirm"]
+
+        signal = "HOLD"
+        reason = "No cross or filters mismatch"
+
+        if bullish_cross and uptrend and volume_ok and (40 < last["RSI"] < 70):
+            signal = "CALL"
+            reason = "Bullish cross, uptrend, volume confirmed"
+        elif bearish_cross and downtrend and volume_ok and (30 < last["RSI"] < 60):
+            signal = "PUT"
+            reason = "Bearish cross, downtrend, volume confirmed"
+
+        return {
+            "signal": signal,
+            "expiration": expiration_time,
+            "rsi": round(float(last["RSI"]), 2),
+            "atr": round(float(last["ATR"]), 5),
+            "reason": reason
+        }
+
+
+# --- Клас для роботи з Telegram та візуалізацією ---
+class TelegramSignalSender:
+    def __init__(self, token: str, chat_id: str):
+        self.token = token
+        self.chat_id = chat_id
+        self.api_url = f"https://api.telegram.org/bot{self.token}"
+
+    def _create_chart(self, df: pd.DataFrame, asset_name: str) -> io.BytesIO:
+        plot_df = df.tail(60)
+
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]}
+        )
+
+        ax1.plot(plot_df.index, plot_df["close"], label="Close", color="#d1d4dc", alpha=0.6, linewidth=1)
+        ax1.plot(plot_df.index, plot_df["EMA_fast"], label="EMA Fast", color="#2962ff", linewidth=1.2)
+        ax1.plot(plot_df.index, plot_df["EMA_slow"], label="EMA Slow", color="#ff6d00", linewidth=1.2)
+        ax1.plot(plot_df.index, plot_df["EMA_trend"], label="EMA Trend", color="#ab47bc", linewidth=1.5, linestyle="--")
+
+        ax1.set_title(f"Signal: {asset_name}", fontsize=14, color="white", weight="bold")
+        ax1.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white")
+        ax1.grid(True, color="#2a2e39", alpha=0.5)
+
+        ax2.plot(plot_df.index, plot_df["RSI"], label="RSI", color="#e91e63", linewidth=1.2)
+        ax2.axhline(70, color="red", linestyle=":", alpha=0.7)
+        ax2.axhline(30, color="green", linestyle=":", alpha=0.7)
+        ax2.set_ylabel("RSI", color="white")
+        ax2.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white")
+        ax2.grid(True, color="#2a2e39", alpha=0.5)
+
+        for ax in [ax1, ax2]:
+            ax.set_facecolor("#131722")
+            ax.tick_params(colors="white")
+            for spine in ax.spines.values():
+                spine.set_edgecolor("#2a2e39")
+
+        fig.patch.set_facecolor("#131722")
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
+        buf.seek(0)
+        plt.close(fig)
+
+        return buf
+
+    def send_signal(self, df: pd.DataFrame, signal_data: dict, asset: str):
+        if signal_data["signal"] == "HOLD":
+            return False
+
+        chart_buffer = self._create_chart(df, asset_name=asset)
+
+        emoji = "🟢" if signal_data["signal"] == "CALL" else "🔴"
+        caption = (
+            f"{emoji} **СИГНАЛ: {signal_data['signal']}**\n\n"
+            f"📊 **Актив:** `{asset}`\n"
+            f"⏳ **Експірація:** `{signal_data['expiration']} хв`\n"
+            f"📈 **RSI:** `{signal_data['rsi']}`\n"
+            f"📉 **ATR:** `{signal_data['atr']}`\n"
+            f"💡 **Причина:** _{signal_data['reason']}_\n"
+        )
+
+        url = f"{self.api_url}/sendPhoto"
+        files = {"photo": (f"{asset}_signal.png", chart_buffer, "image/png")}
+        data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"}
+
+        response = requests.post(url, data=data, files=files)
+        return response.json()
+
+
+analyzer = AdvancedTechnicalAnalysis()
+
+def scan_pair(pair_symbol):
+    clean_name = pair_symbol.replace("=X", "")
+    for tf, period in SCAN_TIMEFRAMES.items():
+        try:
+            df = yf.download(pair_symbol, period=period, interval=tf, progress=False)
+            if df.empty or len(df) < 50:
+                continue
+            
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
+            df.columns = [c.lower() for c in df.columns]
+
+            df_ind = analyzer.calculate_indicators(df)
+            signal_res = analyzer.generate_signal(df_ind)
+            
+            log_stat(pair_symbol, signal_res["signal"])
+
+            if signal_res["signal"] != "HOLD":
+                return pair_symbol, df_ind, signal_res
+        except Exception as e:
+            print(f"Помилка по парі {clean_name} на ТФ {tf}: {e}")
+            continue
+    
+    log_stat(pair_symbol, "HOLD")
+    return pair_symbol, None, None
+
+
+@app.route("/webhook", methods=["POST"])
+def telegram_webhook():
+    update = request.get_json()
+    if not update:
+        return "OK", 200
+        
+    main_menu_keyboard = {
+        "keyboard": [
+            [{"text": "📊 Аналізувати пару"}, {"text": "📈 Статистика"}]
+        ],
+        "resize_keyboard": True
     }
 
-# ==================== TELEGRAM HANDLERS ====================
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Вітаю! Скористайтеся кнопками внизу для вибору пари або статистики.",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
-    )
+    if "message" in update:
+        chat_id = update["message"]["chat"]["id"]
+        text = update["message"].get("text", "")
 
-async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    message = update.effective_message
-    try:
-        conn = sqlite3.connect('bot_stats.db')
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM signals WHERE user_id = ? AND status != 'PENDING'", (user_id,))
-        res_tot = cursor.fetchone()
-        total_finished = res_tot[0] if res_tot else 0
-        
-        cursor.execute("SELECT COUNT(*) FROM signals WHERE user_id = ? AND status = 'WIN'", (user_id,))
-        res_wins = cursor.fetchone()
-        wins = res_wins[0] if res_wins else 0
-        
-        cursor.execute("SELECT COUNT(*) FROM signals WHERE user_id = ? AND status = 'LOSS'", (user_id,))
-        res_loss = cursor.fetchone()
-        losses = res_loss[0] if res_loss else 0
-        
-        total_winrate = round((wins / total_finished * 100), 1) if total_finished > 0 else 0
+        if text == "/start":
+            reply = (
+                "👋 Вітаю! Бот технічного аналізу активний.\n\n"
+                "Використовуйте кнопки нижче для масового сканування ринку:"
+            )
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+                "chat_id": chat_id, "text": reply, "reply_markup": main_menu_keyboard, "parse_mode": "Markdown"
+            })
 
-        cursor.execute('''
-            SELECT symbol, 
-                   COUNT(*) as total, 
-                   SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) as wins,
-                   SUM(CASE WHEN status = 'LOSS' THEN 1 ELSE 0 END) as losses
-            FROM signals 
-            WHERE user_id = ? AND status != 'PENDING' 
-            GROUP BY symbol
-            ORDER BY total DESC
-        ''', (user_id,))
-        pair_rows = cursor.fetchall()
-        conn.close()
-        
-        msg = (
-            f"📊 **ЗАГАЛЬНА СТАТИСТИКА УГОД**\n\n"
-            f"🎯 Всього закрито угод: `{total_finished}`\n"
-            f"✅ Успішних (Плюс): `{wins}`\n"
-            f"❌ Неуспішних (Мінус): `{losses}`\n"
-            f"📈 **Загальний Winrate:** `{total_winrate}%`\n\n"
-            f"💱 **СТАТИСТИКА ПО ВАЛЮТНИХ ПАРАХ:**\n"
-        )
-        
-        if not pair_rows:
-            msg += "_Статистика по парах з'явиться після того, як ви закриєте угоди й позначите їх результати._"
-        else:
-            for row in pair_rows:
-                p_symbol, p_total, p_wins, p_losses = row
-                p_winrate = round((p_wins / p_total * 100), 1) if p_total > 0 else 0
-                msg += f"🔹 **{p_symbol}**: угод: `{p_total}` | Плюс: `{p_wins}` | Мінус: `{p_losses}` | Winrate: **`{p_winrate}%`**\n"
-        
-        if message:
-            await message.reply_text(msg, reply_markup=get_main_keyboard(), parse_mode="Markdown")
-    except Exception as e:
-        print(f"Stats error: {e}")
-        if message:
-            await message.reply_text(f"❌ Помилка завантаження статистики: {e}", reply_markup=get_main_keyboard())
+        elif text in ["/signal", "📊 Аналізувати пару"]:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+                "chat_id": chat_id, "text": "⏳ Починаю масове сканування всіх валютних пар..."
+            })
+            
+            notifier = TelegramSignalSender(token=TELEGRAM_TOKEN, chat_id=str(chat_id))
+            signals_found = 0
 
-async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    
-    if text == "📊 Статистика":
-        await stats_handler(update, context)
-        return
-        
-    if text == "💱 Обрати валютну пару":
-        await update.message.reply_text(
-            "📋 **Оберіть валютну пару:**",
-            reply_markup=get_pairs_inline_keyboard(),
-            parse_mode="Markdown"
-        )
-        return
+            for pair in PAIRS:
+                pair_sym, df_data, sig_res = scan_pair(pair)
+                if sig_res and sig_res["signal"] != "HOLD":
+                    notifier.send_signal(df_data, sig_res, asset=pair.replace("=X", ""))
+                    signals_found += 1
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    user_id = update.effective_user.id
-    
-    if data == "close_pairs":
-        await query.message.delete()
-        return
+            if signals_found == 0:
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+                    "chat_id": chat_id, "text": "📭 За результатами сканування активних сигналів на ринку не знайдено."
+                })
+            else:
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+                    "chat_id": chat_id, "text": f"✅ Сканування завершено. Знайдено та відправлено сигналів: {signals_found}"
+                })
 
-    if data.startswith("pair_"):
-        display_name = data.split("_", 1)[1]
-        ticker_code = SYMBOLS[display_name]
-        
-        await query.edit_message_text(
-            text=f"⏳ Розраховую точний час та об'єми для `{display_name}`...",
-            parse_mode="Markdown"
-        )
-        
-        res = analyze_symbol(ticker_code, display_name)
-        
-        if not res:
-            await query.edit_message_text(text=f"❌ Не вдалося завантажити дані для `{display_name}`.")
-            return
+        elif text in ["/stats", "📈 Статистика"]:
+            stats_day, stats_week, stats_all = get_statistics()
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "📅 За добу", "callback_data": "stats|day"},
+                     {"text": "📆 За тиждень", "callback_data": "stats|week"}],
+                    [{"text": "📈 За весь час", "callback_data": "stats|all"}]
+                ]
+            }
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+                "chat_id": chat_id, "text": "📊 **Виберіть період для перегляду статистики:**", "reply_markup": keyboard, "parse_mode": "Markdown"
+            })
 
-        signal_id = save_signal_to_db(user_id, res['symbol'], res['type'], res['price'], res['confidence'])
+    elif "callback_query" in update:
+        query = update["callback_query"]
+        chat_id = query["message"]["chat"]["id"]
+        message_id = query["message"]["message_id"]
+        data = query["data"]
 
-        msg = (
-            f"🎯 **АНАЛІЗ ПАРИ: {res['symbol']}**\n\n"
-            f"🔹 **Рекомендація:** `{res['type']}`\n"
-            f"💰 **Ціна входу:** `{res['price']}`\n"
-            f"⏱ **Точна експірація:** `{res['expiration']}`\n"
-            f"📊 **Рівень RSI (M5):** `{res['rsi']}`\n"
-            f"📈 **Якість сигналу:** `{res['confidence']}`\n"
-            f"📦 **Співвідношення об'єму:** `{res['vol_ratio']}x від середнього`\n"
-            f"📏 **Волатильність (ATR):** `{res['atr']}%`\n\n"
-            f"👇 **Позначте результат після завершення угоди:**"
-        )
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Плюс (Win)", callback_data=f"win_{signal_id}"),
-                InlineKeyboardButton("❌ Мінус (Loss)", callback_data=f"loss_{signal_id}")
-            ]
-        ]
-        await query.edit_message_text(text=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        return
+        if data.startswith("stats|"):
+            _, period = data.split("|")
+            stats_day, stats_week, stats_all = get_statistics()
+            if period == "day":
+                text = format_stats_text("Статистика за добу", stats_day)
+            elif period == "week":
+                text = format_stats_text("Статистика за тиждень", stats_week)
+            else:
+                text = format_stats_text("Статистика за весь час", stats_all)
+                
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "🔄 Оновити", "callback_data": f"stats|{period}"}],
+                    [{"text": "« Назад до вибору періоду", "callback_data": "stats|menu"}]
+                ]
+            }
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText", json={
+                "chat_id": chat_id, "message_id": message_id, "text": text, "reply_markup": keyboard, "parse_mode": "Markdown"
+            })
 
-    if data.startswith("win_") or data.startswith("loss_"):
-        status = "WIN" if data.startswith("win_") else "LOSS"
-        signal_id = data.split("_")[1]
-        
-        update_signal_status(signal_id, status)
-        
-        status_text = "🟢 Зараховано як ПЛЮС (Win)" if status == "WIN" else "🔴 Зараховано як МІНУС (Loss)"
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"Статус: {status_text}", callback_data="none")
-        ]]))
+        elif data == "stats|menu":
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "📅 За добу", "callback_data": "stats|day"},
+                     {"text": "📆 За тиждень", "callback_data": "stats|week"}],
+                    [{"text": "📈 За весь час", "callback_data": "stats|all"}]
+                ]
+            }
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText", json={
+                "chat_id": chat_id, "message_id": message_id, "text": "📊 **Виберіть період для перегляду статистики:**", "reply_markup": keyboard, "parse_mode": "Markdown"
+            })
 
-# ==================== FLASK & TELEGRAM SETUP ====================
-app = Flask(__name__)
-application = Application.builder().token(BOT_TOKEN).build()
+    return "OK", 200
 
-application.add_handler(CommandHandler("start", start_cmd))
-application.add_handler(CommandHandler("stats", stats_handler))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
-application.add_handler(CallbackQueryHandler(callback_handler))
-
-@app.route('/')
+@app.route("/")
 def home():
-    return "Bot is running!"
-
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def webhook():
-    json_data = request.get_json(force=True)
-    update = Update.de_json(json_data, application.bot)
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.initialize())
-    loop.run_until_complete(application.process_update(update))
-    return 'ok'
-
-if __name__ == '__main__':
-    init_db()
-    webhook_url = f"https://racio-1bot.onrender.com/{BOT_TOKEN}"
-    requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
-    app.run(host='0.0.0.0', port=10000)
+    return "Advanced TA Bot is running!"
