@@ -2,9 +2,13 @@ import sqlite3
 import datetime
 import asyncio
 import requests
+import io
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from flask import Flask, request
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes
@@ -92,7 +96,7 @@ def get_pairs_inline_keyboard():
     keyboard.append([InlineKeyboardButton("❌ Закрити", callback_data="close_pairs")])
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== АНАЛІЗ РИНКУ ====================
+# ==================== АНАЛІЗ РИНКУ ТА ГРАФІК ====================
 def fetch_forex_data(ticker, interval, period="30d"):
     try:
         data = yf.Ticker(ticker).history(period=period, interval=interval)
@@ -115,6 +119,21 @@ def calculate_macd(df):
     macd_line = exp1 - exp2
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     return macd_line.iloc[-1], signal_line.iloc[-1]
+
+def generate_chart(df, display_name):
+    plt.figure(figsize=(10, 5))
+    plt.plot(df.index, df['Close'], label='Close Price', color='#1f77b4', linewidth=2)
+    plt.title(f'Technical Chart: {display_name}')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    return buf
 
 def analyze_symbol(ticker_code, display_name):
     df_m5 = fetch_forex_data(ticker_code, "5m", period="5d")
@@ -283,6 +302,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         signal_id = save_signal_to_db(user_id, res['symbol'], res['type'], res['price'], res['confidence'])
 
+        df_chart = fetch_forex_data(ticker_code, "5m", period="2d")
+        photo_buf = generate_chart(df_chart, res['symbol']) if df_chart is not None else None
+
         msg = (
             f"🎯 **АНАЛІЗ ПАРИ: {res['symbol']}**\n\n"
             f"🔹 **Рекомендація:** `{res['type']}`\n"
@@ -301,7 +323,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("❌ Мінус (Loss)", callback_data=f"loss_{signal_id}")
             ]
         ]
-        await query.edit_message_text(text=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        
+        await query.message.delete()
+        if photo_buf:
+            await context.bot.send_photo(
+                chat_id=user_id,
+                photo=photo_buf,
+                caption=msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
         return
 
     if data.startswith("win_") or data.startswith("loss_"):
