@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from flask import Flask, request
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes
 
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
@@ -81,16 +81,16 @@ def get_main_keyboard():
         [KeyboardButton("📊 Статистика")]
     ], resize_keyboard=True)
 
-def get_pairs_keyboard():
+def get_pairs_inline_keyboard():
     symbols_list = list(SYMBOLS.keys())
     keyboard = []
     for i in range(0, len(symbols_list), 2):
-        row = [KeyboardButton(symbols_list[i])]
+        row = [InlineKeyboardButton(symbols_list[i], callback_data=f"pair_{symbols_list[i]}")]
         if i + 1 < len(symbols_list):
-            row.append(KeyboardButton(symbols_list[i + 1]))
+            row.append(InlineKeyboardButton(symbols_list[i + 1], callback_data=f"pair_{symbols_list[i + 1]}"))
         keyboard.append(row)
-    keyboard.append([KeyboardButton("❌ Назад")])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    keyboard.append([InlineKeyboardButton("❌ Закрити", callback_data="close_pairs")])
+    return InlineKeyboardMarkup(keyboard)
 
 # ==================== АНАЛІЗ РИНКУ ====================
 def fetch_forex_data(ticker, interval, period="30d"):
@@ -242,7 +242,6 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    user_id = update.effective_user.id
     
     if text == "📊 Статистика":
         await stats_handler(update, context)
@@ -250,33 +249,36 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         
     if text == "💱 Обрати валютну пару":
         await update.message.reply_text(
-            "📋 Оберіть пару на клавіатурі знизу:",
-            reply_markup=get_pairs_keyboard()
+            "📋 **Оберіть валютну пару:**",
+            reply_markup=get_pairs_inline_keyboard(),
+            parse_mode="Markdown"
         )
         return
 
-    if text == "❌ Назад":
-        await update.message.reply_text(
-            "🔙 Головне меню:",
-            reply_markup=get_main_keyboard()
-        )
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user_id = update.effective_user.id
+    
+    if data == "close_pairs":
+        await query.message.delete()
         return
+
+    if data.startswith("pair_"):
+        display_name = data.split("_", 1)[1]
+        ticker_code = SYMBOLS[display_name]
         
-    if text in SYMBOLS:
-        display_name = text
-        ticker_code = SYMBOLS[text]
-        
-        # Повертаємо базову клавіатуру назад, щоб не заважала
-        wait_msg = await update.message.reply_text(
-            f"⏳ Розраховую точний час та об'єми для `{display_name}`...", 
-            reply_markup=get_main_keyboard(),
+        await query.edit_message_text(
+            text=f"⏳ Розраховую точний час та об'єми для `{display_name}`...",
             parse_mode="Markdown"
         )
         
         res = analyze_symbol(ticker_code, display_name)
         
         if not res:
-            await wait_msg.edit_text(f"❌ Не вдалося завантажити дані для `{display_name}`.")
+            await query.edit_message_text(text=f"❌ Не вдалося завантажити дані для `{display_name}`.")
             return
 
         signal_id = save_signal_to_db(user_id, res['symbol'], res['type'], res['price'], res['confidence'])
@@ -299,16 +301,9 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 InlineKeyboardButton("❌ Мінус (Loss)", callback_data=f"loss_{signal_id}")
             ]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await wait_msg.delete()
-        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+        await query.edit_message_text(text=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
     if data.startswith("win_") or data.startswith("loss_"):
         status = "WIN" if data.startswith("win_") else "LOSS"
         signal_id = data.split("_")[1]
@@ -331,7 +326,7 @@ application.add_handler(CallbackQueryHandler(callback_handler))
 
 @app.route('/')
 def home():
-    return "Bot with Bottom Pairs Keyboard is running!"
+    return "Bot is running!"
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
