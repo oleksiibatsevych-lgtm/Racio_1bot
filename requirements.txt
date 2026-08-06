@@ -1,6 +1,6 @@
-python-telegram-bot
+flask
 pandas
 numpy
 yfinance
 requests
-flask
+matplotlib
