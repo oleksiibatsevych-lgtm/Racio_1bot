@@ -3,5 +3,5 @@ pandas
 numpy
 yfinance
 requests
-python-telegram-bot
 matplotlib
+python-telegram-bot
