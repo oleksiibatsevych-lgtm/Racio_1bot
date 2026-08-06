@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
+import yfinance as yf
 from datetime import datetime, timedelta
 from flask import Flask, request
 
