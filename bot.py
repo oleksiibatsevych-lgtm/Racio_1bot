@@ -6,19 +6,19 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from flask import Flask, request
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters, ContextTypes
 
 BOT_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
 
 SYMBOLS = {
-    "GBPUSD=X": "GBP/USD", "EURUSD=X": "EUR/USD", "USDJPY=X": "USD/JPY",
-    "AUDUSD=X": "AUD/USD", "USDCAD=X": "USD/CAD", "USDCHF=X": "USD/CHF",
-    "GBPJPY=X": "GBP/JPY", "EURJPY=X": "EUR/JPY", "AUDCHF=X": "AUD/CHF",
-    "AUDJPY=X": "AUD/JPY", "CADCHF=X": "CAD/CHF", "CADJPY=X": "CAD/JPY",
-    "CHFJPY=X": "CHF/JPY", "EURAUD=X": "EUR/AUD", "EURCAD=X": "EUR/CAD",
-    "EURCHF=X": "EUR/CHF", "EURGBP=X": "EUR/GBP", "GBPCAD=X": "GBP/CAD",
-    "GBPCHF=X": "GBP/CHF", "AUDCAD=X": "AUD/CAD", "GBPAUD=X": "GBP/AUD"
+    "GBP/USD": "GBPUSD=X", "EUR/USD": "EURUSD=X", "USD/JPY": "USDJPY=X",
+    "AUD/USD": "AUDUSD=X", "USD/CAD": "USDCAD=X", "USD/CHF": "USDCHF=X",
+    "GBP/JPY": "GBPJPY=X", "EUR/JPY": "EURJPY=X", "AUD/CHF": "AUDCHF=X",
+    "AUD/JPY": "AUDJPY=X", "CAD/CHF": "CADCHF=X", "CAD/JPY": "CADJPY=X",
+    "CHF/JPY": "CHFJPY=X", "EUR/AUD": "EURAUD=X", "EUR/CAD": "EURCAD=X",
+    "EUR/CHF": "EURCHF=X", "EUR/GBP": "EURGBP=X", "GBP/CAD": "GBPCAD=X",
+    "GBP/CHF": "GBPCHF=X", "AUD/CAD": "AUDCAD=X", "GBP/AUD": "GBPAUD=X"
 }
 
 # ==================== РОБОТА З БД (SQLITE) ====================
@@ -81,17 +81,16 @@ def get_main_keyboard():
         [KeyboardButton("📊 Статистика")]
     ], resize_keyboard=True)
 
-def get_pairs_inline_keyboard():
+def get_pairs_keyboard():
+    symbols_list = list(SYMBOLS.keys())
     keyboard = []
-    row = []
-    for ticker, name in SYMBOLS.items():
-        row.append(InlineKeyboardButton(name, callback_data=f"pair_{ticker}"))
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
+    for i in range(0, len(symbols_list), 2):
+        row = [KeyboardButton(symbols_list[i])]
+        if i + 1 < len(symbols_list):
+            row.append(KeyboardButton(symbols_list[i + 1]))
         keyboard.append(row)
-    return InlineKeyboardMarkup(keyboard)
+    keyboard.append([KeyboardButton("❌ Назад")])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ==================== АНАЛІЗ РИНКУ ====================
 def fetch_forex_data(ticker, interval, period="30d"):
@@ -178,7 +177,7 @@ def analyze_symbol(ticker_code, display_name):
 # ==================== TELEGRAM HANDLERS ====================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Вітаю! Скористайтеся кнопками внизу для вибору пари або перегляду статистики.",
+        "👋 Вітаю! Скористайтеся кнопками внизу для вибору пари або статистики.",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
@@ -243,6 +242,7 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    user_id = update.effective_user.id
     
     if text == "📊 Статистика":
         await stats_handler(update, context)
@@ -250,40 +250,33 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         
     if text == "💱 Обрати валютну пару":
         await update.message.reply_text(
-            "📋 **Оберіть валютну пару для аналізу:**",
-            reply_markup=get_pairs_inline_keyboard(),
-            parse_mode="Markdown"
+            "📋 Оберіть пару на клавіатурі знизу:",
+            reply_markup=get_pairs_keyboard()
         )
         return
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    if data.startswith("win_") or data.startswith("loss_"):
-        status = "WIN" if data.startswith("win_") else "LOSS"
-        signal_id = data.split("_")[1]
-        
-        update_signal_status(signal_id, status)
-        
-        status_text = "🟢 Зараховано як ПЛЮС (Win)" if status == "WIN" else "🔴 Зараховано як МІНУС (Loss)"
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"Статус: {status_text}", callback_data="none")
-        ]]))
+    if text == "❌ Назад":
+        await update.message.reply_text(
+            "🔙 Головне меню:",
+            reply_markup=get_main_keyboard()
+        )
         return
-
-    if data.startswith("pair_"):
-        ticker = data.split("_", 1)[1]
-        display_name = SYMBOLS.get(ticker, ticker)
-        user_id = query.from_user.id
         
-        await query.edit_message_text(f"⏳ Розраховую точний час та об'єми для `{display_name}`...", parse_mode="Markdown")
+    if text in SYMBOLS:
+        display_name = text
+        ticker_code = SYMBOLS[text]
         
-        res = analyze_symbol(ticker, display_name)
+        # Повертаємо базову клавіатуру назад, щоб не заважала
+        wait_msg = await update.message.reply_text(
+            f"⏳ Розраховую точний час та об'єми для `{display_name}`...", 
+            reply_markup=get_main_keyboard(),
+            parse_mode="Markdown"
+        )
+        
+        res = analyze_symbol(ticker_code, display_name)
         
         if not res:
-            await query.edit_message_text(f"❌ Не вдалося завантажити дані для `{display_name}`.")
+            await wait_msg.edit_text(f"❌ Не вдалося завантажити дані для `{display_name}`.")
             return
 
         signal_id = save_signal_to_db(user_id, res['symbol'], res['type'], res['price'], res['confidence'])
@@ -308,12 +301,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
-        await query.edit_message_text(
-            f"✅ Сигнал для **{display_name}** сформовано вище в чаті.\n\n"
-            f"Натисніть **«💱 Обрати валютну пару»** внизу, щоб вибрати наступну.", 
-            parse_mode="Markdown"
-        )
+        await wait_msg.delete()
+        await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    if data.startswith("win_") or data.startswith("loss_"):
+        status = "WIN" if data.startswith("win_") else "LOSS"
+        signal_id = data.split("_")[1]
+        
+        update_signal_status(signal_id, status)
+        
+        status_text = "🟢 Зараховано як ПЛЮС (Win)" if status == "WIN" else "🔴 Зараховано як МІНУС (Loss)"
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"Статус: {status_text}", callback_data="none")
+        ]]))
 
 # ==================== FLASK & TELEGRAM SETUP ====================
 app = Flask(__name__)
@@ -326,7 +331,7 @@ application.add_handler(CallbackQueryHandler(callback_handler))
 
 @app.route('/')
 def home():
-    return "Bot with Menu Button & Fixed Stats is running!"
+    return "Bot with Bottom Pairs Keyboard is running!"
 
 @app.route(f'/{BOT_TOKEN}', methods=['POST'])
 def webhook():
