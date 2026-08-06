@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -59,8 +59,8 @@ threading.Thread(target=self_ping, daemon=True).start()
 
 # --- Часовий фільтр (активні торгові сесії) ---
 def is_trading_time() -> bool:
-    # Дозволяємо сканування з 08:00 до 20:00 UTC (10:00 - 22:00 за Києвом)
-    current_hour = datetime.utcnow().hour
+    # Дозволяємо сканування з 08:00 до 20:00 UTC (10:00 - 23:00 за Києвом)
+    current_hour = datetime.now(timezone.utc).hour
     return 8 <= current_hour < 20
 
 
@@ -120,7 +120,7 @@ def format_stats_text(title, data):
     return text
 
 
-# --- Клас технічного аналізу (з доданим ADX) ---
+# --- Клас технічного аналізу (з ADX та індикаторами) ---
 class AdvancedTechnicalAnalysis:
     def __init__(
         self,
@@ -242,12 +242,12 @@ class AdvancedTechnicalAnalysis:
         if any(pd.isna(last[col]) for col in critical_cols):
             return default_response
 
-        # 1. Фільтр тіней (шум)
+        # Фільтр тіней (шум)
         if last["Wick_Ratio"] > 0.50:
             default_response["reason"] = "High wick ratio (market noise)"
             return default_response
 
-        # 2. Фільтр сили тренду ADX (якщо ADX < 22 — це флет, сигнали не даємо)
+        # Фільтр сили тренду ADX (якщо ADX < 22 — флет)
         if last["ADX"] < 22:
             default_response["reason"] = f"Low trend strength (ADX: {round(float(last['ADX']), 1)} < 22)"
             return default_response
@@ -408,7 +408,6 @@ def telegram_webhook():
             })
 
         elif text in ["/signal", "📊 Аналізувати пару"]:
-            # Перевірка на часовий фільтр сесій
             if not is_trading_time():
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
                     "chat_id": chat_id, "text": "🌙 Зараз поза межами активних торгових сесій (нічний час / низька ліквідність). Сканування тимчасово обмежено для захисту від хибних сигналів."
