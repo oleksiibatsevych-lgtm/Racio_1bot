@@ -1,6 +1,7 @@
 import io
 import os
 import time
+import threading
 import matplotlib
 matplotlib.use('Agg')  # Обов'язково для роботи matplotlib у фоновому режимі на сервері
 import matplotlib.pyplot as plt
@@ -348,23 +349,26 @@ def telegram_webhook():
                 "chat_id": chat_id, "text": "⏳ Починаю масове сканування всіх валютних пар..."
             })
             
-            notifier = TelegramSignalSender(token=TELEGRAM_TOKEN, chat_id=str(chat_id))
-            signals_found = 0
+            def run_scan():
+                notifier = TelegramSignalSender(token=TELEGRAM_TOKEN, chat_id=str(chat_id))
+                signals_found = 0
 
-            for pair in PAIRS:
-                pair_sym, df_data, sig_res = scan_pair(pair)
-                if sig_res and sig_res["signal"] != "HOLD":
-                    notifier.send_signal(df_data, sig_res, asset=pair.replace("=X", ""))
-                    signals_found += 1
+                for pair in PAIRS:
+                    pair_sym, df_data, sig_res = scan_pair(pair)
+                    if sig_res and sig_res["signal"] != "HOLD":
+                        notifier.send_signal(df_data, sig_res, asset=pair.replace("=X", ""))
+                        signals_found += 1
 
-            if signals_found == 0:
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
-                    "chat_id": chat_id, "text": "📭 За результатами сканування активних сигналів на ринку не знайдено."
-                })
-            else:
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
-                    "chat_id": chat_id, "text": f"✅ Сканування завершено. Знайдено та відправлено сигналів: {signals_found}"
-                })
+                if signals_found == 0:
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+                        "chat_id": chat_id, "text": "📭 За результатами сканування активних сигналів на ринку не знайдено."
+                    })
+                else:
+                    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+                        "chat_id": chat_id, "text": f"✅ Сканування завершено. Знайдено та відправлено сигналів: {signals_found}"
+                    })
+
+            threading.Thread(target=run_scan).start()
 
         elif text in ["/stats", "📈 Статистика"]:
             stats_day, stats_week, stats_all = get_statistics()
