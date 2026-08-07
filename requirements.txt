@@ -1,8 +1,7 @@
 flask
+gunicorn
+yfinance
 pandas
 numpy
-yfinance
-requests
 matplotlib
-python-telegram-bot
-gunicorn
+requests
