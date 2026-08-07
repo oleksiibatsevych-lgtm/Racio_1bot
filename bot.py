@@ -50,14 +50,22 @@ SCAN_TIMEFRAMES = {"5m": "5d", "15m": "1mo", "1h": "3mo"}
 stats_history = []
 
 
-# --- АВТОМАТИЧНЕ ВСТАНОВЛЕННЯ ВЕБХУКА ---
+# --- АВТОМАТИЧНЕ ВСТАНОВЛЕННЯ ТА ПЕРЕВІРКА ВЕБХУКА ---
 def setup_webhook():
   if TELEGRAM_TOKEN:
     webhook_url = f"{RENDER_URL}/webhook"
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}"
+    set_url = (
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}"
+    )
     try:
-      resp = requests.get(url, timeout=10)
-      print("Webhook setup response:", resp.json())
+      resp = requests.get(set_url, timeout=10)
+      print("Webhook setup response:", resp.text)
+
+      info_url = (
+          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo"
+      )
+      info_resp = requests.get(info_url, timeout=10)
+      print("Webhook info status:", info_resp.text)
     except Exception as e:
       print(f"Помилка встановлення вебхука: {e}")
 
@@ -177,7 +185,7 @@ class AdvancedTechnicalAnalysis:
   def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
     required_columns = ["open", "high", "low", "close", "volume"]
     if not all(col in df.columns for col in required_columns):
-      raise ValueError(f"DataFrame містить не всі необхідні колонки")
+      raise ValueError("DataFrame містить не всі необхідні колонки")
     res_df = df.copy()
 
     res_df["EMA_fast"] = (
@@ -474,7 +482,7 @@ def scan_pair(pair_symbol):
   return pair_symbol, None, None
 
 
-# --- КЛАВІАТУРА МЕНЮ (як на скріншоті) ---
+# --- КЛАВІАТУРА МЕНЮ ---
 def get_main_menu():
   keys = list(PAIRS_MAP.keys())
   keyboard = []
