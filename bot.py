@@ -57,11 +57,10 @@ def self_ping():
 threading.Thread(target=self_ping, daemon=True).start()
 
 
-# --- Часовий фільтр (активні торгові сесії) ---
+# --- Часовий фільтр (з 10:00 до 22:00 за Києвом / 07:00 - 19:00 UTC) ---
 def is_trading_time() -> bool:
-    # Дозволяємо сканування з 08:00 до 20:00 UTC (10:00 - 23:00 за Києвом)
     current_hour = datetime.now(timezone.utc).hour
-    return 8 <= current_hour < 20
+    return 7 <= current_hour < 19
 
 
 def log_stat(pair, signal_type):
@@ -410,7 +409,7 @@ def telegram_webhook():
         elif text in ["/signal", "📊 Аналізувати пару"]:
             if not is_trading_time():
                 requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
-                    "chat_id": chat_id, "text": "🌙 Зараз поза межами активних торгових сесій (нічний час / низька ліквідність). Сканування тимчасово обмежено для захисту від хибних сигналів."
+                    "chat_id": chat_id, "text": "🌙 Зараз поза межами встановленого торгового часу (робочі години: 10:00 - 22:00 за Києвом). Сканування тимчасово обмежено."
                 })
                 return "OK", 200
 
