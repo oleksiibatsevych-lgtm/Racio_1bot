@@ -21,7 +21,7 @@ RENDER_URL = os.environ.get(
     "RENDER_EXTERNAL_URL", "https://racio-1bot.onrender.com"
 )
 
-# Карта пар відповідно до вашого інтерфейсу
+# Точна карта пар відповідно до вашого інтерфейсу в Telegram
 PAIRS_MAP = {
     "CHF/JPY": "CHFJPY=X",
     "AUD/CAD": "AUDCAD=X",
@@ -433,7 +433,7 @@ class TelegramSignalSender:
     chart_buffer = self._create_chart(df, asset_name=asset)
     emoji = "🟢" if signal_data["signal"] == "CALL" else "🔴"
     caption = (
-        f"{emoji} **СИГНАЛ: {signal_data['signal']}**\n\n"
+        f"{emoji} **СІГНАЛ: {signal_data['signal']}**\n\n"
         f"📊 **Актив:** `{asset}`\n"
         f"⏳ **Експірація:** `{signal_data['expiration']} хв`\n"
         f"📈 **RSI:** `{signal_data['rsi']}` | 📉 **ADX:** `{signal_data['adx']}`\n"
@@ -443,6 +443,7 @@ class TelegramSignalSender:
     files = {"photo": (f"{asset}_signal.png", chart_buffer, "image/png")}
     data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"}
     response = requests.post(url, data=data, files=files)
+    print("Telegram sendPhoto response:", response.text)
     return response.json()
 
 
@@ -498,7 +499,7 @@ def telegram_webhook():
     text = update["message"].get("text", "")
 
     if text == "/start":
-      requests.post(
+      resp = requests.post(
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
@@ -506,6 +507,7 @@ def telegram_webhook():
               "reply_markup": get_main_menu(),
           },
       )
+      print("Telegram /start response:", resp.text)
 
     elif text in PAIRS_MAP:
       ticker = PAIRS_MAP[text]
