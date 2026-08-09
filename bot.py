@@ -45,7 +45,10 @@ PAIRS_MAP = {
     "GBP/CAD": "GBPCAD=X",
 }
 
-stats_history = []
+# Зберігання даних у пам'яті
+stats_history = []   # Перевірені результати сигналів
+active_signals = {}  # Активні сигнали для зв'язку з кнопками (id -> дані)
+signal_counter = 0   # Лічильник для унікальних ID сигналів
 
 
 # --- ПЕРЕВІРКА ВЕБХУКА ---
@@ -58,11 +61,6 @@ def setup_webhook():
     try:
       resp = requests.get(set_url, timeout=10)
       print("Webhook setup response:", resp.text)
-      info_url = (
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo"
-      )
-      info_resp = requests.get(info_url, timeout=10)
-      print("Webhook info status:", info_resp.text)
     except Exception as e:
       print(f"Помилка встановлення вебхука: {e}")
 
@@ -83,27 +81,19 @@ def self_ping():
 threading.Thread(target=self_ping, daemon=True).start()
 
 
-# --- ТОРГОВИЙ ЧАС (10:00 - 22:00 за Києвом / 07:00 - 19:00 UTC) ---
+# --- ТОРГОВИЙ ЧАС ТА НОВИНИ ---
 def is_trading_time() -> bool:
   current_hour = datetime.now(timezone.utc).hour
   return 7 <= current_hour < 19
 
 
-# --- ФІЛЬТР ЕКОНОМІЧНОГО КАЛЕНДАРЯ ---
 def is_news_time(pair_name: str) -> bool:
   try:
     clean_name = pair_name.replace("=X", "").replace("/", "")
-    if len(clean_name) >= 6:
-      currencies = [clean_name[:3], clean_name[3:6]]
-    else:
-      currencies = [clean_name[:3]]
+    currencies = [clean_name[:3], clean_name[3:6]] if len(clean_name) >= 6 else [clean_name[:3]]
 
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        )
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(url, headers=headers, timeout=5)
     if response.status_code != 200:
       return False
@@ -114,31 +104,19 @@ def is_news_time(pair_name: str) -> bool:
     for event in events:
       if event.get("impact") != "High":
         continue
-      country = event.get("country")
-      if country in currencies:
+      if event.get("country") in currencies:
         date_str = event.get("date")
         if date_str:
-          event_time = datetime.fromisoformat(date_str)
-          event_time_utc = event_time.astimezone(timezone.utc)
-          diff_minutes = (now_utc - event_time_utc).total_seconds() / 60.0
+          event_time = datetime.fromisoformat(date_str).astimezone(timezone.utc)
+          diff_minutes = (now_utc - event_time).total_seconds() / 60.0
           if -30 <= diff_minutes <= 30:
             return True
-  except Exception as e:
-    print(f"Помилка перевірки економічного календаря: {e}")
-
+  except Exception:
+    pass
   return False
 
 
-def log_stat(pair, signal_type, winrate):
-  global stats_history
-  stats_history.append({
-      "timestamp": datetime.now(),
-      "pair": pair.replace("=X", ""),
-      "signal": signal_type,
-      "winrate": winrate,
-  })
-
-
+# --- СТАТИСТИКА РЕАЛЬНИХ РЕЗУЛЬТАТІВ ---
 def get_statistics():
   now = datetime.now()
   day_ago = now - timedelta(days=1)
@@ -146,22 +124,37 @@ def get_statistics():
 
   def process_items(items):
     pair_data = {}
-    all_winrates = []
+    total_wins = 0
+    total_valid = 0
+    
     for item in items:
       p = item["pair"]
-      wr = item["winrate"]
+      res = item["result"]
+      
       if p not in pair_data:
-        pair_data[p] = {"requests": 0, "winrates": []}
+        pair_data[p] = {"requests": 0, "wins": 0, "losses": 0}
+      
       pair_data[p]["requests"] += 1
-      pair_data[p]["winrates"].append(wr)
-      all_winrates.append(wr)
-
+      if res == "WIN":
+        pair_data[p]["wins"] += 1
+        total_wins += 1
+        total_valid += 1
+      elif res == "LOSS":
+        pair_data[p]["losses"] += 1
+        total_valid += 1
+        
     result = {}
     for p, d in pair_data.items():
-      avg_wr = sum(d["winrates"]) / len(d["winrates"]) if d["winrates"] else 0
-      result[p] = {"requests": d["requests"], "winrate": round(avg_wr, 1)}
+      valid = d["wins"] + d["losses"]
+      wr = (d["wins"] / valid * 100) if valid > 0 else 0.0
+      result[p] = {
+          "requests": d["requests"], 
+          "wins": d["wins"], 
+          "losses": d["losses"], 
+          "winrate": round(wr, 1)
+      }
 
-    overall_wr = sum(all_winrates) / len(all_winrates) if all_winrates else 0.0
+    overall_wr = (total_wins / total_valid * 100) if total_valid > 0 else 0.0
     return result, round(overall_wr, 1)
 
   day_items = [i for i in stats_history if i["timestamp"] >= day_ago]
@@ -177,44 +170,35 @@ def get_statistics():
 
 def format_stats_text(title, data_tuple):
   data, overall_wr = data_tuple
-  if not data:
-    return f"📊 *{title}*:\n\nЗа цей період ще немає збережених даних."
+  
   text = f"📊 *{title}*\n"
+  
+  if not data:
+    text += "\nЩе немає оцінених угод за цей період."
+    return text
+    
   text += f"🏆 **Загальний вінрейт:** `{overall_wr}%`\n\n"
   text += "📋 *По парах*:\n"
   for pair, counts in data.items():
     text += f"🌟 *{pair}*:\n"
     text += (
-        f"  • Перевірок: `{counts['requests']}` | Вінрейт:"
-        f" `{counts['winrate']}%`\n\n"
+        f"  • Всього угод: `{counts['requests']}`\n"
+        f"  • ✅ WIN: `{counts['wins']}` | ❌ LOSS: `{counts['losses']}`\n"
+        f"  • Вінрейт: `{counts['winrate']}%`\n\n"
     )
   return text
 
 
 # --- КЛАС ТЕХНІЧНОГО АНАЛІЗУ ---
 class AdvancedTechnicalAnalysis:
+  def __init__(self):
+    self.rsi_window = 14
+    self.atr_window = 14
+    self.stoch_window = 14
+    self.adx_window = 14
 
-  def __init__(
-      self,
-      rsi_window: int = 14,
-      atr_window: int = 14,
-      stoch_window: int = 14,
-      adx_window: int = 14,
-  ):
-    self.rsi_window = rsi_window
-    self.atr_window = atr_window
-    self.stoch_window = stoch_window
-    self.adx_window = adx_window
-
-  def calculate_indicators(
-      self, df_local: pd.DataFrame, df_global: pd.DataFrame = None
-  ) -> pd.DataFrame:
-    required_columns = ["open", "high", "low", "close", "volume"]
-    if not all(col in df_local.columns for col in required_columns):
-      raise ValueError("DataFrame містить не всі необхідні колонки")
+  def calculate_indicators(self, df_local: pd.DataFrame, df_global: pd.DataFrame = None) -> pd.DataFrame:
     res_df = df_local.copy()
-
-    res_df["EMA_trend"] = res_df["close"].ewm(span=50, adjust=False).mean()
 
     # RSI
     delta = res_df["close"].diff()
@@ -225,15 +209,13 @@ class AdvancedTechnicalAnalysis:
     rs = avg_gain / avg_loss
     res_df["RSI"] = 100 - (100 / (1 + rs))
 
-    # Stochastic Oscillator
+    # Stochastic
     low_min = res_df["low"].rolling(window=self.stoch_window).min()
     high_max = res_df["high"].rolling(window=self.stoch_window).max()
-    res_df["Stoch_K"] = (
-        (res_df["close"] - low_min) / (high_max - low_min + 1e-9)
-    ) * 100
+    res_df["Stoch_K"] = ((res_df["close"] - low_min) / (high_max - low_min + 1e-9)) * 100
     res_df["Stoch_D"] = res_df["Stoch_K"].rolling(window=3).mean()
 
-    # ADX для молодшого таймфрейму (сила тренду)
+    # ADX
     alpha = 1 / self.adx_window
     tr1 = res_df["high"] - res_df["low"]
     tr2 = (res_df["high"] - res_df["close"].shift(1)).abs()
@@ -243,538 +225,239 @@ class AdvancedTechnicalAnalysis:
     up_move = res_df["high"] - res_df["high"].shift(1)
     down_move = res_df["low"].shift(1) - res_df["low"]
 
-    plus_dm = np.where(
-        (up_move > down_move) & (up_move > 0), up_move, 0.0
-    )
-    minus_dm = np.where(
-        (down_move > up_move) & (down_move > 0), down_move, 0.0
-    )
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
     tr_smooth = tr.ewm(alpha=alpha, adjust=False).mean()
-    plus_dm_smooth = (
-        pd.Series(plus_dm, index=res_df.index).ewm(alpha=alpha, adjust=False).mean()
-    )
-    minus_dm_smooth = (
-        pd.Series(minus_dm, index=res_df.index)
-        .ewm(alpha=alpha, adjust=False)
-        .mean()
-    )
+    plus_dm_smooth = pd.Series(plus_dm, index=res_df.index).ewm(alpha=alpha, adjust=False).mean()
+    minus_dm_smooth = pd.Series(minus_dm, index=res_df.index).ewm(alpha=alpha, adjust=False).mean()
 
     plus_di = 100 * (plus_dm_smooth / (tr_smooth + 1e-9))
     minus_di = 100 * (minus_dm_smooth / (tr_smooth + 1e-9))
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
     res_df["ADX"] = dx.ewm(alpha=alpha, adjust=False).mean()
 
-    # Локальні рівні (на 5m)
+    # Рівні
     res_df["Local_Support"] = res_df["low"].rolling(window=20).min()
     res_df["Local_Resistance"] = res_df["high"].rolling(window=20).max()
 
-    # Глобальні рівні (з 1h таймфрейму)
     if df_global is not None and not df_global.empty:
       g_sup = df_global["low"].rolling(window=24).min()
       g_res = df_global["high"].rolling(window=24).max()
-      res_df["Global_Support"] = (
-          g_sup.reindex(res_df.index, method="ffill")
-          .bfill()
-          .fillna(res_df["low"].min())
-      )
-      res_df["Global_Resistance"] = (
-          g_res.reindex(res_df.index, method="ffill")
-          .bfill()
-          .fillna(res_df["high"].max())
-      )
+      res_df["Global_Support"] = g_sup.reindex(res_df.index, method="ffill").bfill().fillna(res_df["low"].min())
+      res_df["Global_Resistance"] = g_res.reindex(res_df.index, method="ffill").bfill().fillna(res_df["high"].max())
     else:
       res_df["Global_Support"] = res_df["Local_Support"]
       res_df["Global_Resistance"] = res_df["Local_Resistance"]
 
     # ATR
     high_low = res_df["high"].values - res_df["low"].values
-    high_close = np.abs(
-        res_df["high"].values - res_df["close"].shift(1).values
-    )
+    high_close = np.abs(res_df["high"].values - res_df["close"].shift(1).values)
     low_close = np.abs(res_df["low"].values - res_df["close"].shift(1).values)
     true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    res_df["ATR"] = (
-        pd.Series(true_range, index=res_df.index)
-        .rolling(window=self.atr_window)
-        .mean()
-    )
+    res_df["ATR"] = pd.Series(true_range, index=res_df.index).rolling(window=self.atr_window).mean()
 
     return res_df
 
   def calculate_dynamic_expiration(self, df: pd.DataFrame) -> int:
     if len(df) < 20 or "ATR" not in df.columns:
       return 7
-    last_row = df.iloc[-1]
-    if pd.isna(last_row["ATR"]) or pd.isna(last_row["close"]):
+    last = df.iloc[-1]
+    if pd.isna(last["ATR"]) or pd.isna(last["close"]):
       return 7
-
-    volatility_pct = (last_row["ATR"] / last_row["close"]) * 100
+    volatility_pct = (last["ATR"] / last["close"]) * 100
     recent_vol = ((df["ATR"] / df["close"]) * 100).tail(200)
     if recent_vol.empty or recent_vol.max() == recent_vol.min():
       return 7
-
-    min_v = recent_vol.min()
-    max_v = recent_vol.max()
-    norm = ((volatility_pct - min_v) / (max_v - min_v + 1e-9)).clip(0, 1)
+    norm = ((volatility_pct - recent_vol.min()) / (recent_vol.max() - recent_vol.min() + 1e-9)).clip(0, 1)
     exp = round(15 - norm * 12)
     return int(max(3, min(15, exp)))
 
-  def calculate_strategy_winrate(self, df: pd.DataFrame) -> float:
-    wins = 0
-    total = 0
-    for i in range(50, len(df) - 15):
-      sub_df = df.iloc[: i + 1]
-      sig = self.generate_signal(sub_df)
-      if sig["signal"] != "HOLD":
-        exp = sig["expiration"]
-        if i + exp < len(df):
-          entry_price = df["close"].iloc[i]
-          exit_price = df["close"].iloc[i + exp]
-          if sig["signal"] == "CALL" and exit_price > entry_price:
-            wins += 1
-            total += 1
-          elif sig["signal"] == "PUT" and exit_price < entry_price:
-            wins += 1
-            total += 1
-          else:
-            total += 1
-    if total == 0:
-      return 71.5
-    return round((wins / total) * 100, 1)
-
   def check_pre_alert(self, df: pd.DataFrame) -> dict:
-    if len(df) < 25:
-      return {"status": False}
+    if len(df) < 25: return {"status": False}
     last = df.iloc[-1]
-    
-    # Фільтр тренду за ADX на молодшому таймфреймі (якщо ADX > 25, тренд занадто сильний для відскоків)
-    if not pd.isna(last["ADX"]) and last["ADX"] > 25:
-      return {"status": False}
+    if not pd.isna(last["ADX"]) and last["ADX"] > 25: return {"status": False}
 
-    close = last["close"]
-    g_support = last["Global_Support"]
-    g_resistance = last["Global_Resistance"]
-    rsi = last["RSI"]
-    stoch_k = last["Stoch_K"]
+    c, g_sup, g_res, rsi, stoch = last["close"], last["Global_Support"], last["Global_Resistance"], last["RSI"], last["Stoch_K"]
     exp = self.calculate_dynamic_expiration(df)
 
-    dist_to_sup = abs(close - g_support) / close
-    dist_to_res = abs(close - g_resistance) / close
-
-    if dist_to_sup < 0.004 and (30 <= rsi <= 36 or stoch_k <= 25):
-      return {
-          "status": True,
-          "type": "🟢 ВВЕРХ (CALL)",
-          "expiration": exp,
-          "reason": (
-              f"Ціна підходить до глобальної підтримки ({g_support:.5f}), RSI:"
-              f" {rsi:.1f}, ADX: {last['ADX']:.1f}"
-          ),
-      }
-
-    if dist_to_res < 0.004 and (64 <= rsi <= 70 or stoch_k >= 75):
-      return {
-          "status": True,
-          "type": "🔴 ВНИЗ (PUT)",
-          "expiration": exp,
-          "reason": (
-              f"Ціна підходить до глобального опору ({g_resistance:.5f}), RSI:"
-              f" {rsi:.1f}, ADX: {last['ADX']:.1f}"
-          ),
-      }
-
+    if abs(c - g_sup) / c < 0.004 and (30 <= rsi <= 36 or stoch <= 25):
+      return {"status": True, "type": "🟢 ВВЕРХ (CALL)", "expiration": exp, "reason": f"Підхід до підтримки. RSI: {rsi:.1f}, ADX: {last['ADX']:.1f}"}
+    if abs(c - g_res) / c < 0.004 and (64 <= rsi <= 70 or stoch >= 75):
+      return {"status": True, "type": "🔴 ВНИЗ (PUT)", "expiration": exp, "reason": f"Підхід до опору. RSI: {rsi:.1f}, ADX: {last['ADX']:.1f}"}
     return {"status": False}
 
   def generate_signal(self, df: pd.DataFrame) -> dict:
-    default_response = {
-        "signal": "HOLD",
-        "expiration": 7,
-        "rsi": None,
-        "stoch": None,
-        "reason": "No setup",
-    }
-    if len(df) < 25:
-      return default_response
-
+    default = {"signal": "HOLD", "expiration": 7, "rsi": None, "stoch": None, "reason": "No setup"}
+    if len(df) < 25: return default
     last = df.iloc[-1]
-    
-    # Фільтр тренду за ADX на молодшому таймфреймі: відсікаємо пробої
-    if not pd.isna(last["ADX"]) and last["ADX"] > 25:
-      return default_response
+    if not pd.isna(last["ADX"]) and last["ADX"] > 25: return default
 
-    close = last["close"]
-    g_support = last["Global_Support"]
-    g_resistance = last["Global_Resistance"]
-    l_support = last["Local_Support"]
-    l_resistance = last["Local_Resistance"]
-    rsi = last["RSI"]
-    stoch_k = last["Stoch_K"]
-    stoch_d = last["Stoch_D"]
+    c, g_sup, g_res, l_sup, l_res = last["close"], last["Global_Support"], last["Global_Resistance"], last["Local_Support"], last["Local_Resistance"]
+    rsi, stoch_k, stoch_d = last["RSI"], last["Stoch_K"], last["Stoch_D"]
+    exp = self.calculate_dynamic_expiration(df)
 
-    expiration_time = self.calculate_dynamic_expiration(df)
+    near_g_sup = abs(c - g_sup) / c < 0.0025
+    near_l_sup = abs(c - l_sup) / c < 0.0015
+    if (near_g_sup or near_l_sup) and (rsi < 32 or (stoch_k < 20 and stoch_k > stoch_d)):
+      return {"signal": "CALL", "expiration": exp, "rsi": round(float(rsi), 2), "stoch": round(float(stoch_k), 2), "reason": f"Відскок від рівня (ADX: {last['ADX']:.1f})"}
 
-    near_g_support = abs(close - g_support) / close < 0.0025
-    near_l_support = abs(close - l_support) / close < 0.0015
+    near_g_res = abs(c - g_res) / c < 0.0025
+    near_l_res = abs(c - l_res) / c < 0.0015
+    if (near_g_res or near_l_res) and (rsi > 68 or (stoch_k > 80 and stoch_k < stoch_d)):
+      return {"signal": "PUT", "expiration": exp, "rsi": round(float(rsi), 2), "stoch": round(float(stoch_k), 2), "reason": f"Відскік від рівня (ADX: {last['ADX']:.1f})"}
 
-    if (near_g_support or near_l_support) and (
-        rsi < 32 or (stoch_k < 20 and stoch_k > stoch_d)
-    ):
-      lvl_type = "глобального" if near_g_support else "локального"
-      return {
-          "signal": "CALL",
-          "expiration": expiration_time,
-          "rsi": round(float(rsi), 2),
-          "stoch": round(float(stoch_k), 2),
-          "reason": (
-              f"Відскок від {lvl_type} рівня підтримки (ADX: {last['ADX']:.1f})"
-          ),
-      }
-
-    near_g_resistance = abs(close - g_resistance) / close < 0.0025
-    near_l_resistance = abs(close - l_resistance) / close < 0.0015
-
-    if (near_g_resistance or near_l_resistance) and (
-        rsi > 68 or (stoch_k > 80 and stoch_k < stoch_d)
-    ):
-      lvl_type = "глобального" if near_g_resistance else "локального"
-      return {
-          "signal": "PUT",
-          "expiration": expiration_time,
-          "rsi": round(float(rsi), 2),
-          "stoch": round(float(stoch_k), 2),
-          "reason": (
-              f"Відскік від {lvl_type} рівня опору (ADX: {last['ADX']:.1f})"
-          ),
-      }
-
-    return default_response
+    return default
 
 
-# --- ВІДПРАВКА ПОВІДОМЛЕНЬ У TELEGRAM ---
+# --- ВІДПРАВКА ПОВІДОМЛЕНЬ ТА КНОПОК ---
 class TelegramSignalSender:
-
   def __init__(self, token: str, chat_id: str):
-    self.token = token
+    self.api_url = f"https://api.telegram.org/bot{token}"
     self.chat_id = chat_id
-    self.api_url = f"https://api.telegram.org/bot{self.token}"
 
   def _create_chart(self, df: pd.DataFrame, asset_name: str) -> io.BytesIO:
     plot_df = df.tail(60)
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(10, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
-    )
-
-    ax1.plot(
-        plot_df.index,
-        plot_df["close"],
-        label="Close",
-        color="#d1d4dc",
-        alpha=0.6,
-        linewidth=1,
-    )
-    ax1.plot(
-        plot_df.index,
-        plot_df["Global_Support"],
-        label="Global Support",
-        color="#00897b",
-        linestyle="-.",
-        linewidth=1.2,
-    )
-    ax1.plot(
-        plot_df.index,
-        plot_df["Global_Resistance"],
-        label="Global Resistance",
-        color="#c62828",
-        linestyle="-.",
-        linewidth=1.2,
-    )
-    ax1.plot(
-        plot_df.index,
-        plot_df["Local_Support"],
-        label="Local Support",
-        color="#26a69a",
-        linestyle="--",
-        linewidth=1,
-    )
-    ax1.plot(
-        plot_df.index,
-        plot_df["Local_Resistance"],
-        label="Local Resistance",
-        color="#ef5350",
-        linestyle="--",
-        linewidth=1,
-    )
-    ax1.set_title(
-        f"Signal: {asset_name}", fontsize=14, color="white", weight="bold"
-    )
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
+    
+    ax1.plot(plot_df.index, plot_df["close"], label="Close", color="#d1d4dc", alpha=0.6, linewidth=1)
+    ax1.plot(plot_df.index, plot_df["Global_Support"], label="Global Sup", color="#00897b", linestyle="-.", linewidth=1.2)
+    ax1.plot(plot_df.index, plot_df["Global_Resistance"], label="Global Res", color="#c62828", linestyle="-.", linewidth=1.2)
+    ax1.set_title(f"Signal: {asset_name}", fontsize=14, color="white", weight="bold")
     ax1.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white")
     ax1.grid(True, color="#2a2e39", alpha=0.5)
 
-    ax2.plot(
-        plot_df.index,
-        plot_df["RSI"],
-        label="RSI",
-        color="#e91e63",
-        linewidth=1.2,
-    )
+    ax2.plot(plot_df.index, plot_df["RSI"], label="RSI", color="#e91e63", linewidth=1.2)
     ax2.axhline(70, color="red", linestyle=":", alpha=0.7)
     ax2.axhline(30, color="green", linestyle=":", alpha=0.7)
-    ax2.set_ylabel("RSI", color="white")
     ax2.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white")
     ax2.grid(True, color="#2a2e39", alpha=0.5)
 
     for ax in [ax1, ax2]:
       ax.set_facecolor("#131722")
       ax.tick_params(colors="white")
-      for spine in ax.spines.values():
-        spine.set_edgecolor("#2a2e39")
-
+      for spine in ax.spines.values(): spine.set_edgecolor("#2a2e39")
     fig.patch.set_facecolor("#131722")
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(
-        buf,
-        format="png",
-        dpi=150,
-        facecolor=fig.get_facecolor(),
-        edgecolor="none",
-    )
+    plt.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
     buf.seek(0)
     plt.close(fig)
     return buf
 
   def send_pre_alert(self, pre_data: dict, asset: str):
-    emoji = "⚠️"
-    caption = (
-        f"{emoji} **ПОПЕРЕДЖЕННЯ ПРО СЕТАП (PRE-ALERT)**\n\n"
-        f"📊 **Актив:** `{asset}`\n"
-        f"🎯 **Очікування:** `{pre_data['type']}`\n"
-        f"⏳ **Рекомендована експірація:** `{pre_data['expiration']} хв`\n"
-        f"💡 **Причина:** _{pre_data['reason']}_\n"
-        f"⏳ _Готуйтеся до можливої угоди!_"
-    )
-    url = f"{self.api_url}/sendMessage"
-    payload = {
-        "chat_id": self.chat_id,
-        "text": caption,
-        "parse_mode": "Markdown",
-    }
-    requests.post(url, json=payload)
+    caption = (f"⚠️ **PRE-ALERT**\n📊 `{asset}` | 🎯 `{pre_data['type']}`\n"
+               f"⏳ Експірація: `{pre_data['expiration']} хв`\n💡 _{pre_data['reason']}_")
+    requests.post(f"{self.api_url}/sendMessage", json={"chat_id": self.chat_id, "text": caption, "parse_mode": "Markdown"})
 
-  def send_signal(self, df: pd.DataFrame, signal_data: dict, asset: str):
-    if signal_data["signal"] == "HOLD":
-      return False
-    chart_buffer = self._create_chart(df, asset_name=asset)
-    sig_text = (
-        "🟢 ВВЕРХ (CALL)"
-        if signal_data["signal"] == "CALL"
-        else "🔴 ВНИЗ (PUT)"
-    )
-    caption = (
-        f"🚨 **СІГНАЛ: {sig_text}**\n\n"
-        f"📊 **Актив:** `{asset}`\n"
-        f"⏳ **Експірація:** `{signal_data['expiration']} хв`\n"
-        f"📈 **RSI:** `{signal_data['rsi']}` | 📉 **Stoch:** `{signal_data['stoch']}`\n"
-        f"💡 **Причина:** _{signal_data['reason']}_\n"
-    )
-    url = f"{self.api_url}/sendPhoto"
-    files = {"photo": (f"{asset}_signal.png", chart_buffer, "image/png")}
-    data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"}
-    response = requests.post(url, data=data, files=files)
-    return response.json()
+  def send_signal(self, df: pd.DataFrame, signal_data: dict, asset: str, sig_id: int):
+    chart_buffer = self._create_chart(df, asset)
+    sig_text = "🟢 ВВЕРХ (CALL)" if signal_data["signal"] == "CALL" else "🔴 ВНИЗ (PUT)"
+    caption = (f"🚨 **СІГНАЛ: {sig_text}**\n📊 `{asset}`\n⏳ Експірація: `{signal_data['expiration']} хв`\n"
+               f"📈 RSI: `{signal_data['rsi']}` | 📉 Stoch: `{signal_data['stoch']}`\n💡 _{signal_data['reason']}_")
+    
+    # Кнопки оцінки результату
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ WIN", "callback_data": f"res|WIN|{sig_id}"},
+                {"text": "❌ LOSS", "callback_data": f"res|LOSS|{sig_id}"}
+            ]
+        ]
+    }
+
+    files = {"photo": (f"{asset}.png", chart_buffer, "image/png")}
+    data = {
+        "chat_id": self.chat_id, 
+        "caption": caption, 
+        "parse_mode": "Markdown",
+        "reply_markup": str(reply_markup).replace("'", '"')
+    }
+    requests.post(f"{self.api_url}/sendPhoto", data=data, files=files)
 
 
 analyzer = AdvancedTechnicalAnalysis()
 
 
 def scan_pair(pair_symbol, asset_name, chat_id=None):
-  if is_news_time(asset_name):
-    print(
-        f"Пропуск сканування {asset_name}: активна важлива економічна новина."
-    )
-    return pair_symbol, None, None
+  global signal_counter
+  if is_news_time(asset_name): return
 
-  notifier = (
-      TelegramSignalSender(token=TELEGRAM_TOKEN, chat_id=str(chat_id))
-      if chat_id
-      else None
-  )
-
+  notifier = TelegramSignalSender(TELEGRAM_TOKEN, str(chat_id)) if chat_id else None
   try:
-    df_global = yf.download(
-        pair_symbol, period="1mo", interval="1h", progress=False
-    )
+    df_global = yf.download(pair_symbol, period="1mo", interval="1h", progress=False)
     if not df_global.empty:
-      if isinstance(df_global.columns, pd.MultiIndex):
-        df_global.columns = df_global.columns.get_level_values(0)
+      if isinstance(df_global.columns, pd.MultiIndex): df_global.columns = df_global.columns.get_level_values(0)
       df_global.columns = [c.lower() for c in df_global.columns]
-    else:
-      df_global = None
+    else: df_global = None
 
-    df_local = yf.download(
-        pair_symbol, period="5d", interval="5m", progress=False
-    )
-    if df_local.empty or len(df_local) < 30:
-      return pair_symbol, None, None
-    if isinstance(df_local.columns, pd.MultiIndex):
-      df_local.columns = df_local.columns.get_level_values(0)
+    df_local = yf.download(pair_symbol, period="5d", interval="5m", progress=False)
+    if df_local.empty or len(df_local) < 30: return
+    if isinstance(df_local.columns, pd.MultiIndex): df_local.columns = df_local.columns.get_level_values(0)
     df_local.columns = [c.lower() for c in df_local.columns]
 
     df_ind = analyzer.calculate_indicators(df_local, df_global)
 
     pre_res = analyzer.check_pre_alert(df_ind)
     if pre_res["status"] and notifier:
-      notifier.send_pre_alert(pre_res, asset=asset_name)
+      notifier.send_pre_alert(pre_res, asset_name)
 
     signal_res = analyzer.generate_signal(df_ind)
-    winrate = analyzer.calculate_strategy_winrate(df_ind)
-    log_stat(pair_symbol, signal_res["signal"], winrate)
+    
+    if signal_res["signal"] != "HOLD" and notifier:
+      signal_counter += 1
+      sig_id = signal_counter
+      
+      # Зберігаємо активний сигнал, щоб знати пару та назву при натисканні кнопки
+      active_signals[sig_id] = {
+          "pair": asset_name,
+          "signal": signal_res["signal"]
+      }
 
-    if signal_res["signal"] != "HOLD":
-      return pair_symbol, df_ind, signal_res
+      notifier.send_signal(df_ind, signal_res, asset_name, sig_id)
 
   except Exception as e:
     print(f"Помилка сканування {pair_symbol}: {e}")
 
-  return pair_symbol, None, None
 
-
+# --- МЕНЮ ТА WEBHOOK ---
 def get_bottom_menu():
-  return {
-      "keyboard": [
-          [{"text": "💱 Пари"}],
-          [{"text": "📊 Аналіз усіх пар"}, {"text": "📈 Статистика"}],
-      ],
-      "resize_keyboard": True,
-  }
-
+  return {"keyboard": [[{"text": "💱 Пари"}], [{"text": "📊 Аналіз усіх пар"}, {"text": "📈 Статистика"}]], "resize_keyboard": True}
 
 def get_pairs_inline_keyboard():
   keys = list(PAIRS_MAP.keys())
-  inline_keyboard = []
-  for i in range(0, len(keys), 2):
-    row = [{"text": keys[i], "callback_data": f"pair|{keys[i]}"}]
-    if i + 1 < len(keys):
-      row.append({"text": keys[i + 1], "callback_data": f"pair|{keys[i+1]}"})
-    inline_keyboard.append(row)
-  return {"inline_keyboard": inline_keyboard}
+  inline = [[{"text": keys[i], "callback_data": f"pair|{keys[i]}"}, {"text": keys[i+1], "callback_data": f"pair|{keys[i+1]}"}] if i+1 < len(keys) else [{"text": keys[i], "callback_data": f"pair|{keys[i]}"}] for i in range(0, len(keys), 2)]
+  return {"inline_keyboard": inline}
 
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
   update = request.get_json()
-  if not update:
-    return "OK", 200
+  if not update: return "OK", 200
 
   if "message" in update:
     chat_id = update["message"]["chat"]["id"]
     text = update["message"].get("text", "")
 
-    if text == "/start":
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": (
-                  "Оберіть пару для аналізу (Глобальні/Локальні рівні + RSI +"
-                  " Stochastic + ADX):"
-              ),
-              "reply_markup": get_pairs_inline_keyboard(),
-          },
-      )
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": "Головне меню керування:",
-              "reply_markup": get_bottom_menu(),
-          },
-      )
-
-    elif text == "💱 Пари":
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": (
-                  "Оберіть пару для аналізу (Глобальні/Локальні рівні + RSI +"
-                  " Stochastic + ADX):"
-              ),
-              "reply_markup": get_pairs_inline_keyboard(),
-          },
-      )
+    if text in ["/start", "💱 Пари"]:
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "Оберіть пару:", "reply_markup": get_pairs_inline_keyboard()})
+      if text == "/start":
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "Меню:", "reply_markup": get_bottom_menu()})
 
     elif text == "📊 Аналіз усіх пар":
       if not is_trading_time():
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": "🌙 Зараз поза межами торгового часу.",
-            },
-        )
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Зараз поза межами торгового часу."})
         return "OK", 200
-
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": "⏳ Починаю масове сканування за рівнями...",
-          },
-      )
-
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⏳ Починаю масове сканування..."})
       def run_mass():
-        try:
-          found = 0
-          for name, ticker in PAIRS_MAP.items():
-            _, df_data, sig_res = scan_pair(
-                ticker, asset_name=name, chat_id=chat_id
-            )
-            notifier = TelegramSignalSender(
-                token=TELEGRAM_TOKEN, chat_id=str(chat_id)
-            )
-            if sig_res and sig_res["signal"] != "HOLD":
-              notifier.send_signal(df_data, sig_res, asset=name)
-              found += 1
-          requests.post(
-              f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-              json={
-                  "chat_id": chat_id,
-                  "text": (
-                      f"✅ Масове сканування завершено. Знайдено сигналів: {found}"
-                  ),
-              },
-          )
-        except Exception as e:
-          print(f"Помилка масового сканування: {e}")
-
+        for name, ticker in PAIRS_MAP.items(): scan_pair(ticker, name, chat_id)
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "✅ Сканування завершено. Знайдені сигнали відправлені з кнопками оцінки!"})
       threading.Thread(target=run_mass).start()
 
     elif text == "📈 Статистика":
-      (stats_day, wr_day), (stats_week, wr_week), (
-          stats_all,
-          wr_all,
-      ) = get_statistics()
-      keyboard = {
-          "inline_keyboard": [
-              [
-                  {"text": "📅 За добу", "callback_data": "stats|day"},
-                  {"text": "📆 За тиждень", "callback_data": "stats|week"},
-              ],
-              [{"text": "📈 За весь час", "callback_data": "stats|all"}],
-          ]
-      }
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": "📊 **Виберіть період для перегляду статистики:**",
-              "reply_markup": keyboard,
-              "parse_mode": "Markdown",
-          },
-      )
+      keyboard = {"inline_keyboard": [[{"text": "📅 За добу", "callback_data": "stats|day"}, {"text": "📆 За тиждень", "callback_data": "stats|week"}], [{"text": "📈 За весь час", "callback_data": "stats|all"}]]}
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "📊 **Виберіть період:**", "reply_markup": keyboard, "parse_mode": "Markdown"})
 
   elif "callback_query" in update:
     query = update["callback_query"]
@@ -784,93 +467,66 @@ def telegram_webhook():
 
     if data.startswith("pair|"):
       _, pair_name = data.split("|")
-      ticker = PAIRS_MAP[pair_name]
       if not is_trading_time():
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": (
-                    "🌙 Зараз поза межами торгового часу (робочі години: 10:00 -"
-                    " 22:00 за Києвом)."
-                ),
-            },
-        )
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Поза межами торгового часу."})
         return "OK", 200
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"⏳ Аналізую {pair_name}..."})
+      threading.Thread(target=lambda: scan_pair(PAIRS_MAP[pair_name], pair_name, chat_id)).start()
 
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={"chat_id": chat_id, "text": f"⏳ Аналізую {pair_name}..."},
-      )
+    elif data.startswith("res|"):
+      _, result, sig_id_str = data.split("|")
+      sig_id = int(sig_id_str)
 
-      def run_single():
-        try:
-          _, df_data, sig_res = scan_pair(
-              ticker, asset_name=pair_name, chat_id=chat_id
-          )
-          notifier = TelegramSignalSender(
-              token=TELEGRAM_TOKEN, chat_id=str(chat_id)
-          )
-          if sig_res and sig_res["signal"] != "HOLD":
-            notifier.send_signal(df_data, sig_res, asset=pair_name)
-          else:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": (
-                        f"📭 По парі {pair_name} чітких сигналів не знайдено біля"
-                        " рівнів (або спрацював захист від тренду/новин)."
-                    ),
-                },
-            )
-        except Exception as e:
-          print(f"Помилка поодинокого сканування: {e}")
+      if sig_id in active_signals:
+        sig_info = active_signals.pop(sig_id)
+        
+        # Додаємо у загальну історію статистики
+        stats_history.append({
+            "timestamp": datetime.now(),
+            "pair": sig_info["pair"],
+            "signal": sig_info["signal"],
+            "result": result
+        })
 
-      threading.Thread(target=run_single).start()
+        # Оновлюємо текст повідомлення, щоб показати, що результат зафіксовано, і прибираємо кнопки
+        old_caption = query["message"].get("caption", "")
+        icon = "✅ WIN" if result == "WIN" else "❌ LOSS"
+        new_caption = f"{old_caption}\n\n*Статус угоди:* Карточка закрита — **{icon}**"
+
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageCaption", json={
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "caption": new_caption,
+            "parse_mode": "Markdown"
+        })
+        
+        # Відправляємо коротке підтвердження
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={
+            "callback_query_id": query["id"],
+            "text": f"Зараховано: {icon}!"
+        })
+      else:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={
+            "callback_query_id": query["id"],
+            "text": "Цей сигнал вже оброблено або застарів."
+        })
 
     elif data.startswith("stats|"):
       _, period = data.split("|")
-      (stats_day, wr_day), (stats_week, wr_week), (
-          stats_all,
-          wr_all,
-      ) = get_statistics()
-      if period == "day":
-        text_res = format_stats_text(
-            "Статистика за добу", (stats_day, wr_day)
-        )
-      elif period == "week":
-        text_res = format_stats_text(
-            "Статистика за тиждень", (stats_week, wr_week)
-        )
-      else:
-        text_res = format_stats_text(
-            "Статистика за весь час", (stats_all, wr_all)
-        )
+      (stats_day, wr_day), (stats_week, wr_week), (stats_all, wr_all) = get_statistics()
+      
+      if period == "day": text_res = format_stats_text("Статистика за добу", (stats_day, wr_day))
+      elif period == "week": text_res = format_stats_text("Статистика за тиждень", (stats_week, wr_week))
+      else: text_res = format_stats_text("Статистика за весь час", (stats_all, wr_all))
 
-      keyboard = {
-          "inline_keyboard": [
-              [{"text": "🔄 Оновити", "callback_data": f"stats|{period}"}]
-          ]
-      }
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
-          json={
-              "chat_id": chat_id,
-              "message_id": message_id,
-              "text": text_res,
-              "reply_markup": keyboard,
-              "parse_mode": "Markdown",
-          },
-      )
+      keyboard = {"inline_keyboard": [[{"text": "🔄 Оновити", "callback_data": f"stats|{period}"}]]}
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText", json={"chat_id": chat_id, "message_id": message_id, "text": text_res, "reply_markup": keyboard, "parse_mode": "Markdown"})
 
   return "OK", 200
 
-
 @app.route("/")
 def home():
-  return "Bot with ADX filter & calendar is running!"
-
+  return "Bot with Interactive Buttons is running!"
 
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 5000))
