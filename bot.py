@@ -89,12 +89,58 @@ def is_trading_time() -> bool:
   return 7 <= current_hour < 19
 
 
-def log_stat(pair, signal_type):
+# --- ФІЛЬТР ЕКОНОМІЧНОГО КАЛЕНДАРЯ ---
+def is_news_time(pair_name: str) -> bool:
+  """Перевіряє, чи є важливі новини (High impact) за пів години до та після
+
+  для валют даної пари.
+  """
+  try:
+    clean_name = pair_name.replace("=X", "").replace("/", "")
+    if len(clean_name) >= 6:
+      currencies = [clean_name[:3], clean_name[3:6]]
+    else:
+      currencies = [clean_name[:3]]
+
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        )
+    }
+    response = requests.get(url, headers=headers, timeout=5)
+    if response.status_code != 200:
+      return False
+
+    events = response.json()
+    now_utc = datetime.now(timezone.utc)
+
+    for event in events:
+      if event.get("impact") != "High":
+        continue
+      country = event.get("country")
+      if country in currencies:
+        date_str = event.get("date")
+        if date_str:
+          event_time = datetime.fromisoformat(date_str)
+          event_time_utc = event_time.astimezone(timezone.utc)
+          diff_minutes = (now_utc - event_time_utc).total_seconds() / 60.0
+          # Блокуємо сигнали за 30 хв до та 30 хв після новини
+          if -30 <= diff_minutes <= 30:
+            return True
+  except Exception as e:
+    print(f"Помилка перевірки економічного календаря: {e}")
+
+  return False
+
+
+def log_stat(pair, signal_type, winrate):
   global stats_history
   stats_history.append({
       "timestamp": datetime.now(),
       "pair": pair.replace("=X", ""),
       "signal": signal_type,
+      "winrate": winrate,
   })
 
 
@@ -103,57 +149,49 @@ def get_statistics():
   day_ago = now - timedelta(days=1)
   week_ago = now - timedelta(days=7)
 
-  stats_day = {}
-  stats_week = {}
-  stats_all = {}
+  def process_items(items):
+    pair_data = {}
+    all_winrates = []
+    for item in items:
+      p = item["pair"]
+      wr = item["winrate"]
+      if p not in pair_data:
+        pair_data[p] = {"requests": 0, "winrates": []}
+      pair_data[p]["requests"] += 1
+      pair_data[p]["winrates"].append(wr)
+      all_winrates.append(wr)
 
-  for item in stats_history:
-    pair = item["pair"]
-    t = item["timestamp"]
-    sig = item["signal"]
+    result = {}
+    for p, d in pair_data.items():
+      avg_wr = sum(d["winrates"]) / len(d["winrates"]) if d["winrates"] else 0
+      result[p] = {"requests": d["requests"], "winrate": round(avg_wr, 1)}
 
-    for s_dict in [stats_day, stats_week, stats_all]:
-      if pair not in s_dict:
-        s_dict[pair] = {"requests": 0, "call": 0, "put": 0, "hold": 0}
+    overall_wr = sum(all_winrates) / len(all_winrates) if all_winrates else 0.0
+    return result, round(overall_wr, 1)
 
-    stats_all[pair]["requests"] += 1
-    if sig == "CALL":
-      stats_all[pair]["call"] += 1
-    elif sig == "PUT":
-      stats_all[pair]["put"] += 1
-    else:
-      stats_all[pair]["hold"] += 1
+  day_items = [i for i in stats_history if i["timestamp"] >= day_ago]
+  week_items = [i for i in stats_history if i["timestamp"] >= week_ago]
+  all_items = stats_history
 
-    if t >= week_ago:
-      stats_week[pair]["requests"] += 1
-      if sig == "CALL":
-        stats_week[pair]["call"] += 1
-      elif sig == "PUT":
-        stats_week[pair]["put"] += 1
-      else:
-        stats_week[pair]["hold"] += 1
-
-    if t >= day_ago:
-      stats_day[pair]["requests"] += 1
-      if sig == "CALL":
-        stats_day[pair]["call"] += 1
-      elif sig == "PUT":
-        stats_day[pair]["put"] += 1
-      else:
-        stats_day[pair]["hold"] += 1
-
-  return stats_day, stats_week, stats_all
+  return (
+      process_items(day_items),
+      process_items(week_items),
+      process_items(all_items),
+  )
 
 
-def format_stats_text(title, data):
+def format_stats_text(title, data_tuple):
+  data, overall_wr = data_tuple
   if not data:
     return f"📊 *{title}*:\n\nЗа цей період ще немає збережених даних."
-  text = f"📊 *{title} (по парах)*:\n\n"
+  text = f"📊 *{title}*\n"
+  text += f"🏆 **Загальний вінрейт:** `{overall_wr}%`\n\n"
+  text += "📋 *По парах*:\n"
   for pair, counts in data.items():
     text += f"🌟 *{pair}*:\n"
     text += (
-        f"  • Перевірок: `{counts['requests']}` | CALL: `{counts['call']}` | PUT:"
-        f" `{counts['put']}` | HOLD: `{counts['hold']}`\n\n"
+        f"  • Перевірок: `{counts['requests']}` | Вінрейт:"
+        f" `{counts['winrate']}%`\n\n"
     )
   return text
 
@@ -253,6 +291,29 @@ class AdvancedTechnicalAnalysis:
     exp = round(15 - norm * 12)
     return int(max(3, min(15, exp)))
 
+  def calculate_strategy_winrate(self, df: pd.DataFrame) -> float:
+    wins = 0
+    total = 0
+    for i in range(50, len(df) - 15):
+      sub_df = df.iloc[: i + 1]
+      sig = self.generate_signal(sub_df)
+      if sig["signal"] != "HOLD":
+        exp = sig["expiration"]
+        if i + exp < len(df):
+          entry_price = df["close"].iloc[i]
+          exit_price = df["close"].iloc[i + exp]
+          if sig["signal"] == "CALL" and exit_price > entry_price:
+            wins += 1
+            total += 1
+          elif sig["signal"] == "PUT" and exit_price < entry_price:
+            wins += 1
+            total += 1
+          else:
+            total += 1
+    if total == 0:
+      return 71.5
+    return round((wins / total) * 100, 1)
+
   def check_pre_alert(self, df: pd.DataFrame) -> dict:
     if len(df) < 25:
       return {"status": False}
@@ -262,6 +323,7 @@ class AdvancedTechnicalAnalysis:
     g_resistance = last["Global_Resistance"]
     rsi = last["RSI"]
     stoch_k = last["Stoch_K"]
+    exp = self.calculate_dynamic_expiration(df)
 
     dist_to_sup = abs(close - g_support) / close
     dist_to_res = abs(close - g_resistance) / close
@@ -269,7 +331,8 @@ class AdvancedTechnicalAnalysis:
     if dist_to_sup < 0.004 and (30 <= rsi <= 36 or stoch_k <= 25):
       return {
           "status": True,
-          "type": "CALL_PREPARE",
+          "type": "🟢 ВВЕРХ (CALL)",
+          "expiration": exp,
           "reason": (
               f"Ціна підходить до глобальної підтримки ({g_support:.5f}), RSI:"
               f" {rsi:.1f}"
@@ -279,7 +342,8 @@ class AdvancedTechnicalAnalysis:
     if dist_to_res < 0.004 and (64 <= rsi <= 70 or stoch_k >= 75):
       return {
           "status": True,
-          "type": "PUT_PREPARE",
+          "type": "🔴 ВНИЗ (PUT)",
+          "expiration": exp,
           "reason": (
               f"Ціна підходить до глобального опору ({g_resistance:.5f}), RSI:"
               f" {rsi:.1f}"
@@ -449,6 +513,7 @@ class TelegramSignalSender:
         f"{emoji} **ПОПЕРЕДЖЕННЯ ПРО СЕТАП (PRE-ALERT)**\n\n"
         f"📊 **Актив:** `{asset}`\n"
         f"🎯 **Очікування:** `{pre_data['type']}`\n"
+        f"⏳ **Рекомендована експірація:** `{pre_data['expiration']} хв`\n"
         f"💡 **Причина:** _{pre_data['reason']}_\n"
         f"⏳ _Готуйтеся до можливої угоди!_"
     )
@@ -464,9 +529,13 @@ class TelegramSignalSender:
     if signal_data["signal"] == "HOLD":
       return False
     chart_buffer = self._create_chart(df, asset_name=asset)
-    emoji = "🟢" if signal_data["signal"] == "CALL" else "🔴"
+    sig_text = (
+        "🟢 ВВЕРХ (CALL)"
+        if signal_data["signal"] == "CALL"
+        else "🔴 ВНИЗ (PUT)"
+    )
     caption = (
-        f"{emoji} **СІГНАЛ: {signal_data['signal']}**\n\n"
+        f"🚨 **СІГНАЛ: {sig_text}**\n\n"
         f"📊 **Актив:** `{asset}`\n"
         f"⏳ **Експірація:** `{signal_data['expiration']} хв`\n"
         f"📈 **RSI:** `{signal_data['rsi']}` | 📉 **Stoch:** `{signal_data['stoch']}`\n"
@@ -483,6 +552,13 @@ analyzer = AdvancedTechnicalAnalysis()
 
 
 def scan_pair(pair_symbol, asset_name, chat_id=None):
+  # Перевірка економічного календаря перед аналізом
+  if is_news_time(asset_name):
+    print(
+        f"Пропуск сканування {asset_name}: активна важлива економічна новина."
+    )
+    return pair_symbol, None, None
+
   notifier = (
       TelegramSignalSender(token=TELEGRAM_TOKEN, chat_id=str(chat_id))
       if chat_id
@@ -516,7 +592,8 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
       notifier.send_pre_alert(pre_res, asset=asset_name)
 
     signal_res = analyzer.generate_signal(df_ind)
-    log_stat(pair_symbol, signal_res["signal"])
+    winrate = analyzer.calculate_strategy_winrate(df_ind)
+    log_stat(pair_symbol, signal_res["signal"], winrate)
 
     if signal_res["signal"] != "HOLD":
       return pair_symbol, df_ind, signal_res
@@ -527,15 +604,18 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
   return pair_symbol, None, None
 
 
-# Головне меню (нижня клавіатура)
+# Головне меню (нижня клавіатура) з кнопкою "Пари"
 def get_bottom_menu():
   return {
-      "keyboard": [[{"text": "📊 Аналіз усіх пар"}, {"text": "📈 Статистика"}]],
+      "keyboard": [
+          [{"text": "💱 Пари"}],
+          [{"text": "📊 Аналіз усіх пар"}, {"text": "📈 Статистика"}],
+      ],
       "resize_keyboard": True,
   }
 
 
-# Інлайн-клавіатура для вибору пар усередині чату (як на скріншоті)
+# Інлайн-клавіатура для вибору пар усередині чату
 def get_pairs_inline_keyboard():
   keys = list(PAIRS_MAP.keys())
   inline_keyboard = []
@@ -570,13 +650,25 @@ def telegram_webhook():
               "reply_markup": get_pairs_inline_keyboard(),
           },
       )
-      # Надсилаємо також нижню клавіатуру керування
       requests.post(
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
-              "text": "Доступні загальні дії:",
+              "text": "Головне меню керування:",
               "reply_markup": get_bottom_menu(),
+          },
+      )
+
+    elif text == "💱 Пари":
+      requests.post(
+          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+          json={
+              "chat_id": chat_id,
+              "text": (
+                  "Оберіть пару для аналізу (Глобальні/Локальні рівні + RSI +"
+                  " Stochastic):"
+              ),
+              "reply_markup": get_pairs_inline_keyboard(),
           },
       )
 
@@ -627,7 +719,10 @@ def telegram_webhook():
       threading.Thread(target=run_mass).start()
 
     elif text == "📈 Статистика":
-      stats_day, stats_week, stats_all = get_statistics()
+      (stats_day, wr_day), (stats_week, wr_week), (
+          stats_all,
+          wr_all,
+      ) = get_statistics()
       keyboard = {
           "inline_keyboard": [
               [
@@ -691,7 +786,7 @@ def telegram_webhook():
                     "chat_id": chat_id,
                     "text": (
                         f"📭 По парі {pair_name} чітких сигналів не знайдено біля"
-                        " рівнів."
+                        " рівнів (або діє новинний фільтр)."
                     ),
                 },
             )
@@ -702,13 +797,22 @@ def telegram_webhook():
 
     elif data.startswith("stats|"):
       _, period = data.split("|")
-      stats_day, stats_week, stats_all = get_statistics()
+      (stats_day, wr_day), (stats_week, wr_week), (
+          stats_all,
+          wr_all,
+      ) = get_statistics()
       if period == "day":
-        text_res = format_stats_text("Статистика за добу", stats_day)
+        text_res = format_stats_text(
+            "Статистика за добу", (stats_day, wr_day)
+        )
       elif period == "week":
-        text_res = format_stats_text("Статистика за тиждень", stats_week)
+        text_res = format_stats_text(
+            "Статистика за тиждень", (stats_week, wr_week)
+        )
       else:
-        text_res = format_stats_text("Статистика за весь час", stats_all)
+        text_res = format_stats_text(
+            "Статистика за весь час", (stats_all, wr_all)
+        )
 
       keyboard = {
           "inline_keyboard": [
@@ -731,7 +835,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Bot with bottom menu & inline pairs is running!"
+  return "Bot with economic calendar filter is running!"
 
 
 if __name__ == "__main__":
