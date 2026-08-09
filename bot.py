@@ -91,10 +91,6 @@ def is_trading_time() -> bool:
 
 # --- ФІЛЬТР ЕКОНОМІЧНОГО КАЛЕНДАРЯ ---
 def is_news_time(pair_name: str) -> bool:
-  """Перевіряє, чи є важливі новини (High impact) за пів години до та після
-
-  для валют даної пари.
-  """
   try:
     clean_name = pair_name.replace("=X", "").replace("/", "")
     if len(clean_name) >= 6:
@@ -125,7 +121,6 @@ def is_news_time(pair_name: str) -> bool:
           event_time = datetime.fromisoformat(date_str)
           event_time_utc = event_time.astimezone(timezone.utc)
           diff_minutes = (now_utc - event_time_utc).total_seconds() / 60.0
-          # Блокуємо сигнали за 30 хв до та 30 хв після новини
           if -30 <= diff_minutes <= 30:
             return True
   except Exception as e:
@@ -204,10 +199,12 @@ class AdvancedTechnicalAnalysis:
       rsi_window: int = 14,
       atr_window: int = 14,
       stoch_window: int = 14,
+      adx_window: int = 14,
   ):
     self.rsi_window = rsi_window
     self.atr_window = atr_window
     self.stoch_window = stoch_window
+    self.adx_window = adx_window
 
   def calculate_indicators(
       self, df_local: pd.DataFrame, df_global: pd.DataFrame = None
@@ -235,6 +232,38 @@ class AdvancedTechnicalAnalysis:
         (res_df["close"] - low_min) / (high_max - low_min + 1e-9)
     ) * 100
     res_df["Stoch_D"] = res_df["Stoch_K"].rolling(window=3).mean()
+
+    # ADX для молодшого таймфрейму (сила тренду)
+    alpha = 1 / self.adx_window
+    tr1 = res_df["high"] - res_df["low"]
+    tr2 = (res_df["high"] - res_df["close"].shift(1)).abs()
+    tr3 = (res_df["low"] - res_df["close"].shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    up_move = res_df["high"] - res_df["high"].shift(1)
+    down_move = res_df["low"].shift(1) - res_df["low"]
+
+    plus_dm = np.where(
+        (up_move > down_move) & (up_move > 0), up_move, 0.0
+    )
+    minus_dm = np.where(
+        (down_move > up_move) & (down_move > 0), down_move, 0.0
+    )
+
+    tr_smooth = tr.ewm(alpha=alpha, adjust=False).mean()
+    plus_dm_smooth = (
+        pd.Series(plus_dm, index=res_df.index).ewm(alpha=alpha, adjust=False).mean()
+    )
+    minus_dm_smooth = (
+        pd.Series(minus_dm, index=res_df.index)
+        .ewm(alpha=alpha, adjust=False)
+        .mean()
+    )
+
+    plus_di = 100 * (plus_dm_smooth / (tr_smooth + 1e-9))
+    minus_di = 100 * (minus_dm_smooth / (tr_smooth + 1e-9))
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+    res_df["ADX"] = dx.ewm(alpha=alpha, adjust=False).mean()
 
     # Локальні рівні (на 5m)
     res_df["Local_Support"] = res_df["low"].rolling(window=20).min()
@@ -318,6 +347,11 @@ class AdvancedTechnicalAnalysis:
     if len(df) < 25:
       return {"status": False}
     last = df.iloc[-1]
+    
+    # Фільтр тренду за ADX на молодшому таймфреймі (якщо ADX > 25, тренд занадто сильний для відскоків)
+    if not pd.isna(last["ADX"]) and last["ADX"] > 25:
+      return {"status": False}
+
     close = last["close"]
     g_support = last["Global_Support"]
     g_resistance = last["Global_Resistance"]
@@ -335,7 +369,7 @@ class AdvancedTechnicalAnalysis:
           "expiration": exp,
           "reason": (
               f"Ціна підходить до глобальної підтримки ({g_support:.5f}), RSI:"
-              f" {rsi:.1f}"
+              f" {rsi:.1f}, ADX: {last['ADX']:.1f}"
           ),
       }
 
@@ -346,7 +380,7 @@ class AdvancedTechnicalAnalysis:
           "expiration": exp,
           "reason": (
               f"Ціна підходить до глобального опору ({g_resistance:.5f}), RSI:"
-              f" {rsi:.1f}"
+              f" {rsi:.1f}, ADX: {last['ADX']:.1f}"
           ),
       }
 
@@ -364,6 +398,11 @@ class AdvancedTechnicalAnalysis:
       return default_response
 
     last = df.iloc[-1]
+    
+    # Фільтр тренду за ADX на молодшому таймфреймі: відсікаємо пробої
+    if not pd.isna(last["ADX"]) and last["ADX"] > 25:
+      return default_response
+
     close = last["close"]
     g_support = last["Global_Support"]
     g_resistance = last["Global_Resistance"]
@@ -388,8 +427,7 @@ class AdvancedTechnicalAnalysis:
           "rsi": round(float(rsi), 2),
           "stoch": round(float(stoch_k), 2),
           "reason": (
-              f"Відскок від {lvl_type} рівня підтримки з підтвердженням"
-              " осцилятора"
+              f"Відскок від {lvl_type} рівня підтримки (ADX: {last['ADX']:.1f})"
           ),
       }
 
@@ -406,7 +444,7 @@ class AdvancedTechnicalAnalysis:
           "rsi": round(float(rsi), 2),
           "stoch": round(float(stoch_k), 2),
           "reason": (
-              f"Відскік від {lvl_type} рівня опору з підтвердженням осцилятора"
+              f"Відскік від {lvl_type} рівня опору (ADX: {last['ADX']:.1f})"
           ),
       }
 
@@ -552,7 +590,6 @@ analyzer = AdvancedTechnicalAnalysis()
 
 
 def scan_pair(pair_symbol, asset_name, chat_id=None):
-  # Перевірка економічного календаря перед аналізом
   if is_news_time(asset_name):
     print(
         f"Пропуск сканування {asset_name}: активна важлива економічна новина."
@@ -604,7 +641,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
   return pair_symbol, None, None
 
 
-# Головне меню (нижня клавіатура) з кнопкою "Пари"
 def get_bottom_menu():
   return {
       "keyboard": [
@@ -615,7 +651,6 @@ def get_bottom_menu():
   }
 
 
-# Інлайн-клавіатура для вибору пар усередині чату
 def get_pairs_inline_keyboard():
   keys = list(PAIRS_MAP.keys())
   inline_keyboard = []
@@ -627,7 +662,6 @@ def get_pairs_inline_keyboard():
   return {"inline_keyboard": inline_keyboard}
 
 
-# --- ОБРОБНИК ВЕБХУКА ---
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
   update = request.get_json()
@@ -645,7 +679,7 @@ def telegram_webhook():
               "chat_id": chat_id,
               "text": (
                   "Оберіть пару для аналізу (Глобальні/Локальні рівні + RSI +"
-                  " Stochastic):"
+                  " Stochastic + ADX):"
               ),
               "reply_markup": get_pairs_inline_keyboard(),
           },
@@ -666,7 +700,7 @@ def telegram_webhook():
               "chat_id": chat_id,
               "text": (
                   "Оберіть пару для аналізу (Глобальні/Локальні рівні + RSI +"
-                  " Stochastic):"
+                  " Stochastic + ADX):"
               ),
               "reply_markup": get_pairs_inline_keyboard(),
           },
@@ -786,7 +820,7 @@ def telegram_webhook():
                     "chat_id": chat_id,
                     "text": (
                         f"📭 По парі {pair_name} чітких сигналів не знайдено біля"
-                        " рівнів (або діє новинний фільтр)."
+                        " рівнів (або спрацював захист від тренду/новин)."
                     ),
                 },
             )
@@ -835,7 +869,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Bot with economic calendar filter is running!"
+  return "Bot with ADX filter & calendar is running!"
 
 
 if __name__ == "__main__":
