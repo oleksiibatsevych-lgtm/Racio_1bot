@@ -158,7 +158,7 @@ def format_stats_text(title, data):
   return text
 
 
-# --- КЛАС ТЕХНІЧНОГО АНАЛІЗУ (Глобальні + Локальні рівні + RSI + Stochastic) ---
+# --- КЛАС ТЕХНІЧНОГО АНАЛІЗУ ---
 class AdvancedTechnicalAnalysis:
 
   def __init__(
@@ -237,23 +237,22 @@ class AdvancedTechnicalAnalysis:
 
   def calculate_dynamic_expiration(self, df: pd.DataFrame) -> int:
     if len(df) < 20 or "ATR" not in df.columns:
-      return 15
+      return 7
     last_row = df.iloc[-1]
     if pd.isna(last_row["ATR"]) or pd.isna(last_row["close"]):
-      return 15
+      return 7
 
     volatility_pct = (last_row["ATR"] / last_row["close"]) * 100
     recent_vol = ((df["ATR"] / df["close"]) * 100).tail(200)
-    if recent_vol.empty:
-      return 15
-    high_vol_threshold = recent_vol.quantile(0.75)
-    low_vol_threshold = recent_vol.quantile(0.25)
+    if recent_vol.empty or recent_vol.max() == recent_vol.min():
+      return 7
 
-    if volatility_pct > high_vol_threshold:
-      return 3
-    elif volatility_pct < low_vol_threshold:
-      return 30
-    return 15
+    min_v = recent_vol.min()
+    max_v = recent_vol.max()
+    norm = ((volatility_pct - min_v) / (max_v - min_v + 1e-9)).clip(0, 1)
+    # Точний час від 3 до 15 хвилин залежно від волатильності
+    exp = round(15 - norm * 12)
+    return int(max(3, min(15, exp)))
 
   def check_pre_alert(self, df: pd.DataFrame) -> dict:
     if len(df) < 25:
@@ -293,7 +292,7 @@ class AdvancedTechnicalAnalysis:
   def generate_signal(self, df: pd.DataFrame) -> dict:
     default_response = {
         "signal": "HOLD",
-        "expiration": 15,
+        "expiration": 7,
         "rsi": None,
         "stoch": None,
         "reason": "No setup",
@@ -492,7 +491,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
   )
 
   try:
-    # 1. Завантаження старшого таймфрейму для глобальних рівнів (1h)
     df_global = yf.download(
         pair_symbol, period="1mo", interval="1h", progress=False
     )
@@ -503,7 +501,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
     else:
       df_global = None
 
-    # 2. Завантаження робочого таймфрейму для входів (5m)
     df_local = yf.download(
         pair_symbol, period="5d", interval="5m", progress=False
     )
@@ -531,16 +528,19 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
   return pair_symbol, None, None
 
 
-def get_main_menu():
+def get_pairs_inline_keyboard():
   keys = list(PAIRS_MAP.keys())
-  keyboard = []
+  inline_keyboard = []
   for i in range(0, len(keys), 2):
-    row = [{"text": keys[i]}]
+    row = [{"text": keys[i], "callback_data": f"pair|{keys[i]}"}]
     if i + 1 < len(keys):
-      row.append({"text": keys[i + 1]})
-    keyboard.append(row)
-  keyboard.append([{"text": "📊 Аналіз усіх пар"}, {"text": "📈 Статистика"}])
-  return {"keyboard": keyboard, "resize_keyboard": True}
+      row.append({"text": keys[i + 1], "callback_data": f"pair|{keys[i+1]}"})
+    inline_keyboard.append(row)
+  inline_keyboard.append([
+      {"text": "📊 Аналіз усіх пар", "callback_data": "action|scan_all"},
+      {"text": "📈 Статистика", "callback_data": "action|stats_menu"},
+  ])
+  return {"inline_keyboard": inline_keyboard}
 
 
 # --- ОБРОБНИК ВЕБХУКА ---
@@ -563,12 +563,19 @@ def telegram_webhook():
                   "Оберіть пару для аналізу (Глобальні/Локальні рівні + RSI +"
                   " Stochastic):"
               ),
-              "reply_markup": get_main_menu(),
+              "reply_markup": get_pairs_inline_keyboard(),
           },
       )
 
-    elif text in PAIRS_MAP:
-      ticker = PAIRS_MAP[text]
+  elif "callback_query" in update:
+    query = update["callback_query"]
+    chat_id = query["message"]["chat"]["id"]
+    message_id = query["message"]["message_id"]
+    data = query["data"]
+
+    if data.startswith("pair|"):
+      _, pair_name = data.split("|")
+      ticker = PAIRS_MAP[pair_name]
       if not is_trading_time():
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -584,26 +591,26 @@ def telegram_webhook():
 
       requests.post(
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={"chat_id": chat_id, "text": f"⏳ Аналізую {text}..."},
+          json={"chat_id": chat_id, "text": f"⏳ Аналізую {pair_name}..."},
       )
 
       def run_single():
         try:
           _, df_data, sig_res = scan_pair(
-              ticker, asset_name=text, chat_id=chat_id
+              ticker, asset_name=pair_name, chat_id=chat_id
           )
           notifier = TelegramSignalSender(
               token=TELEGRAM_TOKEN, chat_id=str(chat_id)
           )
           if sig_res and sig_res["signal"] != "HOLD":
-            notifier.send_signal(df_data, sig_res, asset=text)
+            notifier.send_signal(df_data, sig_res, asset=pair_name)
           else:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={
                     "chat_id": chat_id,
                     "text": (
-                        f"📭 По парі {text} чітких сигналів не знайдено біля"
+                        f"📭 По парі {pair_name} чітких сигналів не знайдено біля"
                         " рівнів."
                     ),
                 },
@@ -613,7 +620,7 @@ def telegram_webhook():
 
       threading.Thread(target=run_single).start()
 
-    elif text == "📊 Аналіз усіх пар":
+    elif data == "action|scan_all":
       if not is_trading_time():
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -659,7 +666,7 @@ def telegram_webhook():
 
       threading.Thread(target=run_mass).start()
 
-    elif text == "📈 Статистика":
+    elif data == "action|stats_menu":
       stats_day, stats_week, stats_all = get_statistics()
       keyboard = {
           "inline_keyboard": [
@@ -668,25 +675,41 @@ def telegram_webhook():
                   {"text": "📆 За тиждень", "callback_data": "stats|week"},
               ],
               [{"text": "📈 За весь час", "callback_data": "stats|all"}],
+              [
+                  {
+                      "text": "« Назад до вибору пар",
+                      "callback_data": "action|pairs_menu",
+                  }
+              ],
           ]
       }
       requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
           json={
               "chat_id": chat_id,
+              "message_id": message_id,
               "text": "📊 **Виберіть період для перегляду статистики:**",
               "reply_markup": keyboard,
               "parse_mode": "Markdown",
           },
       )
 
-  elif "callback_query" in update:
-    query = update["callback_query"]
-    chat_id = query["message"]["chat"]["id"]
-    message_id = query["message"]["message_id"]
-    data = query["data"]
+    elif data == "action|pairs_menu":
+      keyboard = get_pairs_inline_keyboard()
+      requests.post(
+          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
+          json={
+              "chat_id": chat_id,
+              "message_id": message_id,
+              "text": (
+                  "Оберіть пару для аналізу (Глобальні/Локальні рівні + RSI +"
+                  " Stochastic):"
+              ),
+              "reply_markup": keyboard,
+          },
+      )
 
-    if data.startswith("stats|"):
+    elif data.startswith("stats|"):
       _, period = data.split("|")
       stats_day, stats_week, stats_all = get_statistics()
       if period == "day":
@@ -701,8 +724,8 @@ def telegram_webhook():
               [
                   {"text": "🔄 Оновити", "callback_data": f"stats|{period}"},
                   {
-                      "text": "« Назад до вибору періоду",
-                      "callback_data": "stats|menu",
+                      "text": "« Назад до меню",
+                      "callback_data": "action|stats_menu",
                   },
               ]
           ]
@@ -718,33 +741,12 @@ def telegram_webhook():
           },
       )
 
-    elif data == "stats|menu":
-      keyboard = {
-          "inline_keyboard": [
-              [
-                  {"text": "📅 За добу", "callback_data": "stats|day"},
-                  {"text": "📆 За тиждень", "callback_data": "stats|week"},
-              ],
-              [{"text": "📈 За весь час", "callback_data": "stats|all"}],
-          ]
-      }
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
-          json={
-              "chat_id": chat_id,
-              "message_id": message_id,
-              "text": "📊 **Виберіть період для перегляду статистики:**",
-              "reply_markup": keyboard,
-              "parse_mode": "Markdown",
-          },
-      )
-
   return "OK", 200
 
 
 @app.route("/")
 def home():
-  return "Global & Local Levels Bot with Pre-alerts is running!"
+  return "Inline Pairs Bot with Levels & Pre-alerts is running!"
 
 
 if __name__ == "__main__":
