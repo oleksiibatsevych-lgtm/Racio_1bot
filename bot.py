@@ -46,7 +46,7 @@ PAIRS_MAP = {
 }
 
 # Зберігання даних у пам'яті
-stats_history = []   # Перевірені результати сигналів
+stats_history = []   # Перевірені результати сигналів (ручні)
 active_signals = {}  # Активні сигнали для зв'язку з кнопками (id -> дані)
 signal_counter = 0   # Лічильник для унікальних ID сигналів
 
@@ -81,7 +81,7 @@ def self_ping():
 threading.Thread(target=self_ping, daemon=True).start()
 
 
-# --- ТОРГОВИЙ ЧАС ТА НОВИНИ ---
+# --- ТОРГОВИЙ ЧАС ТА НОВИНИ (10:00 - 22:00 Київський час = 7:00 - 19:00 UTC) ---
 def is_trading_time() -> bool:
   current_hour = datetime.now(timezone.utc).hour
   return 7 <= current_hour < 19
@@ -310,33 +310,42 @@ class AdvancedTechnicalAnalysis:
     return default
 
 
-# --- ВІДПРАВКА ПОВІДОМЛЕНЬ ТА КНОПОК ---
+# --- ВІДПРАВКА ПОВІДОМЛЕНЬ ТА СВІЧКОВИХ ГРАФІКІВ БЕЗ ІНДИКАТОРІВ ---
 class TelegramSignalSender:
   def __init__(self, token: str, chat_id: str):
     self.api_url = f"https://api.telegram.org/bot{token}"
     self.chat_id = chat_id
 
   def _create_chart(self, df: pd.DataFrame, asset_name: str) -> io.BytesIO:
-    plot_df = df.tail(60)
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]})
+    plot_df = df.tail(60).copy().reset_index(drop=True)
+    fig, ax = plt.subplots(figsize=(10, 6))
     
-    ax1.plot(plot_df.index, plot_df["close"], label="Close", color="#d1d4dc", alpha=0.6, linewidth=1)
-    ax1.plot(plot_df.index, plot_df["Global_Support"], label="Global Sup", color="#00897b", linestyle="-.", linewidth=1.2)
-    ax1.plot(plot_df.index, plot_df["Global_Resistance"], label="Global Res", color="#c62828", linestyle="-.", linewidth=1.2)
-    ax1.set_title(f"Signal: {asset_name}", fontsize=14, color="white", weight="bold")
-    ax1.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white")
-    ax1.grid(True, color="#2a2e39", alpha=0.5)
+    last_sup = df["Global_Support"].iloc[-1]
+    last_res = df["Global_Resistance"].iloc[-1]
 
-    ax2.plot(plot_df.index, plot_df["RSI"], label="RSI", color="#e91e63", linewidth=1.2)
-    ax2.axhline(70, color="red", linestyle=":", alpha=0.7)
-    ax2.axhline(30, color="green", linestyle=":", alpha=0.7)
-    ax2.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white")
-    ax2.grid(True, color="#2a2e39", alpha=0.5)
+    # Свічковий графік
+    for i in range(len(plot_df)):
+      op = plot_df["open"].iloc[i]
+      hi = plot_df["high"].iloc[i]
+      lo = plot_df["low"].iloc[i]
+      cl = plot_df["close"].iloc[i]
+      
+      color = "#26a69a" if cl >= op else "#ef5350"
+      ax.vlines(i, lo, hi, color=color, linewidth=1, alpha=0.9)
+      ax.bar(i, abs(cl - op), bottom=min(op, cl), color=color, width=0.6, alpha=0.9)
 
-    for ax in [ax1, ax2]:
-      ax.set_facecolor("#131722")
-      ax.tick_params(colors="white")
-      for spine in ax.spines.values(): spine.set_edgecolor("#2a2e39")
+    ax.axhline(y=last_sup, color="#00897b", linestyle="--", alpha=0.8, linewidth=1.5, label=f"Support: {last_sup:.4f}")
+    ax.axhline(y=last_res, color="#c62828", linestyle="--", alpha=0.8, linewidth=1.5, label=f"Resistance: {last_res:.4f}")
+
+    ax.set_title(f"Signal: {asset_name} | Sup: {last_sup:.4f} | Res: {last_res:.4f}", fontsize=11, color="white", weight="bold")
+    ax.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white", fontsize=9)
+    ax.grid(True, color="#2a2e39", alpha=0.5)
+
+    ax.set_facecolor("#131722")
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+      spine.set_edgecolor("#2a2e39")
+      
     fig.patch.set_facecolor("#131722")
     plt.tight_layout()
 
@@ -346,18 +355,42 @@ class TelegramSignalSender:
     plt.close(fig)
     return buf
 
-  def send_pre_alert(self, pre_data: dict, asset: str):
-    caption = (f"⚠️ **PRE-ALERT**\n📊 `{asset}` | 🎯 `{pre_data['type']}`\n"
-               f"⏳ Експірація: `{pre_data['expiration']} хв`\n💡 _{pre_data['reason']}_")
-    requests.post(f"{self.api_url}/sendMessage", json={"chat_id": self.chat_id, "text": caption, "parse_mode": "Markdown"})
+  def send_pre_alert(self, df: pd.DataFrame, pre_data: dict, asset: str):
+    chart_buffer = self._create_chart(df, asset)
+    
+    caption = (
+        f"⚠️ **PRE-ALERT**\n"
+        f"📊 `{asset}` | 🎯 `{pre_data['type']}`\n"
+        f"⏳ Експірація: `{pre_data['expiration']} хв`\n"
+        f"💡 _{pre_data['reason']}_"
+    )
+    
+    files = {"photo": (f"{asset}_pre.png", chart_buffer, "image/png")}
+    data = {
+        "chat_id": self.chat_id, 
+        "caption": caption, 
+        "parse_mode": "Markdown"
+    }
+    requests.post(f"{self.api_url}/sendPhoto", data=data, files=files)
 
   def send_signal(self, df: pd.DataFrame, signal_data: dict, asset: str, sig_id: int):
     chart_buffer = self._create_chart(df, asset)
     sig_text = "🟢 ВВЕРХ (CALL)" if signal_data["signal"] == "CALL" else "🔴 ВНИЗ (PUT)"
-    caption = (f"🚨 **СІГНАЛ: {sig_text}**\n📊 `{asset}`\n⏳ Експірація: `{signal_data['expiration']} хв`\n"
-               f"📈 RSI: `{signal_data['rsi']}` | 📉 Stoch: `{signal_data['stoch']}`\n💡 _{signal_data['reason']}_")
     
-    # Кнопки оцінки результату
+    last_row = df.iloc[-1]
+    sup_price = last_row["Global_Support"]
+    res_price = last_row["Global_Resistance"]
+
+    caption = (
+        f"🚨 **СІГНАЛ: {sig_text}**\n"
+        f"📊 `{asset}`\n"
+        f"⏳ Експірація: `{signal_data['expiration']} хв`\n"
+        f"🟢 Підтримка: `{sup_price:.4f}`\n"
+        f"🔴 Опір: `{res_price:.4f}`\n"
+        f"📈 RSI: `{signal_data['rsi']}` | 📉 Stoch: `{signal_data['stoch']}`\n"
+        f"💡 _{signal_data['reason']}_"
+    )
+    
     reply_markup = {
         "inline_keyboard": [
             [
@@ -401,7 +434,7 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
 
     pre_res = analyzer.check_pre_alert(df_ind)
     if pre_res["status"] and notifier:
-      notifier.send_pre_alert(pre_res, asset_name)
+      notifier.send_pre_alert(df_ind, pre_res, asset_name)
 
     signal_res = analyzer.generate_signal(df_ind)
     
@@ -409,7 +442,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
       signal_counter += 1
       sig_id = signal_counter
       
-      # Зберігаємо активний сигнал, щоб знати пару та назву при натисканні кнопки
       active_signals[sig_id] = {
           "pair": asset_name,
           "signal": signal_res["signal"]
@@ -447,12 +479,12 @@ def telegram_webhook():
 
     elif text == "📊 Аналіз усіх пар":
       if not is_trading_time():
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Зараз поза межами торгового часу."})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Зараз поза межами торгового часу (10:00 - 22:00)."})
         return "OK", 200
       requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⏳ Починаю масове сканування..."})
       def run_mass():
         for name, ticker in PAIRS_MAP.items(): scan_pair(ticker, name, chat_id)
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "✅ Сканування завершено. Знайдені сигнали відправлені з кнопками оцінки!"})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "✅ Сканування завершено. Усі попередження та сигнали надіслано з чистими свічковими графіками!"})
       threading.Thread(target=run_mass).start()
 
     elif text == "📈 Статистика":
@@ -468,7 +500,7 @@ def telegram_webhook():
     if data.startswith("pair|"):
       _, pair_name = data.split("|")
       if not is_trading_time():
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Поза межами торгового часу."})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Поза межами торгового часу (10:00 - 22:00)."})
         return "OK", 200
       requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"⏳ Аналізую {pair_name}..."})
       threading.Thread(target=lambda: scan_pair(PAIRS_MAP[pair_name], pair_name, chat_id)).start()
@@ -480,7 +512,6 @@ def telegram_webhook():
       if sig_id in active_signals:
         sig_info = active_signals.pop(sig_id)
         
-        # Додаємо у загальну історію статистики
         stats_history.append({
             "timestamp": datetime.now(),
             "pair": sig_info["pair"],
@@ -488,7 +519,6 @@ def telegram_webhook():
             "result": result
         })
 
-        # Оновлюємо текст повідомлення, щоб показати, що результат зафіксовано, і прибираємо кнопки
         old_caption = query["message"].get("caption", "")
         icon = "✅ WIN" if result == "WIN" else "❌ LOSS"
         new_caption = f"{old_caption}\n\n*Статус угоди:* Карточка закрита — **{icon}**"
@@ -500,7 +530,6 @@ def telegram_webhook():
             "parse_mode": "Markdown"
         })
         
-        # Відправляємо коротке підтвердження
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={
             "callback_query_id": query["id"],
             "text": f"Зараховано: {icon}!"
@@ -526,7 +555,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Bot with Interactive Buttons is running!"
+  return "Bot with Pre-Alert Charts and Candlesticks is running!"
 
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 5000))
