@@ -46,8 +46,8 @@ PAIRS_MAP = {
 }
 
 # Зберігання даних у пам'яті
-stats_history = []   # Перевірені результати сигналів (ручні)
-active_signals = {}  # Активні сигнали для зв'язку з кнопками (id -> дані)
+stats_history = []   # Перевірені результати сигналів
+active_signals = {}  # Активні сигнали для зв'язку з кнопками
 signal_counter = 0   # Лічильник для унікальних ID сигналів
 
 
@@ -189,7 +189,7 @@ def format_stats_text(title, data_tuple):
   return text
 
 
-# --- КЛАС ТЕХНІЧНОГО АНАЛІЗУ ---
+# --- КЛАС ТЕХНІЧНОГО ТА ПАТЕРНОВОГО АНАЛІЗУ ---
 class AdvancedTechnicalAnalysis:
   def __init__(self):
     self.rsi_window = 14
@@ -273,13 +273,87 @@ class AdvancedTechnicalAnalysis:
     exp = round(15 - norm * 12)
     return int(max(3, min(15, exp)))
 
-  def check_pre_alert(self, df: pd.DataFrame) -> dict:
-    if len(df) < 25: return {"status": False}
-    last = df.iloc[-1]
+  def check_chart_patterns(self, df: pd.DataFrame) -> dict:
+    """Визначення розширених графічних патернів: Подвійне дно/вершина, Трикутники, Канали"""
+    if len(df) < 50:
+        return {"pattern": None, "type": None}
+
+    recent = df.tail(50).copy().reset_index(drop=True)
+    
+    # Знаходимо локальні екстремуми
+    recent['is_trough'] = (recent['low'] == recent['low'].rolling(5, center=True).min())
+    recent['is_peak'] = (recent['high'] == recent['high'].rolling(5, center=True).max())
+
+    troughs = recent[recent['is_trough']]
+    peaks = recent[recent['is_peak']]
+    current_price = recent['close'].iloc[-1]
+
+    # 1. Подвійне дно / Подвійна вершина
+    if len(troughs) >= 2:
+        t1, t2 = troughs.iloc[-2], troughs.iloc[-1]
+        if abs(t1['low'] - t2['low']) / t2['low'] < 0.0015 and abs(t2.name - t1.name) >= 5 and current_price > t2['low']:
+            return {"pattern": "Double Bottom", "type": "CALL", "reason": f"Патерн 'Подвійне дно' ({t2['low']:.4f})"}
+
+    if len(peaks) >= 2:
+        p1, p2 = peaks.iloc[-2], peaks.iloc[-1]
+        if abs(p1['high'] - p2['high']) / p2['high'] < 0.0015 and abs(p2.name - p1.name) >= 5 and current_price < p2['high']:
+            return {"pattern": "Double Top", "type": "PUT", "reason": f"Патерн 'Подвійна вершина' ({p2['high']:.4f})"}
+
+    # 2. Трикутники (Звуження діапазону)
+    if len(peaks) >= 3 and len(troughs) >= 3:
+        p_highs = peaks['high'].tail(3).values
+        t_lows = troughs['low'].tail(3).values
+        
+        # Висхідний трикутник
+        if abs(p_highs[0] - p_highs[-1]) / p_highs[-1] < 0.002 and t_lows[-1] > t_lows[0]:
+            if current_price >= p_highs[-1] * 0.998:
+                return {"pattern": "Ascending Triangle", "type": "CALL", "reason": "Вихід із висхідного трикутника вгору"}
+        
+        # Низхідний трикутник
+        elif abs(t_lows[0] - t_lows[-1]) / t_lows[-1] < 0.002 and p_highs[-1] < p_highs[0]:
+            if current_price <= t_lows[-1] * 1.002:
+                return {"pattern": "Descending Triangle", "type": "PUT", "reason": "Вихід із низхідного трикутника вниз"}
+
+    # 3. Паралельні канали
+    if len(peaks) >= 2 and len(troughs) >= 2:
+        high_diff = abs(peaks['high'].iloc[-1] - peaks['high'].iloc[-2])
+        low_diff = abs(troughs['low'].iloc[-1] - troughs['low'].iloc[-2])
+        channel_width = recent['high'].max() - recent['low'].min()
+        
+        if channel_width > 0 and abs(high_diff - low_diff) / channel_width < 0.1:
+            recent_low_sup = troughs['low'].iloc[-1]
+            recent_high_res = peaks['high'].iloc[-1]
+            if abs(current_price - recent_low_sup) / current_price < 0.002:
+                return {"pattern": "Channel Support", "type": "CALL", "reason": "Відскік від нижньої межі каналу"}
+            elif abs(current_price - recent_high_res) / current_price < 0.002:
+                return {"pattern": "Channel Resistance", "type": "PUT", "reason": "Відскік від верхньої межі каналу"}
+
+    return {"pattern": None, "type": None}
+
+  def check_multi_tf_patterns(self, df_1m: pd.DataFrame, df_3m: pd.DataFrame, df_5m: pd.DataFrame) -> dict:
+    """Перевірка патернів на 1m, 3m та 5m таймфреймах"""
+    for tf_name, df_tf in [("1m", df_1m), ("3m", df_3m), ("5m", df_5m)]:
+        if df_tf is not None and not df_tf.empty:
+            res = self.check_chart_patterns(df_tf)
+            if res["pattern"] is not None:
+                return {
+                    "pattern": res["pattern"],
+                    "type": res["type"],
+                    "reason": f"[{tf_name}] {res['reason']}"
+                }
+    return {"pattern": None, "type": None}
+
+  def check_pre_alert(self, df_5m: pd.DataFrame, df_3m: pd.DataFrame = None, df_1m: pd.DataFrame = None) -> dict:
+    if len(df_5m) < 25: return {"status": False}
+    last = df_5m.iloc[-1]
     if not pd.isna(last["ADX"]) and last["ADX"] > 25: return {"status": False}
 
     c, g_sup, g_res, rsi, stoch = last["close"], last["Global_Support"], last["Global_Resistance"], last["RSI"], last["Stoch_K"]
-    exp = self.calculate_dynamic_expiration(df)
+    exp = self.calculate_dynamic_expiration(df_5m)
+
+    pattern_res = self.check_multi_tf_patterns(df_1m, df_3m, df_5m)
+    if pattern_res["pattern"] is not None:
+      return {"status": True, "type": f"🎯 Патерн: {pattern_res['pattern']}", "expiration": exp, "reason": pattern_res["reason"]}
 
     if abs(c - g_sup) / c < 0.004 and (30 <= rsi <= 36 or stoch <= 25):
       return {"status": True, "type": "🟢 ВВЕРХ (CALL)", "expiration": exp, "reason": f"Підхід до підтримки. RSI: {rsi:.1f}, ADX: {last['ADX']:.1f}"}
@@ -287,15 +361,28 @@ class AdvancedTechnicalAnalysis:
       return {"status": True, "type": "🔴 ВНИЗ (PUT)", "expiration": exp, "reason": f"Підхід до опору. RSI: {rsi:.1f}, ADX: {last['ADX']:.1f}"}
     return {"status": False}
 
-  def generate_signal(self, df: pd.DataFrame) -> dict:
+  def generate_signal(self, df_5m: pd.DataFrame, df_3m: pd.DataFrame = None, df_1m: pd.DataFrame = None) -> dict:
     default = {"signal": "HOLD", "expiration": 7, "rsi": None, "stoch": None, "reason": "No setup"}
-    if len(df) < 25: return default
-    last = df.iloc[-1]
+    if len(df_5m) < 25: return default
+    last = df_5m.iloc[-1]
     if not pd.isna(last["ADX"]) and last["ADX"] > 25: return default
 
-    c, g_sup, g_res, l_sup, l_res = last["close"], last["Global_Support"], last["Global_Resistance"], last["Local_Support"], last["Local_Resistance"]
+    exp = self.calculate_dynamic_expiration(df_5m)
     rsi, stoch_k, stoch_d = last["RSI"], last["Stoch_K"], last["Stoch_D"]
-    exp = self.calculate_dynamic_expiration(df)
+
+    # 1. Пріоритет графічним патернам на 1m, 3m та 5m таймфреймах
+    pattern_res = self.check_multi_tf_patterns(df_1m, df_3m, df_5m)
+    if pattern_res["pattern"] is not None:
+        return {
+            "signal": pattern_res["type"],
+            "expiration": exp,
+            "rsi": round(float(rsi), 2) if not pd.isna(rsi) else 50.0,
+            "stoch": round(float(stoch_k), 2) if not pd.isna(stoch_k) else 50.0,
+            "reason": pattern_res["reason"]
+        }
+
+    # 2. Стандартна логіка відскоків від рівнів
+    c, g_sup, g_res, l_sup, l_res = last["close"], last["Global_Support"], last["Global_Resistance"], last["Local_Support"], last["Local_Resistance"]
 
     near_g_sup = abs(c - g_sup) / c < 0.0025
     near_l_sup = abs(c - l_sup) / c < 0.0015
@@ -419,24 +506,41 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
 
   notifier = TelegramSignalSender(TELEGRAM_TOKEN, str(chat_id)) if chat_id else None
   try:
+    # 1. Глобальний таймфрейм (1h) для рівнів
     df_global = yf.download(pair_symbol, period="1mo", interval="1h", progress=False)
     if not df_global.empty:
       if isinstance(df_global.columns, pd.MultiIndex): df_global.columns = df_global.columns.get_level_values(0)
       df_global.columns = [c.lower() for c in df_global.columns]
     else: df_global = None
 
+    # 2. Локальний базовий таймфрейм (5m) для індикаторів
     df_local = yf.download(pair_symbol, period="5d", interval="5m", progress=False)
     if df_local.empty or len(df_local) < 30: return
     if isinstance(df_local.columns, pd.MultiIndex): df_local.columns = df_local.columns.get_level_values(0)
     df_local.columns = [c.lower() for c in df_local.columns]
 
-    df_ind = analyzer.calculate_indicators(df_local, df_global)
+    df_5m = analyzer.calculate_indicators(df_local, df_global)
 
-    pre_res = analyzer.check_pre_alert(df_ind)
+    # 3. 1-хвилинний таймфрейм (1m) та ресемплінг у 3-хвилинний (3m) для патернів
+    df_1m = yf.download(pair_symbol, period="2d", interval="1m", progress=False)
+    df_3m = None
+    if not df_1m.empty:
+      if isinstance(df_1m.columns, pd.MultiIndex): df_1m.columns = df_1m.columns.get_level_values(0)
+      df_1m.columns = [c.lower() for c in df_1m.columns]
+      if len(df_1m) >= 50:
+        df_3m = df_1m.resample('3min').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+
+    pre_res = analyzer.check_pre_alert(df_5m, df_3m, df_1m)
     if pre_res["status"] and notifier:
-      notifier.send_pre_alert(df_ind, pre_res, asset_name)
+      notifier.send_pre_alert(df_5m, pre_res, asset_name)
 
-    signal_res = analyzer.generate_signal(df_ind)
+    signal_res = analyzer.generate_signal(df_5m, df_3m, df_1m)
     
     if signal_res["signal"] != "HOLD" and notifier:
       signal_counter += 1
@@ -447,7 +551,7 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
           "signal": signal_res["signal"]
       }
 
-      notifier.send_signal(df_ind, signal_res, asset_name, sig_id)
+      notifier.send_signal(df_5m, signal_res, asset_name, sig_id)
 
   except Exception as e:
     print(f"Помилка сканування {pair_symbol}: {e}")
@@ -481,10 +585,10 @@ def telegram_webhook():
       if not is_trading_time():
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Зараз поза межами торгового часу (10:00 - 22:00)."})
         return "OK", 200
-      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⏳ Починаю масове сканування..."})
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⏳ Починаю масове сканування (1m, 3m, 5m, 1h)..."})
       def run_mass():
         for name, ticker in PAIRS_MAP.items(): scan_pair(ticker, name, chat_id)
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "✅ Сканування завершено. Усі попередження та сигнали надіслано з чистими свічковими графіками!"})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "✅ Сканування завершено!"})
       threading.Thread(target=run_mass).start()
 
     elif text == "📈 Статистика":
@@ -502,7 +606,7 @@ def telegram_webhook():
       if not is_trading_time():
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Поза межами торгового часу (10:00 - 22:00)."})
         return "OK", 200
-      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"⏳ Аналізую {pair_name}..."})
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"⏳ Аналізую {pair_name} по кількох таймфреймах..."})
       threading.Thread(target=lambda: scan_pair(PAIRS_MAP[pair_name], pair_name, chat_id)).start()
 
     elif data.startswith("res|"):
@@ -555,7 +659,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Bot with Pre-Alert Charts and Candlesticks is running!"
+  return "Bot with Multi-Timeframe Pattern Recognition (1m, 3m, 5m) is running!"
 
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 5000))
