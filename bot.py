@@ -25,7 +25,6 @@ RENDER_URL = os.environ.get(
     "RENDER_EXTERNAL_URL", "https://racio-1bot.onrender.com"
 )
 
-# Ініціалізація клієнта Gemini
 client = genai.Client()
 
 PAIRS_MAP = {
@@ -52,7 +51,6 @@ PAIRS_MAP = {
     "GBP/CAD": "GBPCAD=X",
 }
 
-# Зберігання даних у пам'яті
 stats_history = []
 active_signals = {}
 signal_counter = 0
