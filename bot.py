@@ -5,6 +5,7 @@ import threading
 import time
 from flask import Flask, request
 from google import genai
+from google.genai import types
 import matplotlib
 import numpy as np
 import pandas as pd
@@ -22,7 +23,7 @@ RENDER_URL = os.environ.get(
     "RENDER_EXTERNAL_URL", "https://racio-1bot.onrender.com"
 )
 
-# Ініціалізація нового клієнта Gemini (автоматично підхоплює GEMINI_API_KEY з оточення)
+# Ініціалізація нового клієнта Gemini
 client = genai.Client()
 
 PAIRS_MAP = {
@@ -50,9 +51,9 @@ PAIRS_MAP = {
 }
 
 # Зберігання даних у пам'яті
-stats_history = []  # Перевірені результати сигналів
-active_signals = {}  # Активні сигнали для зв'язку з кнопками
-signal_counter = 0  # Лічильник для унікальних ID сигналів
+stats_history = []
+active_signals = {}
+signal_counter = 0
 
 
 # --- ПЕРЕВІРКА ВЕБХУКА ---
@@ -124,7 +125,104 @@ def is_news_time(pair_name: str) -> bool:
   return False
 
 
-# --- СТАТИСТИКА РЕАЛЬНИХ РЕЗУЛЬТАТІВ ---
+# --- ГЕНЕРАЦІЯ ГРАФІКА ---
+def create_chart_image(df: pd.DataFrame, asset_name: str) -> io.BytesIO:
+  plot_df = df.tail(60).copy().reset_index(drop=True)
+  fig, ax = plt.subplots(figsize=(10, 6))
+
+  last_sup = df["Global_Support"].iloc[-1]
+  last_res = df["Global_Resistance"].iloc[-1]
+
+  for i in range(len(plot_df)):
+    op = plot_df["open"].iloc[i]
+    hi = plot_df["high"].iloc[i]
+    lo = plot_df["low"].iloc[i]
+    cl = plot_df["close"].iloc[i]
+
+    color = "#26a69a" if cl >= op else "#ef5350"
+    ax.vlines(i, lo, hi, color=color, linewidth=1, alpha=0.9)
+    ax.bar(
+        i,
+        abs(cl - op),
+        bottom=min(op, cl),
+        color=color,
+        width=0.6,
+        alpha=0.9,
+    )
+
+  ax.plot(
+      plot_df.index,
+      plot_df["BB_Upper"],
+      color="#2962FF",
+      linestyle="--",
+      alpha=0.5,
+      label="BB Upper",
+  )
+  ax.plot(
+      plot_df.index,
+      plot_df["BB_Middle"],
+      color="#FF6D00",
+      linestyle="-",
+      alpha=0.5,
+      label="BB Middle",
+  )
+  ax.plot(
+      plot_df.index,
+      plot_df["BB_Lower"],
+      color="#2962FF",
+      linestyle="--",
+      alpha=0.5,
+      label="BB Lower",
+  )
+
+  ax.axhline(
+      y=last_sup,
+      color="#00897b",
+      linestyle="--",
+      alpha=0.8,
+      linewidth=1.5,
+      label=f"Support: {last_sup:.4f}",
+  )
+  ax.axhline(
+      y=last_res,
+      color="#c62828",
+      linestyle="--",
+      alpha=0.8,
+      linewidth=1.5,
+      label=f"Resistance: {last_res:.4f}",
+  )
+
+  ax.set_title(
+      f"Signal: {asset_name} | Bollinger & S/R",
+      fontsize=11,
+      color="white",
+      weight="bold",
+  )
+  ax.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white", fontsize=8)
+  ax.grid(True, color="#2a2e39", alpha=0.5)
+
+  ax.set_facecolor("#131722")
+  ax.tick_params(colors="white")
+  for spine in ax.spines.values():
+    spine.set_edgecolor("#2a2e39")
+
+  fig.patch.set_facecolor("#131722")
+  plt.tight_layout()
+
+  buf = io.BytesIO()
+  plt.savefig(
+      buf,
+      format="png",
+      dpi=150,
+      facecolor=fig.get_facecolor(),
+      edgecolor="none",
+  )
+  buf.seek(0)
+  plt.close(fig)
+  return buf
+
+
+# --- СТАТИСТИКА ---
 def get_statistics():
   now = datetime.now()
   day_ago = now - timedelta(days=1)
@@ -195,40 +293,48 @@ def format_stats_text(title, data_tuple):
   return text
 
 
-# --- ШІ-ВІДПОВІДАЛЬНИЙ ЗА ВАЛІДАЦІЮ СИГНАЛІВ (НОВИЙ SDK) ---
+# --- МУЛЬТИМОДАЛЬНИЙ ШІ-РАДНИК (VISION AI) ---
 class AITradingAdvisor:
 
   def __init__(self):
     pass
 
   def evaluate_signal(
-      self, pair_name: str, signal_data: dict, recent_candles_str: str
+      self,
+      pair_name: str,
+      signal_data: dict,
+      recent_candles_str: str,
+      chart_buffer: io.BytesIO,
   ) -> bool:
-    """Аналізує сигнал через Gemini перед відправкою користувачу (через новий SDK)"""
+    """Аналізує сигнал через Gemini Vision за допомогою зображення графіка та даних"""
     prompt = (
         f"Ти експертний AI-алгоритм для торгівлі бінарними опціонами та Forex. "
-        f"Оціни доцільність відкриття угоди для пари {pair_name}:\n"
+        f"Оціни доцільність відкриття угоди для пари {pair_name} за цим графіком та показниками:\n"
         f"- Сигнал: {signal_data['signal']}\n"
         f"- Причина/Патерн: {signal_data['reason']}\n"
         f"- Експірація: {signal_data['expiration']} хв\n"
         f"- RSI: {signal_data.get('rsi')}, Stoch: {signal_data.get('stoch')}\n"
-        f"- Контекст останніх 5 свічок (Open, High, Low, Close):\n{recent_candles_str}\n\n"
+        f"- Останні свічки:\n{recent_candles_str}\n\n"
+        f"Проаналізуй візуальне розташування ціни відносно ліній Боллінджера та рівнів на графіку. "
         f"Чи варто відкривати цю угоду? Відповідай ТІЛЬКИ одним словом: 'YES' (якщо ризик виправданий) або 'NO' (якщо ринок шумно-небезпечний)."
     )
     try:
+      chart_buffer.seek(0)
+      image_part = types.Part.from_bytes(
+          data=chart_buffer.getvalue(), mime_type="image/png"
+      )
       response = client.models.generate_content(
-          model="gemini-2.5-flash",
-          contents=prompt,
+          model="gemini-2.5-flash", contents=[prompt, image_part]
       )
       decision = response.text.strip().upper()
-      print(f"AI Advisor decision for {pair_name}: {decision}")
+      print(f"AI Vision Advisor decision for {pair_name}: {decision}")
       return "YES" in decision
     except Exception as e:
-      print(f"Помилка ШІ-валідації: {e}")
+      print(f"Помилка ШІ-валідації (Vision): {e}")
       return True
 
 
-# --- КЛАС ТЕХНІЧНОГО ТА ПАТЕРНОВОГО АНАЛІЗУ + BOLLINGER BANDS ---
+# --- ТЕХНІЧНИЙ АНАЛІЗ ---
 class AdvancedTechnicalAnalysis:
 
   def __init__(self):
@@ -258,7 +364,6 @@ class AdvancedTechnicalAnalysis:
     ) * 100
     res_df["Stoch_D"] = res_df["Stoch_K"].rolling(window=3).mean()
 
-    # Bollinger Bands
     res_df["BB_Middle"] = (
         res_df["close"].rolling(window=self.bb_window).mean()
     )
@@ -463,113 +568,22 @@ class AdvancedTechnicalAnalysis:
     return default
 
 
-# --- ВІДПРАВКА ПОВІДОМЛЕНЬ ТА ГРАФІКІВ ---
+# --- ВІДПРАВКА В TELEGRAM ---
 class TelegramSignalSender:
 
   def __init__(self, token: str, chat_id: str):
     self.api_url = f"https://api.telegram.org/bot{token}"
     self.chat_id = chat_id
 
-  def _create_chart(self, df: pd.DataFrame, asset_name: str) -> io.BytesIO:
-    plot_df = df.tail(60).copy().reset_index(drop=True)
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    last_sup = df["Global_Support"].iloc[-1]
-    last_res = df["Global_Resistance"].iloc[-1]
-
-    for i in range(len(plot_df)):
-      op = plot_df["open"].iloc[i]
-      hi = plot_df["high"].iloc[i]
-      lo = plot_df["low"].iloc[i]
-      cl = plot_df["close"].iloc[i]
-
-      color = "#26a69a" if cl >= op else "#ef5350"
-      ax.vlines(i, lo, hi, color=color, linewidth=1, alpha=0.9)
-      ax.bar(
-          i,
-          abs(cl - op),
-          bottom=min(op, cl),
-          color=color,
-          width=0.6,
-          alpha=0.9,
-      )
-
-    # Додавання Смуг Боллінджера та рівнів на графік
-    ax.plot(
-        plot_df.index,
-        plot_df["BB_Upper"],
-        color="#2962FF",
-        linestyle="--",
-        alpha=0.5,
-        label="BB Upper",
-    )
-    ax.plot(
-        plot_df.index,
-        plot_df["BB_Middle"],
-        color="#FF6D00",
-        linestyle="-",
-        alpha=0.5,
-        label="BB Middle",
-    )
-    ax.plot(
-        plot_df.index,
-        plot_df["BB_Lower"],
-        color="#2962FF",
-        linestyle="--",
-        alpha=0.5,
-        label="BB Lower",
-    )
-
-    ax.axhline(
-        y=last_sup,
-        color="#00897b",
-        linestyle="--",
-        alpha=0.8,
-        linewidth=1.5,
-        label=f"Support: {last_sup:.4f}",
-    )
-    ax.axhline(
-        y=last_res,
-        color="#c62828",
-        linestyle="--",
-        alpha=0.8,
-        linewidth=1.5,
-        label=f"Resistance: {last_res:.4f}",
-    )
-
-    ax.set_title(
-        f"Signal: {asset_name} | Bollinger & S/R",
-        fontsize=11,
-        color="white",
-        weight="bold",
-    )
-    ax.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white", fontsize=8)
-    ax.grid(True, color="#2a2e39", alpha=0.5)
-
-    ax.set_facecolor("#131722")
-    ax.tick_params(colors="white")
-    for spine in ax.spines.values():
-      spine.set_edgecolor("#2a2e39")
-
-    fig.patch.set_facecolor("#131722")
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(
-        buf,
-        format="png",
-        dpi=150,
-        facecolor=fig.get_facecolor(),
-        edgecolor="none",
-    )
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
   def send_signal(
-      self, df: pd.DataFrame, signal_data: dict, asset: str, sig_id: int
+      self,
+      chart_buffer: io.BytesIO,
+      df: pd.DataFrame,
+      signal_data: dict,
+      asset: str,
+      sig_id: int,
   ):
-    chart_buffer = self._create_chart(df, asset)
+    chart_buffer.seek(0)
     sig_text = (
         "🟢 ВВЕРХ (CALL)" if signal_data["signal"] == "CALL" else "🔴 ВНИЗ (PUT)"
     )
@@ -579,7 +593,7 @@ class TelegramSignalSender:
     res_price = last_row["Global_Resistance"]
 
     caption = (
-        f"🚨 **СІГНАЛ: {sig_text} (AI Approved)**\n"
+        f"🚨 **СІГНАЛ: {sig_text} (AI Vision Approved)**\n"
         f"📊 `{asset}`\n"
         f"⏳ Експірація: `{signal_data['expiration']} хв`\n"
         f"🟢 Підтримка: `{sup_price:.4f}`\n"
@@ -658,15 +672,18 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
             .dropna()
         )
 
-    # Викликаємо генерацію сигналу напряму без пре-алертів
     signal_res = analyzer.generate_signal(df_5m, df_3m, df_1m)
 
     if signal_res["signal"] != "HOLD" and notifier:
+      # Створюємо графік заздалегідь для передачі у Vision ШІ
+      chart_buffer = create_chart_image(df_5m, asset_name)
       recent_candles = (
           df_5m.tail(5)[["open", "high", "low", "close"]].to_string()
       )
+
+      # Перевірка через ШІ з аналізом зображення
       is_approved = ai_advisor.evaluate_signal(
-          asset_name, signal_res, recent_candles
+          asset_name, signal_res, recent_candles, chart_buffer
       )
 
       if is_approved:
@@ -677,10 +694,10 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
             "pair": asset_name,
             "signal": signal_res["signal"],
         }
-        notifier.send_signal(df_5m, signal_res, asset_name, sig_id)
+        notifier.send_signal(chart_buffer, df_5m, signal_res, asset_name, sig_id)
       else:
         print(
-            f"🤖 ШІ-фільтр відхилив сигнал по {asset_name} через високий ризик."
+            f"🤖 ШІ Vision-фільтр відхилив сигнал по {asset_name} через візуальні ризики."
         )
 
   except Exception as e:
@@ -755,7 +772,7 @@ def telegram_webhook():
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
-              "text": "⏳ Починаю масове сканування з ШІ-фільтрацією...",
+              "text": "⏳ Починаю масове сканування з Vision ШІ...",
           },
       )
 
@@ -810,7 +827,9 @@ def telegram_webhook():
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
-              "text": f"⏳ Аналізую {pair_name} з ШІ та Боллінджером...",
+              "text": (
+                  f"⏳ Аналізую {pair_name} за допомогою Vision ШІ та Боллінджера..."
+              ),
           },
       )
       threading.Thread(
@@ -902,7 +921,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Bot with Bollinger Bands and New Gemini SDK is running!"
+  return "Bot with Vision AI and Bollinger Bands is running!"
 
 
 if __name__ == "__main__":
