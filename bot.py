@@ -218,8 +218,12 @@ def create_chart_image(
   plot_df = df.tail(60).copy().reset_index(drop=True)
   fig, ax = plt.subplots(figsize=(10, 5))
 
-  last_sup = df["Global_Support"].iloc[-1]
-  last_res = df["Global_Resistance"].iloc[-1]
+  if "Global_Support" in df.columns and "Global_Resistance" in df.columns:
+    last_sup = df["Global_Support"].iloc[-1]
+    last_res = df["Global_Resistance"].iloc[-1]
+  else:
+    last_sup = df["low"].rolling(window=20).min().iloc[-1]
+    last_res = df["high"].rolling(window=20).max().iloc[-1]
 
   for i in range(len(plot_df)):
     op = plot_df["open"].iloc[i]
