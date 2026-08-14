@@ -205,7 +205,9 @@ def is_news_time_with_ai_sentiment(pair_name: str) -> bool:
         + "\nЧи несуть ці події критичну непередбачувану волатильність? Відповідай ТІЛЬКИ одне слово: 'DANGER' або 'SAFE'."
     )
     res = client.models.generate_content(
-        model="gemini-2.0-flash", contents=prompt
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.1),
     )
     decision = res.text.strip().upper()
     return "DANGER" in decision
@@ -213,7 +215,7 @@ def is_news_time_with_ai_sentiment(pair_name: str) -> bool:
     return False
 
 
-# --- ГЕНЕРАЦІЯ ГРАФІКІВ ---
+# --- ГЕНЕРАЦІЯ ГРАФІКІВ З БОЛЛІНДЖЕРОМ ---
 def create_chart_image(
     df: pd.DataFrame, asset_name: str, tf_label="5m"
 ) -> io.BytesIO:
@@ -253,6 +255,27 @@ def create_chart_image(
         linewidth=1.5,
         alpha=0.7,
         label="EMA 20",
+    )
+
+  # Додавання Смуг Боллінджера на графік
+  if "BB_Upper" in plot_df.columns and "BB_Lower" in plot_df.columns:
+    ax.plot(
+        plot_df.index,
+        plot_df["BB_Upper"],
+        color="#ab47bc",
+        linestyle="--",
+        linewidth=1,
+        alpha=0.6,
+        label="BB Upper",
+    )
+    ax.plot(
+        plot_df.index,
+        plot_df["BB_Lower"],
+        color="#ab47bc",
+        linestyle="--",
+        linewidth=1,
+        alpha=0.6,
+        label="BB Lower",
     )
 
   ax.axhline(y=last_sup, color="#00897b", linestyle="--", alpha=0.8, linewidth=1)
@@ -347,7 +370,7 @@ def format_stats_text(title, data_tuple):
   return text
 
 
-# --- ШІ-АНАЛІТИК З ДИНАМІЧНОЮ ЕКСПІРАЦІЄЮ ТА ATR ---
+# --- ШІ-АНАЛІТИК З 3 ТАЙМФРЕЙМАМИ, CHAIN OF THOUGHT ТА НИЗЬКОЮ ТЕМПЕРАТУРОЮ ---
 class AITradingAdvisor:
 
   def evaluate_signal(
@@ -355,38 +378,52 @@ class AITradingAdvisor:
       pair_name: str,
       signal_data: dict,
       macro_chart: io.BytesIO,
+      mid_chart: io.BytesIO,
       micro_chart: io.BytesIO,
   ) -> dict:
     prompt = (
-        f"Ти професійний квантовий трейдер. Оціни сигнал по парі {pair_name}:\n"
+        f"Ти професійний квантовий трейдер. Зроби глибокий мультитаймфреймовий аналіз сигналу по парі {pair_name}:\n"
         f"- Запропонований сигнал: {signal_data['signal']}\n"
         f"- Глобальний тренд (EMA 200 1h): {signal_data['global_trend']}\n"
+        f"- Середній тренд (EMA 20 15m): {signal_data['mid_trend']}\n"
         f"- Локальний тренд (EMA 20 5m): {signal_data['local_trend']}\n"
         f"- Причина: {signal_data['reason']}\n"
         f"- RSI: {signal_data.get('rsi')}, ATR (волатильність): {signal_data.get('atr')}\n\n"
-        "Перше зображення — макротренд (1h), друге — мікроструктура (5m з рівнями Swing та EMA 20).\n"
-        "Обов'язково визнач унікальний та оптимальний час експірації у хвилинах (у діапазоні від 3 до 25 хв) залежно від поточної волатильності (ATR) та таймфрейму. Не став завжди одне й те саме число!\n"
+        "Зображення: 1) Макротренд (1h), 2) Середній таймфрейм (15m), 3) Мікроструктура (5m зі рівнями Swing та Смугами Боллінджера).\n"
+        "ПРОАНАЛІЗУЙ КРОК ЗА КРОКОМ (Chain of Thought):\n"
+        "1. Чи збігаються тренди на 1h, 15m та 5m?\n"
+        "2. Наскільки якісний відскок від рівня та чи допомагають Смуги Боллінджера?\n"
+        "3. Чи виправдана поточна волатильність ATR?\n"
+        "Визнач оптимальний час експірації у хвилинах (від 3 до 25 хв) та справедливу оцінку впевненості (confidence) від 1 до 10.\n"
         "Відповідай СУВОРО у форматі JSON без жодних додаткових символів чи markdown-тегів:\n"
         "{\n"
+        '  "trend_alignment_analysis": "короткий аналіз збігу таймфреймів",\n'
+        '  "level_and_bb_analysis": "аналіз рівнів та Боллінджера",\n'
         '  "decision": "YES" або "NO",\n'
-        '  "confidence": число від 1 до 10,\n'
+        '  "confidence": ціле число від 1 до 10,\n'
         '  "expiration": ціле число хвилин (наприклад, 5, 8, 12, 15 тощо),\n'
-        '  "reason": "коротке пояснення українською"\n'
+        '  "reason": "коротке резюме українською"\n'
         "}"
     )
     try:
       macro_chart.seek(0)
+      mid_chart.seek(0)
       micro_chart.seek(0)
       img1 = types.Part.from_bytes(
           data=macro_chart.getvalue(), mime_type="image/png"
       )
       img2 = types.Part.from_bytes(
+          data=mid_chart.getvalue(), mime_type="image/png"
+      )
+      img3 = types.Part.from_bytes(
           data=micro_chart.getvalue(), mime_type="image/png"
       )
 
-      # Використовуємо актуальну модель gemini-2.0-flash
+      # Використовуємо gemini-2.0-flash з низькою температурою для точності
       response = client.models.generate_content(
-          model="gemini-2.0-flash", contents=[prompt, img1, img2]
+          model="gemini-2.0-flash",
+          contents=[prompt, img1, img2, img3],
+          config=types.GenerateContentConfig(temperature=0.1),
       )
       raw_text = (
           response.text.strip()
@@ -395,7 +432,7 @@ class AITradingAdvisor:
           .strip()
       )
       result = json.loads(raw_text)
-      print(f"🤖 [AI Audit] {pair_name}: {result}")
+      print(f"🤖 [AI Audit CoT] {pair_name}: {result}")
       return result
     except Exception as e:
       print(f"Помилка AI Audit: {e}")
@@ -407,16 +444,14 @@ class AITradingAdvisor:
       }
 
 
-# --- ТЕХНІЧНИЙ АНАЛІЗ (ТРЕНДИ + РІВНІ SWING + ATR) ---
+# --- ТЕХНІЧНИЙ АНАЛІЗ (1h, 15m, 5m + SWING + ATR + BOLLINGER) ---
 class AdaptiveTechnicalAnalysis:
 
   def __init__(self):
     self.rsi_window = 14
 
-  def calculate_indicators(
-      self, df_local: pd.DataFrame, df_global: pd.DataFrame = None
-  ) -> pd.DataFrame:
-    res_df = df_local.copy()
+  def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+    res_df = df.copy()
 
     # RSI
     delta = res_df["close"].diff()
@@ -427,14 +462,21 @@ class AdaptiveTechnicalAnalysis:
     rs = avg_gain / avg_loss
     res_df["RSI"] = 100 - (100 / (1 + rs))
 
-    # Локальний тренд EMA 20
+    # EMA 20
     res_df["EMA_20"] = res_df["close"].ewm(span=20, adjust=False).mean()
 
-    # Локальні рівні (Swing High / Swing Low за останні 15 свічок)
+    # Смуги Боллінджера (Bollinger Bands)
+    bb_window = 20
+    res_df["BB_Middle"] = res_df["close"].rolling(window=bb_window).mean()
+    bb_std = res_df["close"].rolling(window=bb_window).std()
+    res_df["BB_Upper"] = res_df["BB_Middle"] + (bb_std * 2)
+    res_df["BB_Lower"] = res_df["BB_Middle"] - (bb_std * 2)
+
+    # Локальні рівні Swing
     res_df["Local_Support"] = res_df["low"].rolling(window=15).min()
     res_df["Local_Resistance"] = res_df["high"].rolling(window=15).max()
 
-    # ATR (Average True Range) для оцінки волатильності
+    # ATR
     tr1 = res_df["high"] - res_df["low"]
     tr2 = (res_df["high"] - res_df["close"].shift(1)).abs()
     tr3 = (res_df["low"] - res_df["close"].shift(1)).abs()
@@ -443,17 +485,21 @@ class AdaptiveTechnicalAnalysis:
 
     return res_df
 
-  def get_global_trend(self, df_global: pd.DataFrame) -> str:
-    if df_global is None or df_global.empty:
+  def get_trend(self, df: pd.DataFrame, span_val=200) -> str:
+    if df is None or df.empty:
       return "NEUTRAL"
-    g_df = df_global.copy()
-    g_df["EMA_200"] = g_df["close"].ewm(span=200, adjust=False).mean()
+    g_df = df.copy()
+    g_df["EMA"] = g_df["close"].ewm(span=span_val, adjust=False).mean()
     last_close = g_df["close"].iloc[-1]
-    last_ema200 = g_df["EMA_200"].iloc[-1]
-    return "UP" if last_close > last_ema200 else "DOWN"
+    last_ema = g_df["EMA"].iloc[-1]
+    return "UP" if last_close > last_ema else "DOWN"
 
   def generate_signal(
-      self, df_5m: pd.DataFrame, global_trend: str, asset_name: str
+      self,
+      df_5m: pd.DataFrame,
+      global_trend: str,
+      mid_trend: str,
+      asset_name: str,
   ) -> dict:
     default = {
         "signal": "HOLD",
@@ -461,6 +507,7 @@ class AdaptiveTechnicalAnalysis:
         "atr": None,
         "reason": "No setup",
         "global_trend": global_trend,
+        "mid_trend": mid_trend,
         "local_trend": "NEUTRAL",
     }
     if len(df_5m) < 25:
@@ -478,31 +525,32 @@ class AdaptiveTechnicalAnalysis:
     dist_sup = abs(c - l_sup) / c
     dist_res = abs(c - l_res) / c
 
-    if global_trend == "UP" and local_trend == "UP":
+    # Потрійне підтвердження трендів (1h, 15m, 5m)
+    if global_trend == "UP" and mid_trend == "UP" and local_trend == "UP":
       if dist_sup < 0.008:
         return {
             "signal": "CALL",
             "rsi": round(float(rsi), 2),
             "atr": round(float(atr), 5),
             "reason": (
-                "Глобальний і локальний тренди ВГОРУ + відскок від локальної"
-                " підтримки (Swing Low)"
+                "Потрійний тренд ВГОРУ (1h+15m+5m) + відскок від підтримки Swing"
             ),
             "global_trend": global_trend,
+            "mid_trend": mid_trend,
             "local_trend": local_trend,
         }
 
-    if global_trend == "DOWN" and local_trend == "DOWN":
+    if global_trend == "DOWN" and mid_trend == "DOWN" and local_trend == "DOWN":
       if dist_res < 0.008:
         return {
             "signal": "PUT",
             "rsi": round(float(rsi), 2),
             "atr": round(float(atr), 5),
             "reason": (
-                "Глобальний і локальний тренди ВНИЗ + відскок від локального"
-                " опору (Swing High)"
+                "Потрійний тренд ВНИЗ (1h+15m+5m) + відскок від опору Swing"
             ),
             "global_trend": global_trend,
+            "mid_trend": mid_trend,
             "local_trend": local_trend,
         }
 
@@ -520,28 +568,39 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
     return
 
   try:
-    df_global = yf.download(
+    # 1h DataFrame
+    df_global_raw = yf.download(
         pair_symbol, period="3mo", interval="1h", progress=False
     )
-    if not df_global.empty:
-      if isinstance(df_global.columns, pd.MultiIndex):
-        df_global.columns = df_global.columns.get_level_values(0)
-      df_global.columns = [c.lower() for c in df_global.columns]
-    else:
-      df_global = None
+    df_global = (
+        analyzer.calculate_indicators(df_global_raw)
+        if not df_global_raw.empty
+        else None
+    )
 
-    df_local = yf.download(
+    # 15m DataFrame
+    df_mid_raw = yf.download(
+        pair_symbol, period="14d", interval="15m", progress=False
+    )
+    df_mid = (
+        analyzer.calculate_indicators(df_mid_raw)
+        if not df_mid_raw.empty
+        else None
+    )
+
+    # 5m DataFrame
+    df_local_raw = yf.download(
         pair_symbol, period="5d", interval="5m", progress=False
     )
-    if df_local.empty or len(df_local) < 30:
+    if df_local_raw.empty or len(df_local_raw) < 30:
       return
-    if isinstance(df_local.columns, pd.MultiIndex):
-      df_local.columns = df_local.columns.get_level_values(0)
-    df_local.columns = [c.lower() for c in df_local.columns]
+    df_5m = analyzer.calculate_indicators(df_local_raw)
 
-    global_trend = analyzer.get_global_trend(df_global)
-    df_5m = analyzer.calculate_indicators(df_local, df_global)
-    signal_res = analyzer.generate_signal(df_5m, global_trend, asset_name)
+    global_trend = analyzer.get_trend(df_global, 200)
+    mid_trend = analyzer.get_trend(df_mid, 50)
+    signal_res = analyzer.generate_signal(
+        df_5m, global_trend, mid_trend, asset_name
+    )
 
     if signal_res["signal"] != "HOLD" and chat_id:
       macro_buf = (
@@ -549,24 +608,28 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
           if df_global is not None
           else create_chart_image(df_5m, asset_name, "1h")
       )
-      micro_buf = create_chart_image(df_5m, asset_name, "5m (Swing Levels)")
-
-      ai_eval = ai_advisor.evaluate_signal(
-          asset_name, signal_res, macro_buf, micro_buf
+      mid_buf = (
+          create_chart_image(df_mid, asset_name, "15m (EMA 50)")
+          if df_mid is not None
+          else create_chart_image(df_5m, asset_name, "15m")
+      )
+      micro_buf = create_chart_image(
+          df_5m, asset_name, "5m (Swing + Bollinger)"
       )
 
-      # Фільтр за впевненістю ШІ >= 7
+      ai_eval = ai_advisor.evaluate_signal(
+          asset_name, signal_res, macro_buf, mid_buf, micro_buf
+      )
+
+      # Фільтр впевненості ШІ >= 7
       if (
           ai_eval.get("decision") == "YES"
           and ai_eval.get("confidence", 0) >= 7
       ):
-        macro_buf.seek(0)
         micro_buf.seek(0)
-
         signal_counter += 1
         sig_id = signal_counter
 
-        # Повністю динамічна експірація з урахуванням ШІ (запобіжник 3-30 хв)
         dynamic_expiration = int(ai_eval.get("expiration", 10))
         dynamic_expiration = max(3, min(dynamic_expiration, 30))
 
@@ -579,8 +642,7 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
             f"🎯 **Трендовий Сигнал #{sig_id}**\n"
             f"📊 Пара: `{asset_name}`\n"
             f"📈 Напрямок: {sig_text}\n"
-            f"🌐 Глобальний тренд (1h): `{signal_res['global_trend']}`\n"
-            f"⚡ Локальний тренд (5m): `{signal_res['local_trend']}`\n"
+            f"🌐 1h: `{signal_res['global_trend']}` | 15m: `{signal_res['mid_trend']}` | 5m: `{signal_res['local_trend']}`\n"
             f"⏳ Динамічна експірація: `{dynamic_expiration} хв`\n"
             f"💡 Причина: _{signal_res['reason']}_\n"
             f"🤖 ШІ Конфіденційність: `{ai_eval.get('confidence')}/10`"
@@ -615,8 +677,9 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
               "caption": caption,
           }
           print(
-              f"✅ Сигнал #{sig_id} ({asset_name}) надіслано з динамічною"
-              f" експірацією {dynamic_expiration} хв."
+              f"✅ Сигнал #{sig_id} ({asset_name}) надіслано з експірацією"
+              f" {dynamic_expiration} хв та впевненістю"
+              f" {ai_eval.get('confidence')}/10."
           )
       else:
         print(
@@ -695,7 +758,7 @@ def telegram_webhook():
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
-              "text": "⏳ Сканую ринок з динамічною експірацією та ШІ (>=7)...",
+              "text": "⏳ Сканую ринок (1h + 15m + 5m) з ШІ та Боллінджером...",
           },
       )
 
@@ -750,7 +813,9 @@ def telegram_webhook():
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
-              "text": f"⏳ Аналізую {pair_name} з розрахунком експірації...",
+              "text": (
+                  f"⏳ Аналізую {pair_name} по трьох таймфреймах (1h, 15m, 5m)..."
+              ),
           },
       )
       threading.Thread(
@@ -793,7 +858,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Dynamic Expiration Trading Bot with ATR & AI Confidence is running!"
+  return "Multi-TF Trading Bot with 15m, Bollinger & CoT AI is running!"
 
 
 if __name__ == "__main__":
