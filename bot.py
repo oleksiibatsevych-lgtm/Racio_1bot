@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from flask import Flask, request
+import google.generativeai as genai
 import matplotlib
 import numpy as np
 import pandas as pd
@@ -17,9 +18,14 @@ app = Flask(__name__)
 
 # --- КОНФІГУРАЦІЯ ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 RENDER_URL = os.environ.get(
     "RENDER_EXTERNAL_URL", "https://racio-1bot.onrender.com"
 )
+
+# Ініціалізація Gemini API
+if GEMINI_API_KEY:
+  genai.configure(api_key=GEMINI_API_KEY)
 
 PAIRS_MAP = {
     "CHF/JPY": "CHFJPY=X",
@@ -170,9 +176,7 @@ def get_statistics():
 
 def format_stats_text(title, data_tuple):
   data, overall_wr = data_tuple
-  
   text = f"📊 *{title}*\n"
-  
   if not data:
     text += "\nЩе немає оцінених угод за цей період."
     return text
@@ -189,6 +193,39 @@ def format_stats_text(title, data_tuple):
   return text
 
 
+# --- ШІ-ВІДПОВІДАЛЬНИЙ ЗА ВАЛІДАЦІЮ СИГНАЛІВ ---
+class AITradingAdvisor:
+  def __init__(self):
+    try:
+      self.model = genai.GenerativeModel("gemini-2.5-flash")
+    except Exception:
+      self.model = None
+
+  def evaluate_signal(self, pair_name: str, signal_data: dict, recent_candles_str: str) -> bool:
+    """Аналізує сигнал через Gemini перед відправкою користувачу"""
+    if not self.model:
+      return True  # Якщо ключ не налаштовано, пропускаємо без перевірки
+
+    prompt = (
+        f"Ти експертний AI-алгоритм для торгівлі бінарними опціонами та Forex. "
+        f"Оціни доцільність відкриття угоди для пари {pair_name}:\n"
+        f"- Сигнал: {signal_data['signal']}\n"
+        f"- Причина/Патерн: {signal_data['reason']}\n"
+        f"- Експірація: {signal_data['expiration']} хв\n"
+        f"- RSI: {signal_data.get('rsi')}, Stoch: {signal_data.get('stoch')}\n"
+        f"- Контекст останніх 5 свічок (Open, High, Low, Close):\n{recent_candles_str}\n\n"
+        f"Чи варто відкривати цю угоду? Відповідай ТІЛЬКИ одним словом: 'YES' (якщо ризик виправданий) або 'NO' (якщо ринок шумно-небезпечний)."
+    )
+    try:
+      response = self.model.generate_content(prompt)
+      decision = response.text.strip().upper()
+      print(f"AI Advisor decision for {pair_name}: {decision}")
+      return "YES" in decision
+    except Exception as e:
+      print(f"Помилка ШІ-валідації: {e}")
+      return True
+
+
 # --- КЛАС ТЕХНІЧНОГО ТА ПАТЕРНОВОГО АНАЛІЗУ ---
 class AdvancedTechnicalAnalysis:
   def __init__(self):
@@ -200,7 +237,6 @@ class AdvancedTechnicalAnalysis:
   def calculate_indicators(self, df_local: pd.DataFrame, df_global: pd.DataFrame = None) -> pd.DataFrame:
     res_df = df_local.copy()
 
-    # RSI
     delta = res_df["close"].diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0.0)
@@ -209,13 +245,11 @@ class AdvancedTechnicalAnalysis:
     rs = avg_gain / avg_loss
     res_df["RSI"] = 100 - (100 / (1 + rs))
 
-    # Stochastic
     low_min = res_df["low"].rolling(window=self.stoch_window).min()
     high_max = res_df["high"].rolling(window=self.stoch_window).max()
     res_df["Stoch_K"] = ((res_df["close"] - low_min) / (high_max - low_min + 1e-9)) * 100
     res_df["Stoch_D"] = res_df["Stoch_K"].rolling(window=3).mean()
 
-    # ADX
     alpha = 1 / self.adx_window
     tr1 = res_df["high"] - res_df["low"]
     tr2 = (res_df["high"] - res_df["close"].shift(1)).abs()
@@ -237,7 +271,6 @@ class AdvancedTechnicalAnalysis:
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
     res_df["ADX"] = dx.ewm(alpha=alpha, adjust=False).mean()
 
-    # Рівні
     res_df["Local_Support"] = res_df["low"].rolling(window=20).min()
     res_df["Local_Resistance"] = res_df["high"].rolling(window=20).max()
 
@@ -250,7 +283,6 @@ class AdvancedTechnicalAnalysis:
       res_df["Global_Support"] = res_df["Local_Support"]
       res_df["Global_Resistance"] = res_df["Local_Resistance"]
 
-    # ATR
     high_low = res_df["high"].values - res_df["low"].values
     high_close = np.abs(res_df["high"].values - res_df["close"].shift(1).values)
     low_close = np.abs(res_df["low"].values - res_df["close"].shift(1).values)
@@ -274,13 +306,10 @@ class AdvancedTechnicalAnalysis:
     return int(max(3, min(15, exp)))
 
   def check_chart_patterns(self, df: pd.DataFrame) -> dict:
-    """Визначення розширених графічних патернів: Подвійне дно/вершина, Трикутники, Канали"""
     if len(df) < 50:
         return {"pattern": None, "type": None}
 
     recent = df.tail(50).copy().reset_index(drop=True)
-    
-    # Знаходимо локальні екстремуми
     recent['is_trough'] = (recent['low'] == recent['low'].rolling(5, center=True).min())
     recent['is_peak'] = (recent['high'] == recent['high'].rolling(5, center=True).max())
 
@@ -288,7 +317,6 @@ class AdvancedTechnicalAnalysis:
     peaks = recent[recent['is_peak']]
     current_price = recent['close'].iloc[-1]
 
-    # 1. Подвійне дно / Подвійна вершина
     if len(troughs) >= 2:
         t1, t2 = troughs.iloc[-2], troughs.iloc[-1]
         if abs(t1['low'] - t2['low']) / t2['low'] < 0.0015 and abs(t2.name - t1.name) >= 5 and current_price > t2['low']:
@@ -299,22 +327,17 @@ class AdvancedTechnicalAnalysis:
         if abs(p1['high'] - p2['high']) / p2['high'] < 0.0015 and abs(p2.name - p1.name) >= 5 and current_price < p2['high']:
             return {"pattern": "Double Top", "type": "PUT", "reason": f"Патерн 'Подвійна вершина' ({p2['high']:.4f})"}
 
-    # 2. Трикутники (Звуження діапазону)
     if len(peaks) >= 3 and len(troughs) >= 3:
         p_highs = peaks['high'].tail(3).values
         t_lows = troughs['low'].tail(3).values
         
-        # Висхідний трикутник
         if abs(p_highs[0] - p_highs[-1]) / p_highs[-1] < 0.002 and t_lows[-1] > t_lows[0]:
             if current_price >= p_highs[-1] * 0.998:
                 return {"pattern": "Ascending Triangle", "type": "CALL", "reason": "Вихід із висхідного трикутника вгору"}
-        
-        # Низхідний трикутник
         elif abs(t_lows[0] - t_lows[-1]) / t_lows[-1] < 0.002 and p_highs[-1] < p_highs[0]:
             if current_price <= t_lows[-1] * 1.002:
                 return {"pattern": "Descending Triangle", "type": "PUT", "reason": "Вихід із низхідного трикутника вниз"}
 
-    # 3. Паралельні канали
     if len(peaks) >= 2 and len(troughs) >= 2:
         high_diff = abs(peaks['high'].iloc[-1] - peaks['high'].iloc[-2])
         low_diff = abs(troughs['low'].iloc[-1] - troughs['low'].iloc[-2])
@@ -331,7 +354,6 @@ class AdvancedTechnicalAnalysis:
     return {"pattern": None, "type": None}
 
   def check_multi_tf_patterns(self, df_1m: pd.DataFrame, df_3m: pd.DataFrame, df_5m: pd.DataFrame) -> dict:
-    """Перевірка патернів на 1m, 3m та 5m таймфреймах"""
     for tf_name, df_tf in [("1m", df_1m), ("3m", df_3m), ("5m", df_5m)]:
         if df_tf is not None and not df_tf.empty:
             res = self.check_chart_patterns(df_tf)
@@ -370,7 +392,6 @@ class AdvancedTechnicalAnalysis:
     exp = self.calculate_dynamic_expiration(df_5m)
     rsi, stoch_k, stoch_d = last["RSI"], last["Stoch_K"], last["Stoch_D"]
 
-    # 1. Пріоритет графічним патернам на 1m, 3m та 5m таймфреймах
     pattern_res = self.check_multi_tf_patterns(df_1m, df_3m, df_5m)
     if pattern_res["pattern"] is not None:
         return {
@@ -381,7 +402,6 @@ class AdvancedTechnicalAnalysis:
             "reason": pattern_res["reason"]
         }
 
-    # 2. Стандартна логіка відскоків від рівнів
     c, g_sup, g_res, l_sup, l_res = last["close"], last["Global_Support"], last["Global_Resistance"], last["Local_Support"], last["Local_Resistance"]
 
     near_g_sup = abs(c - g_sup) / c < 0.0025
@@ -397,7 +417,7 @@ class AdvancedTechnicalAnalysis:
     return default
 
 
-# --- ВІДПРАВКА ПОВІДОМЛЕНЬ ТА СВІЧКОВИХ ГРАФІКІВ БЕЗ ІНДИКАТОРІВ ---
+# --- ВІДПРАВКА ПОВІДОМЛЕНЬ ТА СВІЧКОВИХ ГРАФІКІВ ---
 class TelegramSignalSender:
   def __init__(self, token: str, chat_id: str):
     self.api_url = f"https://api.telegram.org/bot{token}"
@@ -410,7 +430,6 @@ class TelegramSignalSender:
     last_sup = df["Global_Support"].iloc[-1]
     last_res = df["Global_Resistance"].iloc[-1]
 
-    # Свічковий графік
     for i in range(len(plot_df)):
       op = plot_df["open"].iloc[i]
       hi = plot_df["high"].iloc[i]
@@ -444,20 +463,14 @@ class TelegramSignalSender:
 
   def send_pre_alert(self, df: pd.DataFrame, pre_data: dict, asset: str):
     chart_buffer = self._create_chart(df, asset)
-    
     caption = (
         f"⚠️ **PRE-ALERT**\n"
         f"📊 `{asset}` | 🎯 `{pre_data['type']}`\n"
         f"⏳ Експірація: `{pre_data['expiration']} хв`\n"
         f"💡 _{pre_data['reason']}_"
     )
-    
     files = {"photo": (f"{asset}_pre.png", chart_buffer, "image/png")}
-    data = {
-        "chat_id": self.chat_id, 
-        "caption": caption, 
-        "parse_mode": "Markdown"
-    }
+    data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"}
     requests.post(f"{self.api_url}/sendPhoto", data=data, files=files)
 
   def send_signal(self, df: pd.DataFrame, signal_data: dict, asset: str, sig_id: int):
@@ -469,7 +482,7 @@ class TelegramSignalSender:
     res_price = last_row["Global_Resistance"]
 
     caption = (
-        f"🚨 **СІГНАЛ: {sig_text}**\n"
+        f"🚨 **СІГНАЛ: {sig_text} (AI Approved)**\n"
         f"📊 `{asset}`\n"
         f"⏳ Експірація: `{signal_data['expiration']} хв`\n"
         f"🟢 Підтримка: `{sup_price:.4f}`\n"
@@ -498,6 +511,7 @@ class TelegramSignalSender:
 
 
 analyzer = AdvancedTechnicalAnalysis()
+ai_advisor = AITradingAdvisor()
 
 
 def scan_pair(pair_symbol, asset_name, chat_id=None):
@@ -506,14 +520,12 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
 
   notifier = TelegramSignalSender(TELEGRAM_TOKEN, str(chat_id)) if chat_id else None
   try:
-    # 1. Глобальний таймфрейм (1h) для рівнів
     df_global = yf.download(pair_symbol, period="1mo", interval="1h", progress=False)
     if not df_global.empty:
       if isinstance(df_global.columns, pd.MultiIndex): df_global.columns = df_global.columns.get_level_values(0)
       df_global.columns = [c.lower() for c in df_global.columns]
     else: df_global = None
 
-    # 2. Локальний базовий таймфрейм (5m) для індикаторів
     df_local = yf.download(pair_symbol, period="5d", interval="5m", progress=False)
     if df_local.empty or len(df_local) < 30: return
     if isinstance(df_local.columns, pd.MultiIndex): df_local.columns = df_local.columns.get_level_values(0)
@@ -521,7 +533,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
 
     df_5m = analyzer.calculate_indicators(df_local, df_global)
 
-    # 3. 1-хвилинний таймфрейм (1m) та ресемплінг у 3-хвилинний (3m) для патернів
     df_1m = yf.download(pair_symbol, period="2d", interval="1m", progress=False)
     df_3m = None
     if not df_1m.empty:
@@ -543,15 +554,23 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
     signal_res = analyzer.generate_signal(df_5m, df_3m, df_1m)
     
     if signal_res["signal"] != "HOLD" and notifier:
-      signal_counter += 1
-      sig_id = signal_counter
+      # Формуємо текстовий контекст останніх свічок для ШІ-валідатора
+      recent_candles = df_5m.tail(5)[['open', 'high', 'low', 'close']].to_string()
       
-      active_signals[sig_id] = {
-          "pair": asset_name,
-          "signal": signal_res["signal"]
-      }
-
-      notifier.send_signal(df_5m, signal_res, asset_name, sig_id)
+      # Перевірка сигналу через Gemini перед надсиланням
+      is_approved = ai_advisor.evaluate_signal(asset_name, signal_res, recent_candles)
+      
+      if is_approved:
+        signal_counter += 1
+        sig_id = signal_counter
+        
+        active_signals[sig_id] = {
+            "pair": asset_name,
+            "signal": signal_res["signal"]
+        }
+        notifier.send_signal(df_5m, signal_res, asset_name, sig_id)
+      else:
+        print(f"🤖 ШІ-фільтр відхилив сигнал по {asset_name} через високий ризик.")
 
   except Exception as e:
     print(f"Помилка сканування {pair_symbol}: {e}")
@@ -585,7 +604,7 @@ def telegram_webhook():
       if not is_trading_time():
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Зараз поза межами торгового часу (10:00 - 22:00)."})
         return "OK", 200
-      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⏳ Починаю масове сканування (1m, 3m, 5m, 1h)..."})
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⏳ Починаю масове сканування з ШІ-фільтрацією..."})
       def run_mass():
         for name, ticker in PAIRS_MAP.items(): scan_pair(ticker, name, chat_id)
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "✅ Сканування завершено!"})
@@ -606,7 +625,7 @@ def telegram_webhook():
       if not is_trading_time():
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "🌙 Поза межами торгового часу (10:00 - 22:00)."})
         return "OK", 200
-      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"⏳ Аналізую {pair_name} по кількох таймфреймах..."})
+      requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"⏳ Аналізую {pair_name} з ШІ..."})
       threading.Thread(target=lambda: scan_pair(PAIRS_MAP[pair_name], pair_name, chat_id)).start()
 
     elif data.startswith("res|"):
@@ -615,7 +634,6 @@ def telegram_webhook():
 
       if sig_id in active_signals:
         sig_info = active_signals.pop(sig_id)
-        
         stats_history.append({
             "timestamp": datetime.now(),
             "pair": sig_info["pair"],
@@ -633,7 +651,6 @@ def telegram_webhook():
             "caption": new_caption,
             "parse_mode": "Markdown"
         })
-        
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={
             "callback_query_id": query["id"],
             "text": f"Зараховано: {icon}!"
@@ -659,7 +676,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Bot with Multi-Timeframe Pattern Recognition (1m, 3m, 5m) is running!"
+  return "Bot with AI-Powered Signal Validation and Multi-TF Patterns is running!"
 
 if __name__ == "__main__":
   port = int(os.environ.get("PORT", 5000))
