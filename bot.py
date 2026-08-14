@@ -23,7 +23,7 @@ RENDER_URL = os.environ.get(
     "RENDER_EXTERNAL_URL", "https://racio-1bot.onrender.com"
 )
 
-# Ініціалізація нового клієнта Gemini
+# Ініціалізація клієнта Gemini
 client = genai.Client()
 
 PAIRS_MAP = {
@@ -86,13 +86,82 @@ def self_ping():
 threading.Thread(target=self_ping, daemon=True).start()
 
 
-# --- ТОРГОВИЙ ЧАС ТА НОВИНИ ---
+# --- ФОНОВИЙ АВТОМАТИЧНИЙ ЗБІР СТАТИСТИКИ ---
+def check_expired_signals():
+  while True:
+    time.sleep(15)
+    now = datetime.now(timezone.utc)
+    expired_ids = []
+
+    for sig_id, sig in list(active_signals.items()):
+      if now >= sig["expiry_time"]:
+        expired_ids.append(sig_id)
+        try:
+          df_current = yf.download(
+              sig["pair_symbol"], period="1d", interval="1m", progress=False
+          )
+          if df_current.empty:
+            continue
+          if isinstance(df_current.columns, pd.MultiIndex):
+            df_current.columns = df_current.columns.get_level_values(0)
+          df_current.columns = [c.lower() for c in df_current.columns]
+
+          current_price = float(df_current["close"].iloc[-1])
+          entry_price = sig["entry_price"]
+          signal_type = sig["signal"]
+
+          if signal_type == "CALL":
+            result = "WIN" if current_price > entry_price else "LOSS"
+          else:
+            result = "WIN" if current_price < entry_price else "LOSS"
+
+          stats_history.append({
+              "timestamp": datetime.now(),
+              "pair": sig["pair_name"],
+              "signal": signal_type,
+              "result": result,
+          })
+
+          icon = "✅ WIN" if result == "WIN" else "❌ LOSS"
+          print(
+              f"🤖 [Auto-Stats] Сигнал #{sig_id} ({sig['pair_name']})"
+              f" закрився автоматично: {icon} | Вхід: {entry_price} | Вихід:"
+              f" {current_price}"
+          )
+
+          if sig.get("chat_id") and sig.get("message_id"):
+            old_caption = sig.get("caption", "")
+            new_caption = (
+                f"{old_caption}\n\n*Авто-результат:* Закрито системою —"
+                f" **{icon}**"
+            )
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageCaption",
+                json={
+                    "chat_id": sig["chat_id"],
+                    "message_id": sig["message_id"],
+                    "caption": new_caption,
+                    "parse_mode": "Markdown",
+                },
+            )
+        except Exception as e:
+          print(f"Помилка автоперевірки сигналу {sig_id}: {e}")
+
+    for sig_id in expired_ids:
+      if sig_id in active_signals:
+        del active_signals[sig_id]
+
+
+threading.Thread(target=check_expired_signals, daemon=True).start()
+
+
+# --- ТОРГОВИЙ ЧАС ТА AI-САНТИМЕНТ НОВИН ---
 def is_trading_time() -> bool:
   current_hour = datetime.now(timezone.utc).hour
   return 7 <= current_hour < 19
 
 
-def is_news_time(pair_name: str) -> bool:
+def is_news_time_with_ai_sentiment(pair_name: str) -> bool:
   try:
     clean_name = pair_name.replace("=X", "").replace("/", "")
     currencies = (
@@ -110,6 +179,7 @@ def is_news_time(pair_name: str) -> bool:
     events = response.json()
     now_utc = datetime.now(timezone.utc)
 
+    relevant_events = []
     for event in events:
       if event.get("impact") != "High":
         continue
@@ -118,17 +188,35 @@ def is_news_time(pair_name: str) -> bool:
         if date_str:
           event_time = datetime.fromisoformat(date_str).astimezone(timezone.utc)
           diff_minutes = (now_utc - event_time).total_seconds() / 60.0
-          if -30 <= diff_minutes <= 30:
-            return True
+          if -45 <= diff_minutes <= 45:
+            relevant_events.append(
+                f"- {event.get('title')} ({event.get('country')}) о"
+                f" {event_time.strftime('%H:%M')} UTC"
+            )
+
+    if not relevant_events:
+      return False
+
+    prompt = (
+        f"Оціни ризики для торгівлі парою {pair_name} на основі цих високоважливих новин:\n"
+        + "\n".join(relevant_events)
+        + "\nЧи несуть ці події критичну непередбачувану волатильність? Відповідай ТІЛЬКИ одне слово: 'DANGER' або 'SAFE'."
+    )
+    res = client.models.generate_content(
+        model="gemini-2.5-flash", contents=prompt
+    )
+    decision = res.text.strip().upper()
+    return "DANGER" in decision
   except Exception:
-    pass
-  return False
+    return False
 
 
-# --- ГЕНЕРАЦІЯ ГРАФІКА ---
-def create_chart_image(df: pd.DataFrame, asset_name: str) -> io.BytesIO:
+# --- ГЕНЕРАЦІЯ ГРАФІКІВ ---
+def create_chart_image(
+    df: pd.DataFrame, asset_name: str, tf_label="5m"
+) -> io.BytesIO:
   plot_df = df.tail(60).copy().reset_index(drop=True)
-  fig, ax = plt.subplots(figsize=(10, 6))
+  fig, ax = plt.subplots(figsize=(10, 5))
 
   last_sup = df["Global_Support"].iloc[-1]
   last_res = df["Global_Resistance"].iloc[-1]
@@ -150,57 +238,39 @@ def create_chart_image(df: pd.DataFrame, asset_name: str) -> io.BytesIO:
         alpha=0.9,
     )
 
-  ax.plot(
-      plot_df.index,
-      plot_df["BB_Upper"],
-      color="#2962FF",
-      linestyle="--",
-      alpha=0.5,
-      label="BB Upper",
-  )
-  ax.plot(
-      plot_df.index,
-      plot_df["BB_Middle"],
-      color="#FF6D00",
-      linestyle="-",
-      alpha=0.5,
-      label="BB Middle",
-  )
-  ax.plot(
-      plot_df.index,
-      plot_df["BB_Lower"],
-      color="#2962FF",
-      linestyle="--",
-      alpha=0.5,
-      label="BB Lower",
-  )
+  if "BB_Upper" in plot_df.columns:
+    ax.plot(
+        plot_df.index,
+        plot_df["BB_Upper"],
+        color="#2962FF",
+        linestyle="--",
+        alpha=0.5,
+    )
+    ax.plot(
+        plot_df.index,
+        plot_df["BB_Middle"],
+        color="#FF6D00",
+        linestyle="-",
+        alpha=0.5,
+    )
+    ax.plot(
+        plot_df.index,
+        plot_df["BB_Lower"],
+        color="#2962FF",
+        linestyle="--",
+        alpha=0.5,
+    )
 
-  ax.axhline(
-      y=last_sup,
-      color="#00897b",
-      linestyle="--",
-      alpha=0.8,
-      linewidth=1.5,
-      label=f"Support: {last_sup:.4f}",
-  )
-  ax.axhline(
-      y=last_res,
-      color="#c62828",
-      linestyle="--",
-      alpha=0.8,
-      linewidth=1.5,
-      label=f"Resistance: {last_res:.4f}",
-  )
+  ax.axhline(y=last_sup, color="#00897b", linestyle="--", alpha=0.8, linewidth=1)
+  ax.axhline(y=last_res, color="#c62828", linestyle="--", alpha=0.8, linewidth=1)
 
   ax.set_title(
-      f"Signal: {asset_name} | Bollinger & S/R",
-      fontsize=11,
+      f"Asset: {asset_name} [{tf_label}]",
+      fontsize=10,
       color="white",
       weight="bold",
   )
-  ax.legend(loc="upper left", facecolor="#1e1e1e", labelcolor="white", fontsize=8)
   ax.grid(True, color="#2a2e39", alpha=0.5)
-
   ax.set_facecolor("#131722")
   ax.tick_params(colors="white")
   for spine in ax.spines.values():
@@ -236,10 +306,8 @@ def get_statistics():
     for item in items:
       p = item["pair"]
       res = item["result"]
-
       if p not in pair_data:
         pair_data[p] = {"requests": 0, "wins": 0, "losses": 0}
-
       pair_data[p]["requests"] += 1
       if res == "WIN":
         pair_data[p]["wins"] += 1
@@ -265,12 +333,10 @@ def get_statistics():
 
   day_items = [i for i in stats_history if i["timestamp"] >= day_ago]
   week_items = [i for i in stats_history if i["timestamp"] >= week_ago]
-  all_items = stats_history
-
   return (
       process_items(day_items),
       process_items(week_items),
-      process_items(all_items),
+      process_items(stats_history),
   )
 
 
@@ -280,69 +346,82 @@ def format_stats_text(title, data_tuple):
   if not data:
     text += "\nЩе немає оцінених угод за цей період."
     return text
-
   text += f"🏆 **Загальний вінрейт:** `{overall_wr}%`\n\n"
   text += "📋 *По парах*:\n"
   for pair, counts in data.items():
-    text += f"🌟 *{pair}*:\n"
-    text += (
-        f"  • Всього угод: `{counts['requests']}`\n"
-        f"  • ✅ WIN: `{counts['wins']}` | ❌ LOSS: `{counts['losses']}`\n"
-        f"  • Вінрейт: `{counts['winrate']}%`\n\n"
-    )
+    text += f"🌟 *{pair}*: Всього: `{counts['requests']}` | ✅ `{counts['wins']}` ❌ `{counts['losses']}` | Вінрейт: `{counts['winrate']}%`\n"
   return text
 
 
-# --- МУЛЬТИМОДАЛЬНИЙ ШІ-РАДНИК (VISION AI) ---
+# --- МУЛЬТИМОДАЛЬНИЙ ШІ-РАДНИК (MULTI-IMAGE VISION) ---
 class AITradingAdvisor:
-
-  def __init__(self):
-    pass
 
   def evaluate_signal(
       self,
       pair_name: str,
       signal_data: dict,
-      recent_candles_str: str,
-      chart_buffer: io.BytesIO,
+      macro_chart: io.BytesIO,
+      micro_chart: io.BytesIO,
   ) -> bool:
-    """Аналізує сигнал через Gemini Vision за допомогою зображення графіка та даних"""
     prompt = (
-        f"Ти експертний AI-алгоритм для торгівлі бінарними опціонами та Forex. "
-        f"Оціни доцільність відкриття угоди для пари {pair_name} за цим графіком та показниками:\n"
+        f"Ти експертний AI-алгоритм для трейдингу. Оціни сигнал по парі {pair_name}:\n"
         f"- Сигнал: {signal_data['signal']}\n"
-        f"- Причина/Патерн: {signal_data['reason']}\n"
-        f"- Експірація: {signal_data['expiration']} хв\n"
+        f"- Причина: {signal_data['reason']}\n"
         f"- RSI: {signal_data.get('rsi')}, Stoch: {signal_data.get('stoch')}\n"
-        f"- Останні свічки:\n{recent_candles_str}\n\n"
-        f"Проаналізуй візуальне розташування ціни відносно ліній Боллінджера та рівнів на графіку. "
-        f"Чи варто відкривати цю угоду? Відповідай ТІЛЬКИ одним словом: 'YES' (якщо ризик виправданий) або 'NO' (якщо ринок шумно-небезпечний)."
+        f"Перше зображення — макротренд (1 година), друге — мікроструктура (5 хвилин).\n"
+        f"Чи підтверджує макротренд мікросигнал і чи безпечний вхід? Відповідай ТІЛЬКИ: 'YES' або 'NO'."
     )
     try:
-      chart_buffer.seek(0)
-      image_part = types.Part.from_bytes(
-          data=chart_buffer.getvalue(), mime_type="image/png"
+      macro_chart.seek(0)
+      micro_chart.seek(0)
+      img1 = types.Part.from_bytes(
+          data=macro_chart.getvalue(), mime_type="image/png"
       )
+      img2 = types.Part.from_bytes(
+          data=micro_chart.getvalue(), mime_type="image/png"
+      )
+
       response = client.models.generate_content(
-          model="gemini-2.5-flash", contents=[prompt, image_part]
+          model="gemini-2.5-flash", contents=[prompt, img1, img2]
       )
       decision = response.text.strip().upper()
-      print(f"AI Vision Advisor decision for {pair_name}: {decision}")
       return "YES" in decision
     except Exception as e:
-      print(f"Помилка ШІ-валідації (Vision): {e}")
+      print(f"Помилка Multi-Image Vision: {e}")
       return True
 
 
-# --- ТЕХНІЧНИЙ АНАЛІЗ ---
-class AdvancedTechnicalAnalysis:
+# --- АДАПТИВНИЙ ТЕХНІЧНИЙ АНАЛІЗ ---
+class AdaptiveTechnicalAnalysis:
 
   def __init__(self):
     self.rsi_window = 14
     self.atr_window = 14
     self.stoch_window = 14
-    self.adx_window = 14
     self.bb_window = 20
+    self.rsi_low_limit = 32
+    self.rsi_high_limit = 68
+    self.adx_limit = 25
+
+  def auto_adapt_sensitivity(self):
+    if len(stats_history) < 5:
+      return
+    recent = stats_history[-10:]
+    wins = sum(1 for x in recent if x["result"] == "WIN")
+    wr = wins / len(recent)
+
+    if wr < 0.4:
+      self.rsi_low_limit = max(25, self.rsi_low_limit - 2)
+      self.rsi_high_limit = min(75, self.rsi_high_limit + 2)
+      self.adx_limit = max(20, self.adx_limit - 2)
+      print(
+          f"🔄 [Auto-Adapt] Вінрейт низький ({wr*100}%). Фільтри посилено:"
+          f" RSI<{self.rsi_low_limit}/>{self.rsi_high_limit}"
+      )
+    elif wr > 0.7:
+      self.rsi_low_limit = min(35, self.rsi_low_limit + 1)
+      self.rsi_high_limit = max(65, self.rsi_high_limit - 1)
+      print(f"🔄 [Auto-Adapt] Вінрейт високий ({wr*100}%). Параметри оптимізовано.")
 
   def calculate_indicators(
       self, df_local: pd.DataFrame, df_global: pd.DataFrame = None
@@ -371,37 +450,28 @@ class AdvancedTechnicalAnalysis:
     res_df["BB_Upper"] = res_df["BB_Middle"] + (bb_std * 2)
     res_df["BB_Lower"] = res_df["BB_Middle"] - (bb_std * 2)
 
-    alpha = 1 / self.adx_window
+    alpha = 1 / 14
     tr1 = res_df["high"] - res_df["low"]
     tr2 = (res_df["high"] - res_df["close"].shift(1)).abs()
     tr3 = (res_df["low"] - res_df["close"].shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
     up_move = res_df["high"] - res_df["high"].shift(1)
     down_move = res_df["low"].shift(1) - res_df["low"]
-
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-
     tr_smooth = tr.ewm(alpha=alpha, adjust=False).mean()
-    plus_dm_smooth = (
-        pd.Series(plus_dm, index=res_df.index)
-        .ewm(alpha=alpha, adjust=False)
-        .mean()
+    plus_di = (
+        100
+        * pd.Series(plus_dm, index=res_df.index).ewm(alpha=alpha).mean()
+        / (tr_smooth + 1e-9)
     )
-    minus_dm_smooth = (
-        pd.Series(minus_dm, index=res_df.index)
-        .ewm(alpha=alpha, adjust=False)
-        .mean()
+    minus_di = (
+        100
+        * pd.Series(minus_dm, index=res_df.index).ewm(alpha=alpha).mean()
+        / (tr_smooth + 1e-9)
     )
-
-    plus_di = 100 * (plus_dm_smooth / (tr_smooth + 1e-9))
-    minus_di = 100 * (minus_dm_smooth / (tr_smooth + 1e-9))
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
     res_df["ADX"] = dx.ewm(alpha=alpha, adjust=False).mean()
-
-    res_df["Local_Support"] = res_df["low"].rolling(window=20).min()
-    res_df["Local_Resistance"] = res_df["high"].rolling(window=20).max()
 
     if df_global is not None and not df_global.empty:
       g_sup = df_global["low"].rolling(window=24).min()
@@ -417,102 +487,13 @@ class AdvancedTechnicalAnalysis:
           .fillna(res_df["high"].max())
       )
     else:
-      res_df["Global_Support"] = res_df["Local_Support"]
-      res_df["Global_Resistance"] = res_df["Local_Resistance"]
-
-    high_low = res_df["high"].values - res_df["low"].values
-    high_close = np.abs(res_df["high"].values - res_df["close"].shift(1).values)
-    low_close = np.abs(res_df["low"].values - res_df["close"].shift(1).values)
-    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-    res_df["ATR"] = (
-        pd.Series(true_range, index=res_df.index)
-        .rolling(window=self.atr_window)
-        .mean()
-    )
+      res_df["Global_Support"] = res_df["low"].rolling(window=20).min()
+      res_df["Global_Resistance"] = res_df["high"].rolling(window=20).max()
 
     return res_df
 
-  def calculate_dynamic_expiration(self, df: pd.DataFrame) -> int:
-    if len(df) < 20 or "ATR" not in df.columns:
-      return 7
-    last = df.iloc[-1]
-    if pd.isna(last["ATR"]) or pd.isna(last["close"]):
-      return 7
-    volatility_pct = (last["ATR"] / last["close"]) * 100
-    recent_vol = ((df["ATR"] / df["close"]) * 100).tail(200)
-    if recent_vol.empty or recent_vol.max() == recent_vol.min():
-      return 7
-    norm = (
-        (volatility_pct - recent_vol.min())
-        / (recent_vol.max() - recent_vol.min() + 1e-9)
-    ).clip(0, 1)
-    exp = round(15 - norm * 12)
-    return int(max(3, min(15, exp)))
-
-  def check_chart_patterns(self, df: pd.DataFrame) -> dict:
-    if len(df) < 50:
-      return {"pattern": None, "type": None}
-
-    recent = df.tail(50).copy().reset_index(drop=True)
-    recent["is_trough"] = recent["low"] == recent["low"].rolling(
-        5, center=True
-    ).min()
-    recent["is_peak"] = recent["high"] == recent["high"].rolling(
-        5, center=True
-    ).max()
-
-    troughs = recent[recent["is_trough"]]
-    peaks = recent[recent["is_peak"]]
-    current_price = recent["close"].iloc[-1]
-
-    if len(troughs) >= 2:
-      t1, t2 = troughs.iloc[-2], troughs.iloc[-1]
-      if (
-          abs(t1["low"] - t2["low"]) / t2["low"] < 0.0015
-          and abs(t2.name - t1.name) >= 5
-          and current_price > t2["low"]
-      ):
-        return {
-            "pattern": "Double Bottom",
-            "type": "CALL",
-            "reason": f"Патерн 'Подвійне дно' ({t2['low']:.4f})",
-        }
-
-    if len(peaks) >= 2:
-      p1, p2 = peaks.iloc[-2], peaks.iloc[-1]
-      if (
-          abs(p1["high"] - p2["high"]) / p2["high"] < 0.0015
-          and abs(p2.name - p1.name) >= 5
-          and current_price < p2["high"]
-      ):
-        return {
-            "pattern": "Double Top",
-            "type": "PUT",
-            "reason": f"Патерн 'Подвійна вершина' ({p2['high']:.4f})",
-        }
-
-    return {"pattern": None, "type": None}
-
-  def check_multi_tf_patterns(
-      self, df_1m: pd.DataFrame, df_3m: pd.DataFrame, df_5m: pd.DataFrame
-  ) -> dict:
-    for tf_name, df_tf in [("1m", df_1m), ("3m", df_3m), ("5m", df_5m)]:
-      if df_tf is not None and not df_tf.empty:
-        res = self.check_chart_patterns(df_tf)
-        if res["pattern"] is not None:
-          return {
-              "pattern": res["pattern"],
-              "type": res["type"],
-              "reason": f"[{tf_name}] {res['reason']}",
-          }
-    return {"pattern": None, "type": None}
-
-  def generate_signal(
-      self,
-      df_5m: pd.DataFrame,
-      df_3m: pd.DataFrame = None,
-      df_1m: pd.DataFrame = None,
-  ) -> dict:
+  def generate_signal(self, df_5m: pd.DataFrame) -> dict:
+    self.auto_adapt_sensitivity()
     default = {
         "signal": "HOLD",
         "expiration": 7,
@@ -523,114 +504,51 @@ class AdvancedTechnicalAnalysis:
     if len(df_5m) < 25:
       return default
     last = df_5m.iloc[-1]
-    if not pd.isna(last["ADX"]) and last["ADX"] > 25:
+    if not pd.isna(last["ADX"]) and last["ADX"] > self.adx_limit:
       return default
 
-    exp = self.calculate_dynamic_expiration(df_5m)
     rsi, stoch_k, stoch_d = last["RSI"], last["Stoch_K"], last["Stoch_D"]
-
-    pattern_res = self.check_multi_tf_patterns(df_1m, df_3m, df_5m)
-    if pattern_res["pattern"] is not None:
-      return {
-          "signal": pattern_res["type"],
-          "expiration": exp,
-          "rsi": round(float(rsi), 2) if not pd.isna(rsi) else 50.0,
-          "stoch": round(float(stoch_k), 2) if not pd.isna(stoch_k) else 50.0,
-          "reason": pattern_res["reason"],
-      }
-
     c, g_sup, g_res = last["close"], last["Global_Support"], last["Global_Resistance"]
 
-    near_g_sup = abs(c - g_sup) / c < 0.0025 or c <= last["BB_Lower"]
-    if near_g_sup and (
-        rsi < 32 or (stoch_k < 20 and stoch_k > stoch_d) or c <= last["BB_Lower"]
+    if abs(c - g_sup) / c < 0.0025 and (
+        rsi < self.rsi_low_limit
+        or (stoch_k < 20 and stoch_k > stoch_d)
+        or c <= last["BB_Lower"]
     ):
       return {
           "signal": "CALL",
-          "expiration": exp,
+          "expiration": 7,
           "rsi": round(float(rsi), 2),
           "stoch": round(float(stoch_k), 2),
-          "reason": f"Відскок від рівня / Bollinger Lower (ADX: {last['ADX']:.1f})",
+          "reason": f"Відскік підтримки (Адаптивний RSI < {self.rsi_low_limit})",
       }
 
-    near_g_res = abs(c - g_res) / c < 0.0025 or c >= last["BB_Upper"]
-    if near_g_res and (
-        rsi > 68 or (stoch_k > 80 and stoch_k < stoch_d) or c >= last["BB_Upper"]
+    if abs(c - g_res) / c < 0.0025 and (
+        rsi > self.rsi_high_limit
+        or (stoch_k > 80 and stoch_k < stoch_d)
+        or c >= last["BB_Upper"]
     ):
       return {
           "signal": "PUT",
-          "expiration": exp,
+          "expiration": 7,
           "rsi": round(float(rsi), 2),
           "stoch": round(float(stoch_k), 2),
-          "reason": f"Відскік від рівня / Bollinger Upper (ADX: {last['ADX']:.1f})",
+          "reason": f"Відскік опору (Адаптивний RSI > {self.rsi_high_limit})",
       }
 
     return default
 
 
-# --- ВІДПРАВКА В TELEGRAM ---
-class TelegramSignalSender:
-
-  def __init__(self, token: str, chat_id: str):
-    self.api_url = f"https://api.telegram.org/bot{token}"
-    self.chat_id = chat_id
-
-  def send_signal(
-      self,
-      chart_buffer: io.BytesIO,
-      df: pd.DataFrame,
-      signal_data: dict,
-      asset: str,
-      sig_id: int,
-  ):
-    chart_buffer.seek(0)
-    sig_text = (
-        "🟢 ВВЕРХ (CALL)" if signal_data["signal"] == "CALL" else "🔴 ВНИЗ (PUT)"
-    )
-
-    last_row = df.iloc[-1]
-    sup_price = last_row["Global_Support"]
-    res_price = last_row["Global_Resistance"]
-
-    caption = (
-        f"🚨 **СІГНАЛ: {sig_text} (AI Vision Approved)**\n"
-        f"📊 `{asset}`\n"
-        f"⏳ Експірація: `{signal_data['expiration']} хв`\n"
-        f"🟢 Підтримка: `{sup_price:.4f}`\n"
-        f"🔴 Опір: `{res_price:.4f}`\n"
-        f"📈 RSI: `{signal_data['rsi']}` | 📉 Stoch: `{signal_data['stoch']}`\n"
-        f"💡 _{signal_data['reason']}_"
-    )
-
-    reply_markup = {
-        "inline_keyboard": [[
-            {"text": "✅ WIN", "callback_data": f"res|WIN|{sig_id}"},
-            {"text": "❌ LOSS", "callback_data": f"res|LOSS|{sig_id}"},
-        ]]
-    }
-
-    files = {"photo": (f"{asset}.png", chart_buffer, "image/png")}
-    data = {
-        "chat_id": self.chat_id,
-        "caption": caption,
-        "parse_mode": "Markdown",
-        "reply_markup": str(reply_markup).replace("'", '"'),
-    }
-    requests.post(f"{self.api_url}/sendPhoto", data=data, files=files)
-
-
-analyzer = AdvancedTechnicalAnalysis()
+analyzer = AdaptiveTechnicalAnalysis()
 ai_advisor = AITradingAdvisor()
 
 
 def scan_pair(pair_symbol, asset_name, chat_id=None):
   global signal_counter
-  if is_news_time(asset_name):
+  if is_news_time_with_ai_sentiment(asset_name):
+    print(f"🤖 ШІ заблокував сканування {asset_name} через ризикові новини.")
     return
 
-  notifier = (
-      TelegramSignalSender(TELEGRAM_TOKEN, str(chat_id)) if chat_id else None
-  )
   try:
     df_global = yf.download(
         pair_symbol, period="1mo", interval="1h", progress=False
@@ -652,54 +570,78 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
     df_local.columns = [c.lower() for c in df_local.columns]
 
     df_5m = analyzer.calculate_indicators(df_local, df_global)
+    signal_res = analyzer.generate_signal(df_5m)
 
-    df_1m = yf.download(pair_symbol, period="2d", interval="1m", progress=False)
-    df_3m = None
-    if not df_1m.empty:
-      if isinstance(df_1m.columns, pd.MultiIndex):
-        df_1m.columns = df_1m.columns.get_level_values(0)
-      df_1m.columns = [c.lower() for c in df_1m.columns]
-      if len(df_1m) >= 50:
-        df_3m = (
-            df_1m.resample("3min")
-            .agg({
-                "open": "first",
-                "high": "max",
-                "low": "min",
-                "close": "last",
-                "volume": "sum",
-            })
-            .dropna()
-        )
-
-    signal_res = analyzer.generate_signal(df_5m, df_3m, df_1m)
-
-    if signal_res["signal"] != "HOLD" and notifier:
-      # Створюємо графік заздалегідь для передачі у Vision ШІ
-      chart_buffer = create_chart_image(df_5m, asset_name)
-      recent_candles = (
-          df_5m.tail(5)[["open", "high", "low", "close"]].to_string()
+    if signal_res["signal"] != "HOLD" and chat_id:
+      macro_buf = (
+          create_chart_image(df_global, asset_name, "1h")
+          if df_global is not None
+          else create_chart_image(df_5m, asset_name, "1h")
       )
+      micro_buf = create_chart_image(df_5m, asset_name, "5m")
 
-      # Перевірка через ШІ з аналізом зображення
       is_approved = ai_advisor.evaluate_signal(
-          asset_name, signal_res, recent_candles, chart_buffer
+          asset_name, signal_res, macro_buf, micro_buf
       )
 
       if is_approved:
+        macro_buf.seek(0)
+        micro_buf.seek(0)
+
         signal_counter += 1
         sig_id = signal_counter
 
-        active_signals[sig_id] = {
-            "pair": asset_name,
-            "signal": signal_res["signal"],
-        }
-        notifier.send_signal(chart_buffer, df_5m, signal_res, asset_name, sig_id)
-      else:
-        print(
-            f"🤖 ШІ Vision-фільтр відхилив сигнал по {asset_name} через візуальні ризики."
+        sig_text = (
+            "🟢 ВВЕРХ (CALL)"
+            if signal_res["signal"] == "CALL"
+            else "🔴 ВНИЗ (PUT)"
+        )
+        last_row = df_5m.iloc[-1]
+        caption = (
+            f"🚨 **СІГНАЛ: {sig_text} (Multi-Vision + Adaptive + Auto-Stats)**\n"
+            f"📊 `{asset_name}`\n"
+            f"⏳ Експірація: `{signal_res['expiration']} хв`\n"
+            f"🟢 Підтримка: `{last_row['Global_Support']:.4f}`\n"
+            f"🔴 Опір: `{last_row['Global_Resistance']:.4f}`\n"
+            f"📈 RSI: `{signal_res['rsi']}` | 📉 Stoch:"
+            f" `{signal_res['stoch']}`\n"
+            f"💡 _{signal_res['reason']}_"
         )
 
+        micro_buf.seek(0)
+        files = {"photo": (f"{asset_name}.png", micro_buf, "image/png")}
+        data = {
+            "chat_id": chat_id,
+            "caption": caption,
+            "parse_mode": "Markdown",
+        }
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+            data=data,
+            files=files,
+        )
+
+        if resp.status_code == 200:
+          resp_json = resp.json()
+          sent_message_id = resp_json["result"]["message_id"]
+
+          active_signals[sig_id] = {
+              "pair_symbol": pair_symbol,
+              "pair_name": asset_name,
+              "signal": signal_res["signal"],
+              "entry_price": float(df_5m["close"].iloc[-1]),
+              "expiry_time": datetime.now(timezone.utc)
+              + timedelta(minutes=signal_res["expiration"]),
+              "chat_id": chat_id,
+              "message_id": sent_message_id,
+              "caption": caption,
+          }
+          print(f"✅ Сигнал #{sig_id} ({asset_name}) запущено та відстежується.")
+      else:
+        print(
+            f"🤖 ШІ Multi-Vision відхилив сигнал по {asset_name} через конфлікт"
+            " таймфреймів."
+        )
   except Exception as e:
     print(f"Помилка сканування {pair_symbol}: {e}")
 
@@ -756,7 +698,7 @@ def telegram_webhook():
                 "text": "Меню:",
                 "reply_markup": get_bottom_menu(),
             },
-        )
+      )
 
     elif text == "📊 Аналіз усіх пар":
       if not is_trading_time():
@@ -764,7 +706,7 @@ def telegram_webhook():
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={
                 "chat_id": chat_id,
-                "text": "🌙 Зараз поза межами торгового часу (07:00 - 19:00 UTC).",
+                "text": "🌙 Поза межами торгового часу (07:00 - 19:00 UTC).",
             },
         )
         return "OK", 200
@@ -772,7 +714,10 @@ def telegram_webhook():
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
-              "text": "⏳ Починаю масове сканування з Vision ШІ...",
+              "text": (
+                  "⏳ Починаю масове сканування (Multi-Vision + Sentiment +"
+                  " Auto-Stats)..."
+              ),
           },
       )
 
@@ -828,7 +773,7 @@ def telegram_webhook():
           json={
               "chat_id": chat_id,
               "text": (
-                  f"⏳ Аналізую {pair_name} за допомогою Vision ШІ та Боллінджера..."
+                  f"⏳ Аналізую {pair_name} через Multi-Vision та фільтри..."
               ),
           },
       )
@@ -836,69 +781,20 @@ def telegram_webhook():
           target=lambda: scan_pair(PAIRS_MAP[pair_name], pair_name, chat_id)
       ).start()
 
-    elif data.startswith("res|"):
-      _, result, sig_id_str = data.split("|")
-      sig_id = int(sig_id_str)
-
-      if sig_id in active_signals:
-        sig_info = active_signals.pop(sig_id)
-        stats_history.append({
-            "timestamp": datetime.now(),
-            "pair": sig_info["pair"],
-            "signal": sig_info["signal"],
-            "result": result,
-        })
-
-        old_caption = query["message"].get("caption", "")
-        icon = "✅ WIN" if result == "WIN" else "❌ LOSS"
-        new_caption = (
-            f"{old_caption}\n\n*Статус угоди:* Карточка закрита — **{icon}**"
-        )
-
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageCaption",
-            json={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "caption": new_caption,
-                "parse_mode": "Markdown",
-            },
-        )
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-            json={
-                "callback_query_id": query["id"],
-                "text": f"Зараховано: {icon}!",
-            },
-        )
-      else:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-            json={
-                "callback_query_id": query["id"],
-                "text": "Цей сигнал вже оброблено або застарів.",
-            },
-        )
-
     elif data.startswith("stats|"):
       _, period = data.split("|")
       (stats_day, wr_day), (stats_week, wr_week), (stats_all, wr_all) = (
           get_statistics()
       )
-
-      if period == "day":
-        text_res = format_stats_text(
-            "Статистика за добу", (stats_day, wr_day)
-        )
-      elif period == "week":
-        text_res = format_stats_text(
-            "Статистика за тиждень", (stats_week, wr_week)
-        )
-      else:
-        text_res = format_stats_text(
-            "Статистика за весь час", (stats_all, wr_all)
-        )
-
+      text_res = format_stats_text(
+          f"Статистика ({period})",
+          (
+              stats_day
+              if period == "day"
+              else (stats_week if period == "week" else stats_all),
+              wr_day if period == "day" else (wr_week if period == "week" else wr_all),
+          ),
+      )
       keyboard = {
           "inline_keyboard": [[{
               "text": "🔄 Оновити",
@@ -921,7 +817,10 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Bot with Vision AI and Bollinger Bands is running!"
+  return (
+      "Autonomous Trading Bot with Multi-Vision, Sentiment, Auto-Adaptation,"
+      " and Auto-Stats is running!"
+  )
 
 
 if __name__ == "__main__":
