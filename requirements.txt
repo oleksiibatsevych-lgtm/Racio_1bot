@@ -4,4 +4,5 @@ pandas
 numpy
 matplotlib
 yfinance
-google-generativeai
+google-genai
+gunicorn
