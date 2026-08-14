@@ -58,7 +58,7 @@ signal_counter = 0
 
 # --- ЗАХИЩЕНИЙ ВИКЛИК ШІ З АВТОМАТИЧНИМ ФОЛЛБЕКОМ ---
 def safe_generate_content(contents, config=None):
-  models_to_try = ["gemini-3.7-flash", "gemini-2.0-flash"]
+  models_to_try = ["gemini-2.5-flash", "gemini-1.5-flash"]
   for model_name in models_to_try:
     try:
       response = client.models.generate_content(
@@ -67,7 +67,7 @@ def safe_generate_content(contents, config=None):
       return response
     except Exception as e:
       print(f"⚠️ Модель {model_name} недоступна: {e}. Пробую запасну...")
-  raise Exception("Усі моделі Gemini наразі недоступні (503/Overloaded).")
+  raise Exception("Усі моделі Gemini наразі недоступні.")
 
 
 # --- ПЕРЕВІРКА ВЕБХУКА ---
