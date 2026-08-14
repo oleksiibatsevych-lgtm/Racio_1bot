@@ -55,7 +55,7 @@ signal_counter = 0
 
 
 def safe_generate_content(contents, config=None):
-  models_to_try = ["gemini-2.0-flash"]
+  models_to_try = ["gemini-2.5-flash"]
   for model_name in models_to_try:
     try:
       response = client.models.generate_content(
@@ -839,7 +839,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Multi-TF Trading Bot with Gemini 2.0 Flash is running!"
+  return "Multi-TF Trading Bot with Gemini 2.5 Flash is running!"
 
 
 if __name__ == "__main__":
