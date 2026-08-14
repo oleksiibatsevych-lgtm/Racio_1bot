@@ -106,7 +106,7 @@ def check_expired_signals():
             continue
           if isinstance(df_current.columns, pd.MultiIndex):
             df_current.columns = df_current.columns.get_level_values(0)
-          df_current.columns = [c.lower() for c in df_current.columns]
+          df_current.columns = [str(c).lower() for c in df_current.columns]
 
           current_price = float(df_current["close"].iloc[-1])
           entry_price = sig["entry_price"]
@@ -222,9 +222,9 @@ def create_chart_image(
   plot_df = df.tail(60).copy().reset_index(drop=True)
   fig, ax = plt.subplots(figsize=(10, 5))
 
-  if "Local_Support" in df.columns and "Local_Resistance" in df.columns:
-    last_sup = df["Local_Support"].iloc[-1]
-    last_res = df["Local_Resistance"].iloc[-1]
+  if "local_support" in df.columns and "local_resistance" in df.columns:
+    last_sup = df["local_support"].iloc[-1]
+    last_res = df["local_resistance"].iloc[-1]
   else:
     last_sup = df["low"].rolling(window=15).min().iloc[-1]
     last_res = df["high"].rolling(window=15).max().iloc[-1]
@@ -246,10 +246,10 @@ def create_chart_image(
         alpha=0.9,
     )
 
-  if "EMA_20" in plot_df.columns:
+  if "ema_20" in plot_df.columns:
     ax.plot(
         plot_df.index,
-        plot_df["EMA_20"],
+        plot_df["ema_20"],
         color="#2962FF",
         linestyle="-",
         linewidth=1.5,
@@ -257,11 +257,10 @@ def create_chart_image(
         label="EMA 20",
     )
 
-  # Додавання Смуг Боллінджера на графік
-  if "BB_Upper" in plot_df.columns and "BB_Lower" in plot_df.columns:
+  if "bb_upper" in plot_df.columns and "bb_lower" in plot_df.columns:
     ax.plot(
         plot_df.index,
-        plot_df["BB_Upper"],
+        plot_df["bb_upper"],
         color="#ab47bc",
         linestyle="--",
         linewidth=1,
@@ -270,7 +269,7 @@ def create_chart_image(
     )
     ax.plot(
         plot_df.index,
-        plot_df["BB_Lower"],
+        plot_df["bb_lower"],
         color="#ab47bc",
         linestyle="--",
         linewidth=1,
@@ -370,7 +369,7 @@ def format_stats_text(title, data_tuple):
   return text
 
 
-# --- ШІ-АНАЛІТИК З 3 ТАЙМФРЕЙМАМИ, CHAIN OF THOUGHT ТА НИЗЬКОЮ ТЕМПЕРАТУРОЮ ---
+# --- ШІ-АНАЛІТИК ---
 class AITradingAdvisor:
 
   def evaluate_signal(
@@ -419,7 +418,6 @@ class AITradingAdvisor:
           data=micro_chart.getvalue(), mime_type="image/png"
       )
 
-      # Використовуємо gemini-2.0-flash з низькою температурою для точності
       response = client.models.generate_content(
           model="gemini-2.0-flash",
           contents=[prompt, img1, img2, img3],
@@ -444,7 +442,7 @@ class AITradingAdvisor:
       }
 
 
-# --- ТЕХНІЧНИЙ АНАЛІЗ (1h, 15m, 5m + SWING + ATR + BOLLINGER) ---
+# --- ТЕХНІЧНИЙ АНАЛІЗ З ВИПРАВЛЕНОЮ НОРМАЛІЗАЦІЄЮ КОЛОНОК ---
 class AdaptiveTechnicalAnalysis:
 
   def __init__(self):
@@ -452,6 +450,9 @@ class AdaptiveTechnicalAnalysis:
 
   def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
     res_df = df.copy()
+    if isinstance(res_df.columns, pd.MultiIndex):
+      res_df.columns = res_df.columns.get_level_values(0)
+    res_df.columns = [str(c).lower() for c in res_df.columns]
 
     # RSI
     delta = res_df["close"].diff()
@@ -460,28 +461,28 @@ class AdaptiveTechnicalAnalysis:
     avg_gain = gain.ewm(com=self.rsi_window - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=self.rsi_window - 1, adjust=False).mean()
     rs = avg_gain / avg_loss
-    res_df["RSI"] = 100 - (100 / (1 + rs))
+    res_df["rsi"] = 100 - (100 / (1 + rs))
 
     # EMA 20
-    res_df["EMA_20"] = res_df["close"].ewm(span=20, adjust=False).mean()
+    res_df["ema_20"] = res_df["close"].ewm(span=20, adjust=False).mean()
 
-    # Смуги Боллінджера (Bollinger Bands)
+    # Смуги Боллінджера
     bb_window = 20
-    res_df["BB_Middle"] = res_df["close"].rolling(window=bb_window).mean()
+    res_df["bb_middle"] = res_df["close"].rolling(window=bb_window).mean()
     bb_std = res_df["close"].rolling(window=bb_window).std()
-    res_df["BB_Upper"] = res_df["BB_Middle"] + (bb_std * 2)
-    res_df["BB_Lower"] = res_df["BB_Middle"] - (bb_std * 2)
+    res_df["bb_upper"] = res_df["bb_middle"] + (bb_std * 2)
+    res_df["bb_lower"] = res_df["bb_middle"] - (bb_std * 2)
 
     # Локальні рівні Swing
-    res_df["Local_Support"] = res_df["low"].rolling(window=15).min()
-    res_df["Local_Resistance"] = res_df["high"].rolling(window=15).max()
+    res_df["local_support"] = res_df["low"].rolling(window=15).min()
+    res_df["local_resistance"] = res_df["high"].rolling(window=15).max()
 
     # ATR
     tr1 = res_df["high"] - res_df["low"]
     tr2 = (res_df["high"] - res_df["close"].shift(1)).abs()
     tr3 = (res_df["low"] - res_df["close"].shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    res_df["ATR"] = tr.ewm(span=14, adjust=False).mean()
+    res_df["atr"] = tr.ewm(span=14, adjust=False).mean()
 
     return res_df
 
@@ -489,9 +490,9 @@ class AdaptiveTechnicalAnalysis:
     if df is None or df.empty:
       return "NEUTRAL"
     g_df = df.copy()
-    g_df["EMA"] = g_df["close"].ewm(span=span_val, adjust=False).mean()
+    g_df["ema"] = g_df["close"].ewm(span=span_val, adjust=False).mean()
     last_close = g_df["close"].iloc[-1]
-    last_ema = g_df["EMA"].iloc[-1]
+    last_ema = g_df["ema"].iloc[-1]
     return "UP" if last_close > last_ema else "DOWN"
 
   def generate_signal(
@@ -515,17 +516,16 @@ class AdaptiveTechnicalAnalysis:
 
     last = df_5m.iloc[-1]
     c = last["close"]
-    l_sup = last["Local_Support"]
-    l_res = last["Local_Resistance"]
-    rsi = last["RSI"]
-    atr = last["ATR"]
-    ema20 = last["EMA_20"]
+    l_sup = last["local_support"]
+    l_res = last["local_resistance"]
+    rsi = last["rsi"]
+    atr = last["atr"]
+    ema20 = last["ema_20"]
 
     local_trend = "UP" if c > ema20 else "DOWN"
     dist_sup = abs(c - l_sup) / c
     dist_res = abs(c - l_res) / c
 
-    # Потрійне підтвердження трендів (1h, 15m, 5m)
     if global_trend == "UP" and mid_trend == "UP" and local_trend == "UP":
       if dist_sup < 0.008:
         return {
@@ -568,7 +568,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
     return
 
   try:
-    # 1h DataFrame
     df_global_raw = yf.download(
         pair_symbol, period="3mo", interval="1h", progress=False
     )
@@ -578,7 +577,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
         else None
     )
 
-    # 15m DataFrame
     df_mid_raw = yf.download(
         pair_symbol, period="14d", interval="15m", progress=False
     )
@@ -588,7 +586,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
         else None
     )
 
-    # 5m DataFrame
     df_local_raw = yf.download(
         pair_symbol, period="5d", interval="5m", progress=False
     )
@@ -621,7 +618,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
           asset_name, signal_res, macro_buf, mid_buf, micro_buf
       )
 
-      # Фільтр впевненості ШІ >= 7
       if (
           ai_eval.get("decision") == "YES"
           and ai_eval.get("confidence", 0) >= 7
