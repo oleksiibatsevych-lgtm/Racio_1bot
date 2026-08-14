@@ -405,7 +405,7 @@ class AdaptiveTechnicalAnalysis:
     self.bb_window = 20
     self.rsi_low_limit = 32
     self.rsi_high_limit = 68
-    self.adx_limit = 25
+    self.adx_limit = 35  # Пом'якшено для пошуку угод
 
   def auto_adapt_sensitivity(self):
     if len(stats_history) < 5:
@@ -477,20 +477,33 @@ class AdaptiveTechnicalAnalysis:
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
     res_df["ADX"] = dx.ewm(alpha=alpha, adjust=False).mean()
 
-    if df_global is not None and not df_global.empty:
-      g_sup = df_global["low"].rolling(window=24).min()
-      g_res = df_global["high"].rolling(window=24).max()
-      res_df["Global_Support"] = (
-          g_sup.reindex(res_df.index, method="ffill")
-          .bfill()
-          .fillna(res_df["low"].min())
-      )
-      res_df["Global_Resistance"] = (
-          g_res.reindex(res_df.index, method="ffill")
-          .bfill()
-          .fillna(res_df["high"].max())
-      )
-    else:
+    # Безпечне розрахування глобальних рівнів без помилок часових зон
+    try:
+      if df_global is not None and not df_global.empty:
+        g_temp = df_global.copy()
+        if g_temp.index.tz is not None:
+          g_temp.index = g_temp.index.tz_localize(None)
+        l_index = (
+            res_df.index.tz_localize(None)
+            if res_df.index.tz is not None
+            else res_df.index
+        )
+
+        g_sup = g_temp["low"].rolling(window=24).min()
+        g_res = g_temp["high"].rolling(window=24).max()
+        res_df["Global_Support"] = (
+            g_sup.reindex(l_index, method="ffill")
+            .bfill()
+            .fillna(res_df["low"].min())
+        )
+        res_df["Global_Resistance"] = (
+            g_res.reindex(l_index, method="ffill")
+            .bfill()
+            .fillna(res_df["high"].max())
+        )
+      else:
+        raise Exception("No global df")
+    except Exception:
       res_df["Global_Support"] = res_df["low"].rolling(window=20).min()
       res_df["Global_Resistance"] = res_df["high"].rolling(window=20).max()
 
@@ -514,7 +527,8 @@ class AdaptiveTechnicalAnalysis:
     rsi, stoch_k, stoch_d = last["RSI"], last["Stoch_K"], last["Stoch_D"]
     c, g_sup, g_res = last["close"], last["Global_Support"], last["Global_Resistance"]
 
-    if abs(c - g_sup) / c < 0.0025 and (
+    # Пом'якшено зону пошуку рівнів з 0.0025 до 0.006 для більшої кількості угод
+    if abs(c - g_sup) / c < 0.006 and (
         rsi < self.rsi_low_limit
         or (stoch_k < 20 and stoch_k > stoch_d)
         or c <= last["BB_Lower"]
@@ -524,10 +538,10 @@ class AdaptiveTechnicalAnalysis:
           "expiration": 7,
           "rsi": round(float(rsi), 2),
           "stoch": round(float(stoch_k), 2),
-          "reason": f"Відскік підтримки (Адаптивний RSI < {self.rsi_low_limit})",
+          "reason": f"Відскік підтримки (RSI < {self.rsi_low_limit})",
       }
 
-    if abs(c - g_res) / c < 0.0025 and (
+    if abs(c - g_res) / c < 0.006 and (
         rsi > self.rsi_high_limit
         or (stoch_k > 80 and stoch_k < stoch_d)
         or c >= last["BB_Upper"]
@@ -537,7 +551,7 @@ class AdaptiveTechnicalAnalysis:
           "expiration": 7,
           "rsi": round(float(rsi), 2),
           "stoch": round(float(stoch_k), 2),
-          "reason": f"Відскік опору (Адаптивний RSI > {self.rsi_high_limit})",
+          "reason": f"Відскік опору (RSI > {self.rsi_high_limit})",
       }
 
     return default
