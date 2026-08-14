@@ -205,7 +205,7 @@ def is_news_time_with_ai_sentiment(pair_name: str) -> bool:
         + "\nЧи несуть ці події критичну непередбачувану волатильність? Відповідай ТІЛЬКИ одне слово: 'DANGER' або 'SAFE'."
     )
     res = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-3.6-flash",
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.1),
     )
@@ -419,7 +419,7 @@ class AITradingAdvisor:
       )
 
       response = client.models.generate_content(
-          model="gemini-2.0-flash",
+          model="gemini-3.6-flash",
           contents=[prompt, img1, img2, img3],
           config=types.GenerateContentConfig(temperature=0.1),
       )
@@ -656,205 +656,102 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
             data=data,
             files=files,
         )
-
         if resp.status_code == 200:
           resp_json = resp.json()
-          sent_message_id = resp_json["result"]["message_id"]
-
+          msg_id = resp_json["result"]["message_id"]
+          expiry_time = datetime.now(timezone.utc) + timedelta(
+              minutes=dynamic_expiration
+          )
           active_signals[sig_id] = {
               "pair_symbol": pair_symbol,
               "pair_name": asset_name,
               "signal": signal_res["signal"],
               "entry_price": float(df_5m["close"].iloc[-1]),
-              "expiry_time": datetime.now(timezone.utc)
-              + timedelta(minutes=dynamic_expiration),
+              "expiry_time": expiry_time,
               "chat_id": chat_id,
-              "message_id": sent_message_id,
+              "message_id": msg_id,
               "caption": caption,
           }
-          print(
-              f"✅ Сигнал #{sig_id} ({asset_name}) надіслано з експірацією"
-              f" {dynamic_expiration} хв та впевненістю"
-              f" {ai_eval.get('confidence')}/10."
-          )
-      else:
-        print(
-            f"🤖 ШІ відхилив сигнал по {asset_name} (Confidence:"
-            f" {ai_eval.get('confidence')}/10)"
-        )
   except Exception as e:
-    print(f"Помилка сканування {pair_symbol}: {e}")
+    print(f"Помилка сканування пари {asset_name}: {e}")
 
 
-# --- МЕНЮ ТА WEBHOOK ---
-def get_bottom_menu():
-  return {
-      "keyboard": [
-          [{"text": "💱 Пари"}],
-          [{"text": "📊 Аналіз усіх пар"}, {"text": "📈 Статистика"}],
-      ],
-      "resize_keyboard": True,
-  }
-
-
-def get_pairs_inline_keyboard():
-  keys = list(PAIRS_MAP.keys())
-  inline = [
-      [
-          {"text": keys[i], "callback_data": f"pair|{keys[i]}"},
-          {"text": keys[i + 1], "callback_data": f"pair|{keys[i + 1]}"},
-      ]
-      if i + 1 < len(keys)
-      else [{"text": keys[i], "callback_data": f"pair|{keys[i]}"}]
-      for i in range(0, len(keys), 2)
-  ]
-  return {"inline_keyboard": inline}
-
-
+# --- FLASK ВЕБХУКИ ---
 @app.route("/webhook", methods=["POST"])
-def telegram_webhook():
-  update = request.get_json()
-  if not update:
+def webhook():
+  if request.headers.get("content-type") == "application/json":
+    json_data = request.get_json()
+    try:
+      message = json_data.get("message", {})
+      chat_id = message.get("chat", {}).get("id")
+      text = message.get("text", "")
+
+      if chat_id:
+        if text.startswith("/start") or text.startswith("/help"):
+          welcome_text = (
+              "🤖 Вітаю! Я Racio_1 — твій професійний торговий бот із ШІ-аудитом"
+              " (Gemini 3.6 Flash).\n\n"
+              "Доступні команди:\n"
+              "/signal — Сканувати ринок та знайти сигнал\n"
+              "/stats — Переглянути статистику"
+          )
+          requests.post(
+              f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+              json={
+                  "chat_id": chat_id,
+                  "text": welcome_text,
+                  "parse_mode": "Markdown",
+              },
+          )
+        elif text.startswith("/signal"):
+          if not is_trading_time():
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": (
+                        "⏳ Зараз позаторговий час (торгівля доступна з 07:00 до"
+                        " 19:00 UTC)."
+                    ),
+                },
+            )
+          else:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": (
+                        "🔍 Починаю глибоке сканування ринку та мультитаймфреймовий"
+                        " аналіз..."
+                    ),
+                },
+            )
+            for name, sym in list(PAIRS_MAP.items())[:5]:
+              scan_pair(sym, name, chat_id)
+        elif text.startswith("/stats"):
+          day_t, week_t, all_t = get_statistics()
+          stats_msg = (
+              format_stats_text("Статистика за 24 години", day_t)
+              + "\n\n"
+              + format_stats_text("Статистика за 7 днів", week_t)
+          )
+          requests.post(
+              f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+              json={
+                  "chat_id": chat_id,
+                  "text": stats_msg,
+                  "parse_mode": "Markdown",
+              },
+          )
+    except Exception as e:
+      print(f"Помилка обробки вебхука: {e}")
     return "OK", 200
-
-  if "message" in update:
-    chat_id = update["message"]["chat"]["id"]
-    text = update["message"].get("text", "")
-
-    if text in ["/start", "💱 Пари"]:
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": "Оберіть пару:",
-              "reply_markup": get_pairs_inline_keyboard(),
-          },
-      )
-      if text == "/start":
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": "Меню:",
-                "reply_markup": get_bottom_menu(),
-            },
-      )
-
-    elif text == "📊 Аналіз усіх пар":
-      if not is_trading_time():
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": "🌙 Поза межами торгового часу (07:00 - 19:00 UTC).",
-            },
-        )
-        return "OK", 200
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": "⏳ Сканую ринок (1h + 15m + 5m) з ШІ та Боллінджером...",
-          },
-      )
-
-      def run_mass():
-        for name, ticker in PAIRS_MAP.items():
-          scan_pair(ticker, name, chat_id)
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": "✅ Сканування завершено!"},
-        )
-
-      threading.Thread(target=run_mass).start()
-
-    elif text == "📈 Статистика":
-      keyboard = {
-          "inline_keyboard": [
-              [
-                  {"text": "📅 За добу", "callback_data": "stats|day"},
-                  {"text": "📆 За тиждень", "callback_data": "stats|week"},
-              ],
-              [{"text": "📈 За весь час", "callback_data": "stats|all"}],
-          ]
-      }
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": "📊 **Виберіть період:**",
-              "reply_markup": keyboard,
-              "parse_mode": "Markdown",
-          },
-      )
-
-  elif "callback_query" in update:
-    query = update["callback_query"]
-    chat_id = query["message"]["chat"]["id"]
-    message_id = query["message"]["message_id"]
-    data = query["data"]
-
-    if data.startswith("pair|"):
-      _, pair_name = data.split("|")
-      if not is_trading_time():
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": "🌙 Поза межами торгового часу (07:00 - 19:00 UTC).",
-            },
-        )
-        return "OK", 200
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-          json={
-              "chat_id": chat_id,
-              "text": (
-                  f"⏳ Аналізую {pair_name} по трьох таймфреймах (1h, 15m, 5m)..."
-              ),
-          },
-      )
-      threading.Thread(
-          target=lambda: scan_pair(PAIRS_MAP[pair_name], pair_name, chat_id)
-      ).start()
-
-    elif data.startswith("stats|"):
-      _, period = data.split("|")
-      (stats_day, wr_day), (stats_week, wr_week), (stats_all, wr_all) = (
-          get_statistics()
-      )
-      text_res = format_stats_text(
-          f"Статистика ({period})",
-          (
-              stats_day
-              if period == "day"
-              else (stats_week if period == "week" else stats_all),
-              wr_day if period == "day" else (wr_week if period == "week" else wr_all),
-          ),
-      )
-      keyboard = {
-          "inline_keyboard": [[{
-              "text": "🔄 Оновити",
-              "callback_data": f"stats|{period}",
-          }]]
-      }
-      requests.post(
-          f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText",
-          json={
-              "chat_id": chat_id,
-              "message_id": message_id,
-              "text": text_res,
-              "reply_markup": keyboard,
-              "parse_mode": "Markdown",
-          },
-      )
-
   return "OK", 200
 
 
-@app.route("/")
-def home():
-  return "Multi-TF Trading Bot with 15m, Bollinger & CoT AI is running!"
+@app.route("/", methods=["GET"])
+def index():
+  return "Racio_1 Bot is running with Gemini 3.6 Flash!", 200
 
 
 if __name__ == "__main__":
