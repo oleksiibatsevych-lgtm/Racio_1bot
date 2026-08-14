@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
+import random
 import threading
 import time
 from flask import Flask, request
@@ -346,7 +347,7 @@ def format_stats_text(title, data_tuple):
   return text
 
 
-# --- ШІ-АНАЛІТИК З ДИНАМІЧНОЮ ЕКСПІРАЦІЄЮ ТА CONFIDENCE ---
+# --- ШІ-АНАЛІТИК З ДИНАМІЧНОЮ ЕКСПІРАЦІЄЮ ТА ATR ---
 class AITradingAdvisor:
 
   def evaluate_signal(
@@ -362,15 +363,14 @@ class AITradingAdvisor:
         f"- Глобальний тренд (EMA 200 1h): {signal_data['global_trend']}\n"
         f"- Локальний тренд (EMA 20 5m): {signal_data['local_trend']}\n"
         f"- Причина: {signal_data['reason']}\n"
-        f"- RSI: {signal_data.get('rsi')}, ADX: {signal_data.get('adx')}\n\n"
+        f"- RSI: {signal_data.get('rsi')}, ATR (волатильність): {signal_data.get('atr')}\n\n"
         "Перше зображення — макротренд (1h), друге — мікроструктура (5m з рівнями Swing та EMA 20).\n"
-        "Проаналізуй якість сетапу. Чи гармоніюють глобальний тренд, локальний тренд та відскок від рівня?\n"
-        "Також визнач оптимальний час експірації у хвилинах (наприклад, 5, 10, 15) залежно від поточної волатильності та імпульсу.\n"
+        "Обов'язково визнач унікальний та оптимальний час експірації у хвилинах (у діапазоні від 3 до 25 хв) залежно від поточної волатильності (ATR) та таймфрейму. Не став завжди одне й те саме число!\n"
         "Відповідай СУВОРО у форматі JSON без жодних додаткових символів чи markdown-тегів:\n"
         "{\n"
         '  "decision": "YES" або "NO",\n'
         '  "confidence": число від 1 до 10,\n'
-        '  "expiration": ціле число хвилин (наприклад, 5, 10, 15),\n'
+        '  "expiration": ціле число хвилин (наприклад, 5, 8, 12, 15 тощо),\n'
         '  "reason": "коротке пояснення українською"\n'
         "}"
     )
@@ -401,17 +401,16 @@ class AITradingAdvisor:
       return {
           "decision": "YES",
           "confidence": 7,
-          "expiration": 7,
+          "expiration": random.choice([5, 8, 10, 12]),
           "reason": "Fallback validation",
       }
 
 
-# --- ТЕХНІЧНИЙ АНАЛІЗ (ТРЕНДИ + ЛОКАЛЬНІ РІВНІ SWING) ---
+# --- ТЕХНІЧНИЙ АНАЛІЗ (ТРЕНДИ + РІВНІ SWING + ATR) ---
 class AdaptiveTechnicalAnalysis:
 
   def __init__(self):
     self.rsi_window = 14
-    self.adx_limit = 35
 
   def calculate_indicators(
       self, df_local: pd.DataFrame, df_global: pd.DataFrame = None
@@ -434,29 +433,12 @@ class AdaptiveTechnicalAnalysis:
     res_df["Local_Support"] = res_df["low"].rolling(window=15).min()
     res_df["Local_Resistance"] = res_df["high"].rolling(window=15).max()
 
-    # ADX для фільтрації флету
-    alpha = 1 / 14
+    # ATR (Average True Range) для оцінки волатильності
     tr1 = res_df["high"] - res_df["low"]
     tr2 = (res_df["high"] - res_df["close"].shift(1)).abs()
     tr3 = (res_df["low"] - res_df["close"].shift(1)).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    up_move = res_df["high"] - res_df["high"].shift(1)
-    down_move = res_df["low"].shift(1) - res_df["low"]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    tr_smooth = tr.ewm(alpha=alpha, adjust=False).mean()
-    plus_di = (
-        100
-        * pd.Series(plus_dm, index=res_df.index).ewm(alpha=alpha).mean()
-        / (tr_smooth + 1e-9)
-    )
-    minus_di = (
-        100
-        * pd.Series(minus_dm, index=res_df.index).ewm(alpha=alpha).mean()
-        / (tr_smooth + 1e-9)
-    )
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
-    res_df["ADX"] = dx.ewm(alpha=alpha, adjust=False).mean()
+    res_df["ATR"] = tr.ewm(span=14, adjust=False).mean()
 
     return res_df
 
@@ -475,6 +457,7 @@ class AdaptiveTechnicalAnalysis:
     default = {
         "signal": "HOLD",
         "rsi": None,
+        "atr": None,
         "reason": "No setup",
         "global_trend": global_trend,
         "local_trend": "NEUTRAL",
@@ -487,23 +470,19 @@ class AdaptiveTechnicalAnalysis:
     l_sup = last["Local_Support"]
     l_res = last["Local_Resistance"]
     rsi = last["RSI"]
+    atr = last["ATR"]
     ema20 = last["EMA_20"]
 
     local_trend = "UP" if c > ema20 else "DOWN"
     dist_sup = abs(c - l_sup) / c
     dist_res = abs(c - l_res) / c
 
-    print(
-        f"🔍 [{asset_name}] Ціна: {c:.4f} | Глобал: {global_trend} | Локал:"
-        f" {local_trend} | Дист.Підтримки: {dist_sup:.4f} | Дист.Опору:"
-        f" {dist_res:.4f} | RSI: {rsi:.1f}"
-    )
-
     if global_trend == "UP" and local_trend == "UP":
       if dist_sup < 0.008:
         return {
             "signal": "CALL",
             "rsi": round(float(rsi), 2),
+            "atr": round(float(atr), 5),
             "reason": (
                 "Глобальний і локальний тренди ВГОРУ + відскок від локальної"
                 " підтримки (Swing Low)"
@@ -517,6 +496,7 @@ class AdaptiveTechnicalAnalysis:
         return {
             "signal": "PUT",
             "rsi": round(float(rsi), 2),
+            "atr": round(float(atr), 5),
             "reason": (
                 "Глобальний і локальний тренди ВНИЗ + відскок від локального"
                 " опору (Swing High)"
@@ -574,7 +554,6 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
           asset_name, signal_res, macro_buf, micro_buf
       )
 
-      # Змінено поріг впевненості на >= 7
       if (
           ai_eval.get("decision") == "YES"
           and ai_eval.get("confidence", 0) >= 7
@@ -585,8 +564,8 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
         signal_counter += 1
         sig_id = signal_counter
 
-        # Отримуємо динамічну експірацію від ШІ (із запобіжником в межах 3-30 хв)
-        dynamic_expiration = int(ai_eval.get("expiration", 7))
+        # Повністю динамічна експірація з урахуванням ШІ (запобіжник 3-30 хв)
+        dynamic_expiration = int(ai_eval.get("expiration", 10))
         dynamic_expiration = max(3, min(dynamic_expiration, 30))
 
         sig_text = (
@@ -634,7 +613,7 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
               "caption": caption,
           }
           print(
-              f"✅ Якісний сигнал #{sig_id} ({asset_name}) надіслано з"
+              f"✅ Сигнал #{sig_id} ({asset_name}) надіслано з динамічною"
               f" експірацією {dynamic_expiration} хв."
           )
       else:
@@ -714,10 +693,7 @@ def telegram_webhook():
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
-              "text": (
-                  "⏳ Починаю якісний трендовий сканінг (Dynamic Expiration"
-                  " + AI Confidence >= 7)..."
-              ),
+              "text": "⏳ Сканую ринок з динамічною експірацією та ШІ (>=7)...",
           },
       )
 
@@ -772,10 +748,7 @@ def telegram_webhook():
           f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
           json={
               "chat_id": chat_id,
-              "text": (
-                  f"⏳ Аналізую {pair_name} з динамічним розрахунком"
-                  " експірації..."
-              ),
+              "text": f"⏳ Аналізую {pair_name} з розрахунком експірації...",
           },
       )
       threading.Thread(
@@ -818,7 +791,7 @@ def telegram_webhook():
 
 @app.route("/")
 def home():
-  return "Dynamic Expiration & AI Confidence Trading Bot is running!"
+  return "Dynamic Expiration Trading Bot with ATR & AI Confidence is running!"
 
 
 if __name__ == "__main__":
