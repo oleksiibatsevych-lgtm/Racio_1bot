@@ -25,7 +25,7 @@ RENDER_URL = os.environ.get(
     "RENDER_EXTERNAL_URL", "https://racio-1bot.onrender.com"
 )
 
-# Ініціалізація клієнта Gemini
+# Ініціалізація клієнта Gemini з актуальною моделлю
 client = genai.Client()
 
 PAIRS_MAP = {
@@ -205,7 +205,7 @@ def is_news_time_with_ai_sentiment(pair_name: str) -> bool:
         + "\nЧи несуть ці події критичну непередбачувану волатильність? Відповідай ТІЛЬКИ одне слово: 'DANGER' або 'SAFE'."
     )
     res = client.models.generate_content(
-        model="gemini-2.5-flash", contents=prompt
+        model="gemini-2.0-flash", contents=prompt
     )
     decision = res.text.strip().upper()
     return "DANGER" in decision
@@ -384,8 +384,9 @@ class AITradingAdvisor:
           data=micro_chart.getvalue(), mime_type="image/png"
       )
 
+      # Використовуємо актуальну модель gemini-2.0-flash
       response = client.models.generate_content(
-          model="gemini-2.5-flash", contents=[prompt, img1, img2]
+          model="gemini-2.0-flash", contents=[prompt, img1, img2]
       )
       raw_text = (
           response.text.strip()
@@ -554,6 +555,7 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
           asset_name, signal_res, macro_buf, micro_buf
       )
 
+      # Фільтр за впевненістю ШІ >= 7
       if (
           ai_eval.get("decision") == "YES"
           and ai_eval.get("confidence", 0) >= 7
