@@ -402,62 +402,6 @@ class AdvancedTechnicalAnalysis:
           }
     return {"pattern": None, "type": None}
 
-  def check_pre_alert(
-      self,
-      df_5m: pd.DataFrame,
-      df_3m: pd.DataFrame = None,
-      df_1m: pd.DataFrame = None,
-  ) -> dict:
-    if len(df_5m) < 25:
-      return {"status": False}
-    last = df_5m.iloc[-1]
-    if not pd.isna(last["ADX"]) and last["ADX"] > 25:
-      return {"status": False}
-
-    c, g_sup, g_res, rsi, stoch = (
-        last["close"],
-        last["Global_Support"],
-        last["Global_Resistance"],
-        last["RSI"],
-        last["Stoch_K"],
-    )
-    exp = self.calculate_dynamic_expiration(df_5m)
-
-    pattern_res = self.check_multi_tf_patterns(df_1m, df_3m, df_5m)
-    if pattern_res["pattern"] is not None:
-      return {
-          "status": True,
-          "type": f"🎯 Патерн: {pattern_res['pattern']}",
-          "expiration": exp,
-          "reason": pattern_res["reason"],
-      }
-
-    if abs(c - g_sup) / c < 0.004 and (
-        30 <= rsi <= 36 or stoch <= 25 or c <= last["BB_Lower"]
-    ):
-      return {
-          "status": True,
-          "type": "🟢 ВВЕРХ (CALL)",
-          "expiration": exp,
-          "reason": (
-              f"Підхід до підтримки/нижньої межі BB. RSI: {rsi:.1f},"
-              f" ADX: {last['ADX']:.1f}"
-          ),
-      }
-    if abs(c - g_res) / c < 0.004 and (
-        64 <= rsi <= 70 or stoch >= 75 or c >= last["BB_Upper"]
-    ):
-      return {
-          "status": True,
-          "type": "🔴 ВНИЗ (PUT)",
-          "expiration": exp,
-          "reason": (
-              f"Підхід до опору/верхньої межі BB. RSI: {rsi:.1f},"
-              f" ADX: {last['ADX']:.1f}"
-          ),
-      }
-    return {"status": False}
-
   def generate_signal(
       self,
       df_5m: pd.DataFrame,
@@ -622,18 +566,6 @@ class TelegramSignalSender:
     plt.close(fig)
     return buf
 
-  def send_pre_alert(self, df: pd.DataFrame, pre_data: dict, asset: str):
-    chart_buffer = self._create_chart(df, asset)
-    caption = (
-        f"⚠️ **PRE-ALERT**\n"
-        f"📊 `{asset}` | 🎯 `{pre_data['type']}`\n"
-        f"⏳ Експірація: `{pre_data['expiration']} хв`\n"
-        f"💡 _{pre_data['reason']}_"
-    )
-    files = {"photo": (f"{asset}_pre.png", chart_buffer, "image/png")}
-    data = {"chat_id": self.chat_id, "caption": caption, "parse_mode": "Markdown"}
-    requests.post(f"{self.api_url}/sendPhoto", data=data, files=files)
-
   def send_signal(
       self, df: pd.DataFrame, signal_data: dict, asset: str, sig_id: int
   ):
@@ -726,10 +658,7 @@ def scan_pair(pair_symbol, asset_name, chat_id=None):
             .dropna()
         )
 
-    pre_res = analyzer.check_pre_alert(df_5m, df_3m, df_1m)
-    if pre_res["status"] and notifier:
-      notifier.send_pre_alert(df_5m, pre_res, asset_name)
-
+    # Викликаємо генерацію сигналу напряму без пре-алертів
     signal_res = analyzer.generate_signal(df_5m, df_3m, df_1m)
 
     if signal_res["signal"] != "HOLD" and notifier:
