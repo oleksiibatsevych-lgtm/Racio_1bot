@@ -1,7 +1,8 @@
-google-genai>=1.0.0
 flask
 requests
 pandas
 numpy
 matplotlib
 yfinance
+google-genai
+gunicorn
