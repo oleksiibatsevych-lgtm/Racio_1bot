@@ -20,8 +20,21 @@ import yfinance as yf
 
 app = Flask(__name__)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+
+
+def setup_webhook():
+  webhook_url = "https://racio-1bot.onrender.com/webhook"
+  url = f"{TELEGRAM_API_URL}/setWebhook?url={webhook_url}"
+  try:
+    response = requests.get(url, timeout=10)
+    print(f"Webhook setup response: {response.json()}")
+  except Exception as e:
+    print(f"❌ Webhook setup error: {e}")
+
+
+setup_webhook()
 
 PAIRS = [
     "EURUSD=X",
