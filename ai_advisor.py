@@ -7,7 +7,8 @@ client = genai.Client()
 
 
 def safe_generate_content(contents, config=None):
-  models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
+  # Використовуємо актуальну модель gemini-3.5-flash як основну
+  models_to_try = ["gemini-3.5-flash", "gemini-2.5-flash"]
   for model_name in models_to_try:
     try:
       response = client.models.generate_content(
@@ -35,13 +36,13 @@ class AITradingAdvisor:
         f"- Режим ринку та ADX: {signal_data.get('adx')}\n"
         f"- Глобальний тренд (EMA 200 1h): {signal_data['global_trend']}\n"
         f"- Середній тренд (EMA 20 15m): {signal_data['mid_trend']}\n"
-        f"- Локальний тренд (EMA 20 5m): {signal_data['local_trend']}\n"
+        f"- Локальний тренд (EMA 10 5m): {signal_data['local_trend']}\n"
         f"- Причина: {signal_data['reason']}\n"
         f"- RSI: {signal_data.get('rsi')}, ATR (волатильність): {signal_data.get('atr')}\n\n"
         "Зображення: 1) Макротренд (1h), 2) Середній таймфрейм (15m), 3) Мікроструктура (5m зі рівнями Swing та Смугами Боллінджера).\n"
         "ПРОАНАЛІЗУЙ КРОК ЗА КРОКОМ (Chain of Thought):\n"
-        "1. Чи збігаються ринкові умови (флєт/тренд за ADX) та сигнали?\n"
-        "2. Наскільки якісний відскок від рівня або межі Боллінджера?\n"
+        "1. Чи збігаються ринкові умови та імпульси?\n"
+        "2. Наскільки якісний рух від рівня або межі Боллінджера?\n"
         "3. Чи виправдана поточна волатильність ATR та ADX?\n"
         "Визнач оптимальний час експірації у хвилинах (від 3 до 25 хв) та справедливу оцінку впевненості (confidence) від 1 до 10.\n"
         "Відповідай СУВОРО у форматі JSON без жодних додаткових символів чи markdown-тегів:\n"
