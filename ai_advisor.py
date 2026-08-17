@@ -2,22 +2,33 @@ import json
 from google import genai
 from google.genai import types
 import io
+import time
 
 client = genai.Client()
 
 
 def safe_generate_content(contents, config=None):
-  # Використовуємо актуальну модель gemini-3.5-flash як основну
-  models_to_try = ["gemini-3.5-flash", "gemini-2.5-flash"]
-  for model_name in models_to_try:
-    try:
-      response = client.models.generate_content(
-          model=model_name, contents=contents, config=config
-      )
-      return response
-    except Exception as e:
-      print(f"⚠️ Модель {model_name} недоступна: {e}")
-  raise Exception("Усі моделі Gemini наразі недоступні.")
+  # Розширюємо список моделей і ставимо резервні варіанти
+  models_to_try = [
+      "gemini-3.5-flash",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+  ]
+
+  for attempt in range(2):  # Дві спроби з невеликою паузою
+    for model_name in models_to_try:
+      try:
+        response = client.models.generate_content(
+            model=model_name, contents=contents, config=config
+        )
+        return response
+      except Exception as e:
+        print(f"⚠️ Модель {model_name} (спроба {attempt+1}) недоступна: {e}")
+
+    if attempt == 0:
+      time.sleep(2)  # Коротка пауза перед повторним циклом на випадок пікового навантаження
+
+  raise Exception("Усі моделі Gemini наразі недоступні або перевантажені.")
 
 
 class AITradingAdvisor:
