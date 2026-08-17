@@ -138,40 +138,54 @@ def webhook():
 
     if text == "/start":
       markup = {
-          "inline_keyboard": [
-              [{"text": "📊 Масовий аналіз", "callback_data": "run_scan"}],
-              [{"text": "📈 Статистика", "callback_data": "show_stats"}],
-          ]
+          "keyboard": [
+              [{"text": "📊 Аналіз усіх пар"}, {"text": "💲 Пари"}],
+              [{"text": "📈 Статистика"}],
+          ],
+          "resize_keyboard": True,
       }
       send_telegram_message(
           chat_id,
-          "Вітаю! Я торговий бот Racio 1. Оберіть дію:",
+          "Вітаю! Головне меню активовано:",
           reply_markup=markup,
           parse_mode=None,
       )
 
-  elif "callback_query" in data:
-    cq = data["callback_query"]
-    chat_id = cq["message"]["chat"]["id"]
-    data_val = cq["data"]
-
-    requests.post(
-        f"{TELEGRAM_API_URL}/answerCallbackQuery",
-        json={"callback_query_id": cq["id"]},
-    )
-
-    if data_val == "show_stats":
+    elif text == "📈 Статистика":
       stats = get_statistics()
-      text = (
+      res_text = (
           f"📊 *Статистика торгівлі:*\n\n"
           f"• Всього угод: {stats['total']}\n"
           f"• Перемог (WIN): {stats['wins']}\n"
           f"• Поразок (LOSS): {stats['losses']}\n"
           f"• WinRate: {stats['win_rate']}%"
       )
-      send_telegram_message(chat_id, text, parse_mode="Markdown")
+      send_telegram_message(chat_id, res_text, parse_mode="Markdown")
 
-    elif data_val == "run_scan":
+    elif text == "💲 Пари":
+      inline_keyboard = []
+      row = []
+      for pair in PAIRS:
+        display_name = pair.replace("=X", "")
+        if len(display_name) == 6:
+          display_name = f"{display_name[:3]}/{display_name[3:]}"
+
+        row.append({"text": display_name, "callback_data": f"pair_{pair}"})
+        if len(row) == 2:
+          inline_keyboard.append(row)
+          row = []
+      if row:
+        inline_keyboard.append(row)
+
+      markup = {"inline_keyboard": inline_keyboard}
+      send_telegram_message(
+          chat_id,
+          "Оберіть валютну пару для аналізу:",
+          reply_markup=markup,
+          parse_mode=None,
+      )
+
+    elif text == "📊 Аналіз усіх пар":
       if not check_trading_time():
         send_telegram_message(
             chat_id,
@@ -183,7 +197,7 @@ def webhook():
 
       send_telegram_message(
           chat_id,
-          "🔄 Запуск масового сканування 21 валютної пари...",
+          "⏳ Глобальне сканування ринку (21 пара з аналізом)...",
           parse_mode=None,
       )
 
@@ -259,11 +273,148 @@ def webhook():
         except Exception as e:
           print(f"Помилка при скануванні {pair}: {e}")
 
+      if signals_found == 0:
+        send_telegram_message(
+            chat_id,
+            "💤 За результатами сканування якісних сигналів немає.",
+            parse_mode=None,
+        )
+      else:
+        send_telegram_message(
+            chat_id,
+            f"✅ Сканування завершено! Знайдено сигналів: {signals_found}",
+            parse_mode=None,
+        )
+
+  elif "callback_query" in data:
+    cq = data["callback_query"]
+    chat_id = cq["message"]["chat"]["id"]
+    data_val = cq["data"]
+
+    requests.post(
+        f"{TELEGRAM_API_URL}/answerCallbackQuery",
+        json={"callback_query_id": cq["id"]},
+    )
+
+    if data_val.startswith("pair_"):
+      selected_pair = data_val.replace("pair_", "")
+
+      if not check_trading_time():
+        send_telegram_message(
+            chat_id,
+            "⏳ Позаторговий час (робота з 07:00 до 19:00 UTC). Аналіз призупинено.",
+            parse_mode=None,
+        )
+        return "ok", 200
+
       send_telegram_message(
           chat_id,
-          f"✅ Масове сканування завершено! Знайдено сигналів: {signals_found}",
-          parse_mode=None,
+          f"🔄 Аналіз пари `{selected_pair}`...",
+          parse_mode="Markdown",
       )
+
+      try:
+        losses = get_consecutive_losses(selected_pair)
+        if losses >= 3:
+          send_telegram_message(
+              chat_id,
+              f"⚠️ Пара `{selected_pair}` має 3 поспіль поразки. Аналіз пропущено.",
+              parse_mode="Markdown",
+          )
+          return "ok", 200
+
+        df_1h = yf.download(
+            selected_pair, period="5d", interval="1h", progress=False
+        )
+        df_15m = yf.download(
+            selected_pair, period="5d", interval="15m", progress=False
+        )
+        df_5m = yf.download(
+            selected_pair, period="2d", interval="5m", progress=False
+        )
+
+        if (
+            df_1h is None
+            or df_15m is None
+            or df_5m is None
+            or df_5m.empty
+            or len(df_5m) < 30
+        ):
+          send_telegram_message(
+              chat_id,
+              f"❌ Недостатньо даних для пари `{selected_pair}`.",
+              parse_mode="Markdown",
+          )
+          return "ok", 200
+
+        g_trend = tech_analysis.get_trend(df_1h, span_val=200)
+        df_15m_ind = tech_analysis.calculate_indicators(df_15m)
+        m_trend = (
+            "UP"
+            if df_15m_ind["close"].iloc[-1]
+            > df_15m_ind["close"].ewm(span=20).mean().iloc[-1]
+            else "DOWN"
+        )
+
+        df_5m_ind = tech_analysis.calculate_indicators(df_5m)
+        signal_data = tech_analysis.generate_signal(
+            df_5m_ind, g_trend, m_trend, selected_pair
+        )
+
+        if signal_data["signal"] == "HOLD":
+          send_telegram_message(
+              chat_id,
+              f"💤 По парі `{selected_pair}` наразі немає чіткого сигналу (HOLD).",
+              parse_mode="Markdown",
+          )
+        else:
+          buf_1h = io.BytesIO()
+          buf_15m = io.BytesIO()
+          buf_5m = io.BytesIO()
+          df_1h["Close"].plot().get_figure().savefig(buf_1h, format="png")
+          df_15m["Close"].plot().get_figure().savefig(buf_15m, format="png")
+          df_5m["Close"].plot().get_figure().savefig(buf_5m, format="png")
+
+          ai_res = ai_advisor.evaluate_signal(
+              selected_pair, signal_data, buf_1h, buf_15m, buf_5m
+          )
+
+          if ai_res.get("decision") == "YES" and ai_res.get("confidence", 0) >= 7:
+            entry_price = float(df_5m["Close"].iloc[-1])
+            exp_mins = int(ai_res.get("expiration", 5))
+            exp_time = datetime.utcnow() + timedelta(minutes=exp_mins)
+
+            save_signal(
+                selected_pair,
+                signal_data["signal"],
+                entry_price,
+                exp_time.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+
+            msg = (
+                f"🚨 *ТОРГОВИЙ СИГНАЛ* 🚨\n\n"
+                f"• Пара: `{selected_pair}`\n"
+                f"• Сигнал: *{signal_data['signal']}*\n"
+                f"• Ціна входу: `{entry_price}`\n"
+                f"• Експертиза ШІ: {ai_res.get('reason')}\n"
+                f"• Впевненість: `{ai_res.get('confidence')}/10`\n"
+                f"• Експірація: `{exp_mins} хв`"
+            )
+            send_telegram_message(chat_id, msg, parse_mode="Markdown")
+          else:
+            send_telegram_message(
+                chat_id,
+                f"🛡 ШІ відхилив сигнал по `{selected_pair}`. Причина:"
+                f" {ai_res.get('reason', 'Низька впевненість')}",
+                parse_mode="Markdown",
+            )
+      except Exception as e:
+        print(f"Помилка при аналізі {selected_pair}: {e}")
+        send_telegram_message(
+            chat_id,
+            f"❌ Сталася помилка при аналізі пари `{selected_pair}`.",
+            parse_mode="Markdown",
+        )
 
   return "ok", 200
 
