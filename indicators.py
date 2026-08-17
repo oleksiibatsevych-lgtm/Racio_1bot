@@ -52,6 +52,8 @@ class AdaptiveTechnicalAnalysis:
     rs = avg_gain / (avg_loss + 1e-9)
     res_df["rsi"] = 100 - (100 / (1 + rs))
 
+    # Додаємо швидку EMA 10 для швидких локальних трендів
+    res_df["ema_10"] = res_df["close"].ewm(span=10, adjust=False).mean()
     res_df["ema_20"] = res_df["close"].ewm(span=20, adjust=False).mean()
 
     bb_window = 20
@@ -109,15 +111,18 @@ class AdaptiveTechnicalAnalysis:
     rsi = last["rsi"]
     atr = last["atr"]
     adx = last["adx"]
-    ema20 = last["ema_20"]
+    ema10 = last["ema_10"]
     bb_lower = last["bb_lower"]
     bb_upper = last["bb_upper"]
 
-    local_trend = "UP" if c > ema20 else "DOWN"
-    is_flat = adx < 22
+    # Використовуємо швидку EMA 10 для визначення мікротренду
+    local_trend = "UP" if c > ema10 else "DOWN"
+
+    # Зменшуємо поріг флєту: все, де ADX >= 18, вважається трендовим ринком
+    is_flat = adx < 18
 
     if is_flat:
-      if c <= bb_lower or (abs(c - l_sup) / c < 0.005 and rsi < 35):
+      if c <= bb_lower or (abs(c - l_sup) / c < 0.005 and rsi < 38):
         return {
             "signal": "CALL",
             "rsi": round(float(rsi), 2),
@@ -131,7 +136,7 @@ class AdaptiveTechnicalAnalysis:
             "mid_trend": mid_trend,
             "local_trend": local_trend,
         }
-      elif c >= bb_upper or (abs(c - l_res) / c < 0.005 and rsi > 65):
+      elif c >= bb_upper or (abs(c - l_res) / c < 0.005 and rsi > 62):
         return {
             "signal": "PUT",
             "rsi": round(float(rsi), 2),
@@ -146,38 +151,36 @@ class AdaptiveTechnicalAnalysis:
             "local_trend": local_trend,
         }
     else:
+      # ЛОВИМО КОРОТКІ ТРЕНДИ: перевіряємо збіг 15m (mid) та 5m (local)
       dist_sup = abs(c - l_sup) / c
       dist_res = abs(c - l_res) / c
 
-      if global_trend == "UP" and mid_trend == "UP" and local_trend == "UP":
-        if dist_sup < 0.008:
+      if mid_trend == "UP" and local_trend == "UP":
+        if dist_sup < 0.012 or c > ema10:
           return {
               "signal": "CALL",
               "rsi": round(float(rsi), 2),
               "atr": round(float(atr), 5),
               "adx": round(float(adx), 2),
               "reason": (
-                  f"Тренд ВГОРУ (ADX: {round(adx, 1)}) + Відскок від підтримки"
-                  " Swing"
+                  f"Короткий тренд ВГОРУ (ADX: {round(adx, 1)}) +"
+                  " Імпульс/Підтримка"
               ),
               "global_trend": global_trend,
               "mid_trend": mid_trend,
               "local_trend": local_trend,
           }
 
-      if (
-          global_trend == "DOWN"
-          and mid_trend == "DOWN"
-          and local_trend == "DOWN"
-      ):
-        if dist_res < 0.008:
+      if mid_trend == "DOWN" and local_trend == "DOWN":
+        if dist_res < 0.012 or c < ema10:
           return {
               "signal": "PUT",
               "rsi": round(float(rsi), 2),
               "atr": round(float(atr), 5),
               "adx": round(float(adx), 2),
               "reason": (
-                  f"Тренд ВНИЗ (ADX: {round(adx, 1)}) + Відскок від опору Swing"
+                  f"Короткий тренд ВНИЗ (ADX: {round(adx, 1)}) +"
+                  " Імпульс/Опір"
               ),
               "global_trend": global_trend,
               "mid_trend": mid_trend,
