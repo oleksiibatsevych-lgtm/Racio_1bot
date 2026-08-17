@@ -66,13 +66,18 @@ ai_advisor = AITradingAdvisor()
 init_db()
 
 
-def send_telegram_message(chat_id, text, reply_markup=None):
+def send_telegram_message(
+    chat_id, text, reply_markup=None, parse_mode="Markdown"
+):
   url = f"{TELEGRAM_API_URL}/sendMessage"
-  payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+  payload = {"chat_id": chat_id, "text": text}
+  if parse_mode:
+    payload["parse_mode"] = parse_mode
   if reply_markup:
     payload["reply_markup"] = reply_markup
   try:
-    requests.post(url, json=payload, timeout=10)
+    response = requests.post(url, json=payload, timeout=10)
+    print(f"Telegram response: {response.text}")
   except Exception as e:
     print(f"❌ Telegram send error: {e}")
 
@@ -140,8 +145,9 @@ def webhook():
       }
       send_telegram_message(
           chat_id,
-          "Вітаю! Я торговий бот Racio_1. Оберіть дію:",
+          "Вітаю! Я торговий бот Racio 1. Оберіть дію:",
           reply_markup=markup,
+          parse_mode=None,
       )
 
   elif "callback_query" in data:
@@ -163,7 +169,7 @@ def webhook():
           f"• Поразок (LOSS): {stats['losses']}\n"
           f"• WinRate: {stats['win_rate']}%"
       )
-      send_telegram_message(chat_id, text)
+      send_telegram_message(chat_id, text, parse_mode="Markdown")
 
     elif data_val == "run_scan":
       if not check_trading_time():
@@ -171,11 +177,14 @@ def webhook():
             chat_id,
             "⏳ Позаторговий час (робота з 07:00 до 19:00 UTC). Сканування"
             " призупинено.",
+            parse_mode=None,
         )
         return "ok", 200
 
       send_telegram_message(
-          chat_id, "🔄 Запуск масового сканування 21 валютної пари..."
+          chat_id,
+          "🔄 Запуск масового сканування 21 валютної пари...",
+          parse_mode=None,
       )
 
       signals_found = 0
@@ -245,7 +254,7 @@ def webhook():
                   f"• Впевненість: `{ai_res.get('confidence')}/10`\n"
                   f"• Експірація: `{exp_mins} хв`"
               )
-              send_telegram_message(chat_id, msg)
+              send_telegram_message(chat_id, msg, parse_mode="Markdown")
               signals_found += 1
         except Exception as e:
           print(f"Помилка при скануванні {pair}: {e}")
@@ -253,6 +262,7 @@ def webhook():
       send_telegram_message(
           chat_id,
           f"✅ Масове сканування завершено! Знайдено сигналів: {signals_found}",
+          parse_mode=None,
       )
 
   return "ok", 200
