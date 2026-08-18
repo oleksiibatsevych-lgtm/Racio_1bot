@@ -91,11 +91,12 @@ def evaluate_and_get_stats(fetch_data_func):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    cursor.execute("SELECT id, ticker, signal, entry_price FROM signals WHERE status = 'PENDING'")
+    cursor.execute("SELECT id, ticker, signal, entry_price, chat_id, message_id FROM signals WHERE status = 'PENDING'")
     rows = cursor.fetchall()
     
+    updated_signals = []
     for row in rows:
-        sig_id, ticker, signal, entry_price = row
+        sig_id, ticker, signal, entry_price, chat_id, message_id = row
         df = fetch_with_retry(fetch_data_func, ticker)
         if not df.empty:
             current_price = df['close'].iloc[-1]
@@ -109,6 +110,12 @@ def evaluate_and_get_stats(fetch_data_func):
                 result = 'WIN' if current_price < entry_price else 'LOSS'
                 
             cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, sig_id))
+            updated_signals.append({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "result": result,
+                "pips": pips
+            })
             
     conn.commit()
     cursor.execute("SELECT COUNT(*), SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) FROM signals WHERE status = 'COMPLETED'")
@@ -119,4 +126,4 @@ def evaluate_and_get_stats(fetch_data_func):
     wins = row[1] if row and row[1] else 0
     winrate = round((wins / total) * 100, 1) if total > 0 else 0
     
-    return {"total": total, "wins": wins, "winrate": winrate}
+    return {"total": total, "wins": wins, "winrate": winrate, "updated_signals": updated_signals}
