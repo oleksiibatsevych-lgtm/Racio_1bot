@@ -17,21 +17,24 @@ def init_db():
             expiration_mins INTEGER,
             timestamp TEXT,
             status TEXT DEFAULT 'PENDING',
-            result TEXT DEFAULT 'UNKNOWN'
+            result TEXT DEFAULT 'UNKNOWN',
+            chat_id INTEGER,
+            message_id INTEGER,
+            pips INTEGER DEFAULT 0
         )
     ''')
     conn.commit()
     conn.close()
 
-def save_signal(ticker, signal, entry_price, expiration_mins):
+def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None):
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
-        INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (ticker, signal, entry_price, expiration_mins, timestamp))
+        INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id))
     signal_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -47,7 +50,7 @@ def fetch_with_retry(fetch_data_func, ticker, retries=3, delay=2):
     return pd.DataFrame()
 
 def evaluate_single_signal(signal_id, fetch_data_func):
-    """Перевірка результату сигналу з урахуванням повторних спроб завантаження ціни"""
+    """Перевірка результату сигналу та розрахунок різниці в цілих пунктах"""
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -61,35 +64,32 @@ def evaluate_single_signal(signal_id, fetch_data_func):
     ticker, signal, entry_price, _ = row
     conn.close()
     
-    # Використовуємо захищене завантаження з повторами
     df = fetch_with_retry(fetch_data_func, ticker)
-    
     if df.empty:
         return None, 0
         
     current_price = df['close'].iloc[-1]
     
-    # Розрахунок різниці в пунктах (pips)
+    # Розрахунок різниці в цілих пунктах (pips)
     diff = current_price - entry_price
     multiplier = 100 if "JPY" in ticker.upper() else 10000
-    pips = round(diff * multiplier, 1)
+    pips = int(round(diff * multiplier))
     
     if signal == 'CALL':
         result = 'WIN' if current_price > entry_price else 'LOSS'
     else:
         result = 'WIN' if current_price < entry_price else 'LOSS'
         
-    # Зберігаємо результат у базу
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ? WHERE id = ?", (result, signal_id))
+    cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, signal_id))
     conn.commit()
     conn.close()
     
     return result, pips
 
 def evaluate_and_get_stats(fetch_data_func):
-    """Масова перевірка всіх залишкових PENDING сигналів"""
+    """Масова перевірка всіх залишкових PENDING сигналів для загальної статистики"""
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -102,11 +102,16 @@ def evaluate_and_get_stats(fetch_data_func):
         df = fetch_with_retry(fetch_data_func, ticker)
         if not df.empty:
             current_price = df['close'].iloc[-1]
+            diff = current_price - entry_price
+            multiplier = 100 if "JPY" in ticker.upper() else 10000
+            pips = int(round(diff * multiplier))
+            
             if signal == 'CALL':
                 result = 'WIN' if current_price > entry_price else 'LOSS'
             else:
                 result = 'WIN' if current_price < entry_price else 'LOSS'
-            cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ? WHERE id = ?", (result, sig_id))
+                
+            cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, sig_id))
             
     conn.commit()
     
