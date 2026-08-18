@@ -1,9 +1,15 @@
 import io
+from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
-
-# Чистий імпорт без застарілої функції новин
 from ai_advisor import AITradingAdvisor
+
+# Створюємо Flask-додаток, щоб Gunicorn міг його запустити на Render
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "Racio_1bot is running!"
 
 advisor = AITradingAdvisor()
 
@@ -109,4 +115,4 @@ def button_callback(update, context):
             f"• Висновок: {ai_result.get('reason')}"
         )
         
-        query.edit_message_text(text=updated_text, parse_mode="Markdown")
+        query.edit_message_text(text=updated_text, parse_Mode="Markdown")
