@@ -1,8 +1,7 @@
-flask
+Flask
 requests
+yfinance
 pandas
 numpy
 matplotlib
-yfinance
-google-generativeai
-gunicorn
+google-genai
