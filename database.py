@@ -30,16 +30,47 @@ def save_signal(ticker, signal, entry_price, expiration_mins):
         INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp)
         VALUES (?, ?, ?, ?, ?)
     ''', (ticker, signal, entry_price, expiration_mins, timestamp))
+    signal_id = cursor.lastrowid
     conn.commit()
     conn.close()
+    return signal_id
 
-def evaluate_and_get_stats(fetch_data_func):
-    """Перевіряє реальні результати зафіксованих сигналів за допомогою поточних котирувань ринку"""
+def evaluate_single_signal(signal_id, fetch_data_func):
+    """Перевіряє результат конкретного сигналу після завершення його експірації"""
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Беремо невирішені сигнали
+    cursor.execute("SELECT ticker, signal, entry_price, status FROM signals WHERE id = ?", (signal_id,))
+    row = cursor.fetchone()
+    if not row or row[3] != 'PENDING':
+        conn.close()
+        return None
+        
+    ticker, signal, entry_price, _ = row
+    df = fetch_data_func(ticker, interval="5m", range_period="1d")
+    
+    if df.empty:
+        conn.close()
+        return None
+        
+    current_price = df['close'].iloc[-1]
+    if signal == 'CALL':
+        result = 'WIN' if current_price > entry_price else 'LOSS'
+    else:
+        result = 'WIN' if current_price < entry_price else 'LOSS'
+        
+    cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ? WHERE id = ?", (result, signal_id))
+    conn.commit()
+    conn.close()
+    return result
+
+def evaluate_and_get_stats(fetch_data_func):
+    """Масова перевірка всіх залишкових PENDING сигналів для загальної статистики"""
+    init_db()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
     cursor.execute("SELECT id, ticker, signal, entry_price FROM signals WHERE status = 'PENDING'")
     rows = cursor.fetchall()
     
@@ -56,7 +87,6 @@ def evaluate_and_get_stats(fetch_data_func):
             
     conn.commit()
     
-    # Рахуємо загальну статистику завершених угод
     cursor.execute("SELECT COUNT(*), SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) FROM signals WHERE status = 'COMPLETED'")
     row = cursor.fetchone()
     conn.close()
