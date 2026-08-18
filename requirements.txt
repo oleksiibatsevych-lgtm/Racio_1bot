@@ -2,10 +2,8 @@ Flask==3.1.3
 python-telegram-bot==13.15
 gunicorn==22.0.0
 requests==2.32.3
-urllib3<2.0
-pandas>=2.3.2
+pandas==2.2.2
 yfinance==0.2.40
 google-genai
 matplotlib==3.9.0
-pandas-ta
-setuptools
+https://github.com/twopirllc/pandas-ta/archive/main.zip
