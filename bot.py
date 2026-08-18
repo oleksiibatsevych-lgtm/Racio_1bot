@@ -1,5 +1,6 @@
 import os
 import io
+import requests
 import yfinance as yf
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -19,6 +20,12 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 advisor = AITradingAdvisor()
 analyzer = AdaptiveTechnicalAnalysis()
 active_signals = {}
+
+# Налаштування сесії для обходу блокування Yahoo Finance на Render
+yf_session = requests.Session()
+yf_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+})
 
 @app.route("/")
 def index():
@@ -57,7 +64,39 @@ def handle_text_menu(update, context):
         update.message.reply_text("📌 Оберіть пару для запиту аналізу:", reply_markup=reply_markup)
         
     elif text == "📊 Аналіз усіх пар":
-        update.message.reply_text("🔄 Запущено ручний запит на загальне сканування ринку...")
+        chat_id = update.message.chat_id
+        update.message.reply_text("🔄 Запущено сканування всіх валютних пар. Очікуйте результати...")
+        
+        for name, ticker in PAIRS_MAP.items():
+            try:
+                df_macro = yf.download(ticker, period="60d", interval="1h", session=yf_session, progress=False)
+                df_mid = yf.download(ticker, period="10d", interval="15m", session=yf_session, progress=False)
+                df_micro = yf.download(ticker, period="2d", interval="5m", session=yf_session, progress=False)
+                
+                if df_macro.empty or df_mid.empty:
+                    continue
+
+                macro_buf = create_chart_image(df_macro, ticker, "1h")
+                mid_buf = create_chart_image(df_mid, ticker, "15m")
+                micro_buf = create_chart_image(df_micro, ticker, "5m")
+                
+                df_indicators = analyzer.calculate_indicators(df_mid)
+                sig_data = analyzer.generate_signal(df_indicators, "UP", "UP", "UP")
+                
+                ai_result = advisor.evaluate_signal(ticker, sig_data, macro_buf, mid_buf, micro_buf)
+                
+                msg = (
+                    f"📊 **Авто-сканування: {name} ({ticker})**\n"
+                    f"• Рішення ШІ: **{ai_result.get('decision')}** (Впевненість: {ai_result.get('confidence')}/10)\n"
+                    f"• Експірація: {ai_result.get('expiration')} хв\n"
+                    f"• Висновок: {ai_result.get('reason')}"
+                )
+                bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                
+            except Exception as e:
+                print(f"Помилка сканування {ticker}: {e}")
+                
+        bot.send_message(chat_id=chat_id, text="✅ Сканування всіх пар завершено!")
         
     elif text == "📈 Статистика":
         stats_text = "📈 Статистика роботи бота:\n"
@@ -88,21 +127,18 @@ def button_callback(update, context):
             parse_mode="Markdown"
         )
         try:
-            # Завантажуємо реальні дані з Yahoo Finance
-            df_macro = yf.download(ticker, period="60d", interval="1h", progress=False)
-            df_mid = yf.download(ticker, period="10d", interval="15m", progress=False)
-            df_micro = yf.download(ticker, period="2d", interval="5m", progress=False)
+            df_macro = yf.download(ticker, period="60d", interval="1h", session=yf_session, progress=False)
+            df_mid = yf.download(ticker, period="10d", interval="15m", session=yf_session, progress=False)
+            df_micro = yf.download(ticker, period="2d", interval="5m", session=yf_session, progress=False)
             
             if df_macro.empty or df_mid.empty:
                 query.edit_message_text(text=f"❌ Помилка: не вдалося завантажити дані для {ticker}")
                 return
 
-            # Генеруємо реальні графіки через модуль charts
             macro_buf = create_chart_image(df_macro, ticker, "1h")
             mid_buf = create_chart_image(df_mid, ticker, "15m")
             micro_buf = create_chart_image(df_micro, ticker, "5m")
             
-            # Розраховуємо індикатори та тренди
             df_indicators = analyzer.calculate_indicators(df_mid)
             sig_data = analyzer.generate_signal(df_indicators, "UP", "UP", "UP")
             
