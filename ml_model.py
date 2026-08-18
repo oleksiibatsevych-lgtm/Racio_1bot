@@ -31,7 +31,7 @@ class TradingMLFilter:
         conn.close()
 
         if len(df) < 30:
-            return False, f"⚠️ Недостатньо даних для навчання (накопичено завершених угод: {len(df)}/30)"
+            return False, f"⚠️ Недостатньо даних для навчання (накопичено: {len(df)}/30)"
 
         df['target'] = df['result'].apply(lambda x: 1 if x == 'WIN' else 0)
         df = df.dropna()
@@ -49,7 +49,7 @@ class TradingMLFilter:
 
     def predict_signal_probability(self, rsi, adx, bb_width) -> float:
         if self.model is None:
-            return 1.0  # Якщо модель не навчена, пропускаємо перевірку за замовчуванням
+            return 1.0  
         try:
             X_new = pd.DataFrame([[rsi, adx, bb_width]], columns=['rsi', 'adx', 'bb_width'])
             proba = self.model.predict_proba(X_new)[0][1]
@@ -63,7 +63,7 @@ class TradingMLFilter:
             if os.path.exists(MODEL_FILE):
                 self.load_model()
             else:
-                return "⚠️ Модель ще не навчена. Зробіть більше угод і скористайтеся командою /train_ml."
+                return "⚠️ Модель ще не навчена. Потрібно мінімум 30 завершених угод."
 
         conn = sqlite3.connect(DB_NAME)
         df = pd.read_sql_query(
