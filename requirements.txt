@@ -6,4 +6,4 @@ pandas==2.2.2
 yfinance==0.2.40
 google-genai
 matplotlib==3.9.0
-git+https://github.com/twopirllc/pandas-ta.git
+pandas-ta
