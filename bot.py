@@ -11,6 +11,7 @@ from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, Messa
 from config import TELEGRAM_TOKEN, PAIRS_MAP
 from indicators import AdaptiveTechnicalAnalysis
 import database
+from ml_model import TradingMLFilter
 
 app = Flask(__name__)
 
@@ -18,6 +19,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
 analyzer = AdaptiveTechnicalAnalysis()
+ml_filter = TradingMLFilter()
 
 # Сесія з заголовками для обходу захисту Yahoo
 session = requests.Session()
@@ -27,7 +29,7 @@ session.headers.update({
     "Accept-Language": "en-US,en;q=0.9"
 })
 
-def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
+def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     """Пряме завантаження історичних даних з Yahoo API"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -95,7 +97,7 @@ def calculate_dynamic_expiration(df_mid, atr):
         return 5
 
 def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
-    """Фонова перевірка сигналу з оновленням результату та пунктирної різниці"""
+    """Фонова перевірка сигналу з оновленням результату"""
     time.sleep(expiration_mins * 60)
     try:
         result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
@@ -118,7 +120,7 @@ def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, origin
 
 @app.route("/")
 def index():
-    return "Racio_1bot is running!"
+    return "Racio_1bot is running with ML filter!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -133,9 +135,20 @@ def start(update, context):
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     update.message.reply_text(
-        "Бот Racio_1 успішно запущений! 🚀 Оберіть потрібну опцію в меню нижче:",
+        "Бот Racio_1 успішно запущений із ШІ-фільтром! 🚀 Оберіть потрібну опцію в меню нижче:\n\n"
+        "Доступні команди:\n"
+        "/train_ml - Навчити ШІ на зібраній статистиці\n"
+        "/ai_report - Отримати звіт і поради від моделі",
         reply_markup=reply_markup
     )
+
+def train_ml_command(update, context):
+    success, msg = ml_filter.train_model()
+    update.message.reply_text(msg)
+
+def ai_report_command(update, context):
+    report = ml_filter.generate_strategy_report()
+    update.message.reply_text(report, parse_mode="Markdown")
 
 def handle_text_menu(update, context):
     text = update.message.text
@@ -154,9 +167,10 @@ def handle_text_menu(update, context):
         
     elif text == "📊 Аналіз усіх пар":
         chat_id = update.message.chat_id
-        update.message.reply_text("🔄 Сканування всіх пар (HOLD пропускаються)...")
+        update.message.reply_text("🔄 Сканування та ШІ-фільтрація всіх пар...")
         
         sent_signals_count = 0
+        filtered_count = 0
         for name, ticker in PAIRS_MAP.items():
             try:
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
@@ -174,6 +188,16 @@ def handle_text_menu(update, context):
                 if signal_type not in ['CALL', 'PUT']:
                     continue
                 
+                rsi = sig_data.get('rsi', 50)
+                adx = sig_data.get('adx', 20)
+                bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
+                
+                # Перевірка через ШІ-модель (RandomForest)
+                win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width)
+                if win_probability < 0.52:
+                    filtered_count += 1
+                    continue # Відсіюємо слабкий сигнал
+                
                 sent_signals_count += 1
                 atr = sig_data.get('atr')
                 expiration = calculate_dynamic_expiration(df_mid, atr)
@@ -186,12 +210,16 @@ def handle_text_menu(update, context):
                     f"📊 {name} ({ticker})\n"
                     f"{icon} {action_text} | ⏱ {expiration} хв\n"
                     f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                    f"📉 RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
+                    f"📉 RSI: {rsi} | ADX: {adx}\n"
+                    f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
                     f"💡 Причина: {sig_data.get('reason')}"
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
-                signal_id = database.save_signal(ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id)
+                signal_id = database.save_signal(
+                    ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
+                    rsi=rsi, adx=adx, bb_width=bb_width
+                )
                 
                 threading.Thread(
                     target=delayed_signal_check,
@@ -204,7 +232,10 @@ def handle_text_menu(update, context):
             except Exception as e:
                 print(f"Помилка сканування {ticker}: {e}")
                 
-        bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено! Активних сигналів: {sent_signals_count}")
+        bot.send_message(
+            chat_id=chat_id, 
+            text=f"✅ Сканування завершено!\n📤 Надіслано сильних сигналів: {sent_signals_count}\n🛡 Відсіяно ШІ як ризикові: {filtered_count}"
+        )
         
     elif text == "📈 Статистика":
         update.message.reply_text("🔄 Оновлення та перевірка статистики...")
@@ -259,6 +290,18 @@ def button_callback(update, context):
                 )
                 return
 
+            rsi = sig_data.get('rsi', 50)
+            adx = sig_data.get('adx', 20)
+            bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
+            
+            win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width)
+            if win_probability < 0.52:
+                query.edit_message_text(
+                    text=f"🛡 По **{name}** знайдено сигнал `{signal_type}`, але ШІ-фільтр відхилив його через високий ризик (Ймовірність успіху: `{round(win_probability * 100, 1)}%`).",
+                    parse_mode="Markdown"
+                )
+                return
+
             atr = sig_data.get('atr')
             expiration = calculate_dynamic_expiration(df_mid, atr)
             current_price = df_mid['close'].iloc[-1]
@@ -270,12 +313,16 @@ def button_callback(update, context):
                 f"📊 {name} ({ticker})\n"
                 f"{icon} {action_text} | ⏱ {expiration} хв\n"
                 f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                f"📉 RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
+                f"📉 RSI: {rsi} | ADX: {adx}\n"
+                f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
                 f"💡 Причина: {sig_data.get('reason')}"
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
-            signal_id = database.save_signal(ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id)
+            signal_id = database.save_signal(
+                ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
+                rsi=rsi, adx=adx, bb_width=bb_width
+            )
             
             threading.Thread(
                 target=delayed_signal_check,
@@ -287,5 +334,7 @@ def button_callback(update, context):
             query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
 
 dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("train_ml", train_ml_command))
+dispatcher.add_handler(CommandHandler("ai_report", ai_report_command))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
