@@ -52,7 +52,6 @@ class AdaptiveTechnicalAnalysis:
     rs = avg_gain / (avg_loss + 1e-9)
     res_df["rsi"] = 100 - (100 / (1 + rs))
 
-    # Додаємо швидку EMA 10 для швидких локальних трендів
     res_df["ema_10"] = res_df["close"].ewm(span=10, adjust=False).mean()
     res_df["ema_20"] = res_df["close"].ewm(span=20, adjust=False).mean()
 
@@ -79,6 +78,15 @@ class AdaptiveTechnicalAnalysis:
     if df is None or df.empty:
       return "NEUTRAL"
     g_df = df.copy()
+
+    # Виправлення: очищення колонок від MultiIndex та великих літер
+    if isinstance(g_df.columns, pd.MultiIndex):
+      g_df.columns = g_df.columns.get_level_values(0)
+    g_df.columns = [str(c).lower() for c in g_df.columns]
+
+    if "close" not in g_df.columns:
+      return "NEUTRAL"
+
     g_df["ema"] = g_df["close"].ewm(span=span_val, adjust=False).mean()
     last_close = g_df["close"].iloc[-1]
     last_ema = g_df["ema"].iloc[-1]
@@ -115,10 +123,7 @@ class AdaptiveTechnicalAnalysis:
     bb_lower = last["bb_lower"]
     bb_upper = last["bb_upper"]
 
-    # Використовуємо швидку EMA 10 для визначення мікротренду
     local_trend = "UP" if c > ema10 else "DOWN"
-
-    # Зменшуємо поріг флєту: все, де ADX >= 18, вважається трендовим ринком
     is_flat = adx < 18
 
     if is_flat:
@@ -151,7 +156,6 @@ class AdaptiveTechnicalAnalysis:
             "local_trend": local_trend,
         }
     else:
-      # ЛОВИМО КОРОТКІ ТРЕНДИ: перевіряємо збіг 15m (mid) та 5m (local)
       dist_sup = abs(c - l_sup) / c
       dist_res = abs(c - l_res) / c
 
