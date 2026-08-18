@@ -2,7 +2,7 @@ import os
 import io
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Dispatcher, CallbackQueryHandler
+from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler
 from ai_advisor import AITradingAdvisor
 
 app = Flask(__name__)
@@ -24,6 +24,9 @@ def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(update)
     return "ok", 200
+
+def start(update, context):
+    update.message.reply_text("Бот Racio_1 успішно запущений і готовий до роботи! 🚀 Сигнали надходитимуть автоматично.")
 
 def calculate_ta_confidence(signal_data: dict) -> int:
     score = 0
@@ -123,4 +126,5 @@ def button_callback(update, context):
         
         query.edit_message_text(text=updated_text, parse_mode="Markdown")
 
+dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
