@@ -45,11 +45,46 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
 
 def fetch_with_retry(fetch_data_func, ticker, retries=3, delay=2):
     for attempt in range(retries):
-        df = fetch_data_func(ticker, interval="5m", range_period="1d")
+        df = fetch_data_func(ticker, interval="15m", range_period="10d")
         if not df.empty:
             return df
         time.sleep(delay)
     return pd.DataFrame()
+
+def evaluate_single_signal(signal_id, fetch_data_func):
+    init_db()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT ticker, signal, entry_price, status FROM signals WHERE id = ?", (signal_id,))
+    row = cursor.fetchone()
+    if not row or row[3] != 'PENDING':
+        conn.close()
+        return None, 0
+        
+    ticker, signal, entry_price, _ = row
+    conn.close()
+    
+    df = fetch_with_retry(fetch_data_func, ticker)
+    if df.empty:
+        return None, 0
+        
+    current_price = df['close'].iloc[-1]
+    diff = current_price - entry_price
+    multiplier = 1000 if "JPY" in ticker.upper() else 100000
+    pips = int(round(diff * multiplier))
+    
+    if signal == 'CALL':
+        result = 'WIN' if current_price > entry_price else 'LOSS'
+    else:
+        result = 'WIN' if current_price < entry_price else 'LOSS'
+        
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, signal_id))
+    conn.commit()
+    conn.close()
+    
+    return result, pips
 
 def evaluate_and_get_stats(fetch_data_func):
     init_db()
