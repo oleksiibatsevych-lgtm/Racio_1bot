@@ -1,6 +1,8 @@
 import io
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
+
+# Чистий імпорт без застарілої функції новин
 from ai_advisor import AITradingAdvisor
 
 advisor = AITradingAdvisor()
@@ -108,6 +110,3 @@ def button_callback(update, context):
         )
         
         query.edit_message_text(text=updated_text, parse_mode="Markdown")
-
-# Реєстрація обробника в головній функції запуску бота (в main):
-# dispatcher.add_handler(CallbackQueryHandler(button_callback))
