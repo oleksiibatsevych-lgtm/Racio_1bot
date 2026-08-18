@@ -31,7 +31,7 @@ session.headers.update({
 })
 
 def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
-    """Пряме завантаження історичних даних з Yahoo API з коректною обробкою валютних пар без обсягів"""
+    """Завантаження даних з Yahoo API з дублюванням колонок у нижньому та верхньому регістрах для сумісності"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {
@@ -63,16 +63,20 @@ def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
         closes = quotes.get("close", [])
         volumes = quotes.get("volume", [])
         
+        vol_data = volumes if volumes else [0] * len(timestamps)
+        
+        # Створюємо колонки і в нижньому, і у верхньому регістрі, щоб уникнути будь-яких KeyError
         df = pd.DataFrame({
-            "Open": opens,
-            "High": highs,
-            "Low": lows,
-            "Close": closes,
-            "Volume": volumes if volumes else [0] * len(timestamps)
+            "Open": opens, "open": opens,
+            "High": highs, "high": highs,
+            "Low": lows, "low": lows,
+            "Close": closes, "close": closes,
+            "Volume": vol_data, "volume": vol_data
         }, index=pd.to_datetime(timestamps, unit="s"))
         
         df.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
         df["Volume"] = df["Volume"].fillna(0)
+        df["volume"] = df["volume"].fillna(0)
         
         return df
     except Exception as e:
