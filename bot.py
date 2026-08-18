@@ -95,7 +95,7 @@ def calculate_dynamic_expiration(df_mid, atr):
         return 5
 
 def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
-    """Фонова перевірка сигналу з оновленням повідомлення у вашому дизайні"""
+    """Фонова перевірка сигналу з оновленням результату та цілочисельної різниці в пунктах"""
     time.sleep(expiration_mins * 60)
     try:
         result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
@@ -179,8 +179,6 @@ def handle_text_menu(update, context):
                 expiration = calculate_dynamic_expiration(df_mid, atr)
                 current_price = df_mid['close'].iloc[-1]
                 
-                signal_id = database.save_signal(ticker, signal_type, current_price, expiration)
-
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
                 
@@ -192,6 +190,8 @@ def handle_text_menu(update, context):
                     f"💡 Причина: {sig_data.get('reason')}"
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
+                
+                signal_id = database.save_signal(ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id)
                 
                 threading.Thread(
                     target=delayed_signal_check,
@@ -263,8 +263,6 @@ def button_callback(update, context):
             expiration = calculate_dynamic_expiration(df_mid, atr)
             current_price = df_mid['close'].iloc[-1]
             
-            signal_id = database.save_signal(ticker, signal_type, current_price, expiration)
-
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
 
@@ -276,6 +274,8 @@ def button_callback(update, context):
                 f"💡 Причина: {sig_data.get('reason')}"
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
+            
+            signal_id = database.save_signal(ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id)
             
             threading.Thread(
                 target=delayed_signal_check,
