@@ -95,7 +95,7 @@ def calculate_dynamic_expiration(df_mid, atr):
         return 5
 
 def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
-    """Фонова перевірка сигналу з оновленням результату та цілочисельної різниці в пунктах"""
+    """Фонова перевірка сигналу з оновленням результату та пунктирної різниці"""
     time.sleep(expiration_mins * 60)
     try:
         result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
