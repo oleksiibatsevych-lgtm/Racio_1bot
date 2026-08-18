@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import threading
 import requests
 import pandas as pd
 from flask import Flask, request
@@ -84,7 +85,6 @@ def calculate_dynamic_expiration(df_mid, atr):
             return 5
         price = df_mid['close'].iloc[-1]
         atr_pct = (atr / price) * 100
-        # Низька волатильність -> більша експірація, висока -> менша
         if atr_pct < 0.05:
             return 15
         elif atr_pct < 0.15:
@@ -93,6 +93,24 @@ def calculate_dynamic_expiration(df_mid, atr):
             return 5
     except:
         return 5
+
+def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
+    """Фонова функція, яка чекає закінчення експірації та оновлює повідомлення результатами"""
+    # Чекаємо час експірації (переводимо хвилини в секунди)
+    time.sleep(expiration_mins * 60)
+    try:
+        result = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
+        if result:
+            res_icon = "✅ **WIN (Успіх)**" if result == 'WIN' else "❌ **LOSS (Збитково)**"
+            updated_text = f"{original_text}\n\n🏁 Результат перевірки: {res_icon}"
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=updated_text,
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        print(f"Помилка фонової перевірки сигналу ID {signal_id}: {e}")
 
 @app.route("/")
 def index():
@@ -149,7 +167,6 @@ def handle_text_menu(update, context):
                 sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
                 
                 signal_type = sig_data.get('signal')
-                # Повністю пропускаємо HOLD
                 if signal_type not in ['CALL', 'PUT']:
                     continue
                 
@@ -158,13 +175,13 @@ def handle_text_menu(update, context):
                 expiration = calculate_dynamic_expiration(df_mid, atr)
                 current_price = df_mid['close'].iloc[-1]
                 
-                # Зберігаємо сигнал для статистики
-                database.save_signal(ticker, signal_type, current_price, expiration)
+                # Зберігаємо в БД та отримуємо ID
+                signal_id = database.save_signal(ticker, signal_type, current_price, expiration)
 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
                 
-                msg = (
+                msg_text = (
                     f"📊 **Сканування: {name} ({ticker})**\n"
                     f"{icon} Сигнал: **{action_text}**\n"
                     f"⏱ Експірація: **{expiration} хв**\n"
@@ -172,7 +189,15 @@ def handle_text_menu(update, context):
                     f"• RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
                     f"• Причина: {sig_data.get('reason')}"
                 )
-                bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
+                
+                # Запускаємо фоновий таймер для авто-оновлення результату після експірації
+                threading.Thread(
+                    target=delayed_signal_check,
+                    args=(chat_id, sent_msg.message_id, signal_id, expiration, msg_text),
+                    daemon=True
+                ).start()
+                
                 time.sleep(0.5)
                 
             except Exception as e:
@@ -235,8 +260,7 @@ def button_callback(update, context):
             expiration = calculate_dynamic_expiration(df_mid, atr)
             current_price = df_mid['close'].iloc[-1]
             
-            # Зберігаємо для статистики
-            database.save_signal(ticker, signal_type, current_price, expiration)
+            signal_id = database.save_signal(ticker, signal_type, current_price, expiration)
 
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -252,6 +276,14 @@ def button_callback(update, context):
                 f"• Причина: {sig_data.get('reason')}"
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
+            
+            # Запуск фонової перевірки для цього повідомлення
+            threading.Thread(
+                target=delayed_signal_check,
+                args=(query.message.chat_id, query.message.message_id, signal_id, expiration, text),
+                daemon=True
+            ).start()
+            
         except Exception as e:
             query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
 
