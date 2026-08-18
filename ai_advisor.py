@@ -6,7 +6,7 @@ from google.genai import types
 client = genai.Client()
 
 def safe_generate_content(contents, config=None):
-    models_to_try = ["gemini-3.6-flash"]
+    models_to_try = ["gemini-3.6-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
     for model_name in models_to_try:
         try:
             response = client.models.generate_content(model=model_name, contents=contents, config=config)
