@@ -7,8 +7,8 @@ from ai_advisor import AITradingAdvisor
 
 app = Flask(__name__)
 
-# Ініціалізація бота через змінну середовища або безпосередній токен
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВАШ_ТОКЕН_БОТА")
+# Токен вашого бота
+TOKEN = "8921212255:AAE_Ypn6wCLUxVMjcrrd8TgPncuLTYQRnSg"
 bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
@@ -55,6 +55,7 @@ def calculate_ta_confidence(signal_data: dict) -> int:
 def process_and_send_signal(pair_name: str, signal_data: dict, macro_chart: io.BytesIO, mid_chart: io.BytesIO, micro_chart: io.BytesIO, context, chat_id: int):
     confidence = calculate_ta_confidence(signal_data)
     
+    # Публікуємо сигнал миттєво, якщо оцінка 7 або вище
     if confidence >= 7:
         active_signals[pair_name] = {
             "signal_data": signal_data,
@@ -122,5 +123,4 @@ def button_callback(update, context):
         
         query.edit_message_text(text=updated_text, parse_mode="Markdown")
 
-# Реєстрація обробників у диспетчері
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
