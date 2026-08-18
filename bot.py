@@ -4,7 +4,7 @@ from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
 
-from config import TOKEN, PAIRS
+from config import TELEGRAM_TOKEN, PAIRS_MAP
 from ai_advisor import AITradingAdvisor
 import database
 import indicators
@@ -12,7 +12,7 @@ import charts
 
 app = Flask(__name__)
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=TELEGRAM_TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
 advisor = AITradingAdvisor()
@@ -43,11 +43,12 @@ def handle_text_menu(update, context):
     text = update.message.text
     
     if text == "💵 Пари":
+        pairs = list(PAIRS_MAP.items())
         keyboard = []
-        for i in range(0, len(PAIRS), 2):
-            row = [InlineKeyboardButton(PAIRS[i][0], callback_data=f"scan_{PAIRS[i][1]}")]
-            if i + 1 < len(PAIRS):
-                row.append(InlineKeyboardButton(PAIRS[i+1][0], callback_data=f"scan_{PAIRS[i+1][1]}"))
+        for i in range(0, len(pairs), 2):
+            row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
+            if i + 1 < len(pairs):
+                row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
             keyboard.append(row)
             
         reply_markup = InlineKeyboardMarkup(keyboard)
