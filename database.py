@@ -1,59 +1,68 @@
-from datetime import datetime, timedelta
+import sqlite3
+from datetime import datetime
 
-stats_history = []
-active_signals = {}
-signal_counter = 0
+DB_NAME = "trading_stats.db"
 
-def get_statistics():
-    now = datetime.now()
-    day_ago = now - timedelta(days=1)
-    week_ago = now - timedelta(days=7)
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT,
+            signal TEXT,
+            entry_price REAL,
+            expiration_mins INTEGER,
+            timestamp TEXT,
+            status TEXT DEFAULT 'PENDING',
+            result TEXT DEFAULT 'UNKNOWN'
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-    def process_items(items):
-        pair_data = {}
-        total_wins = 0
-        total_valid = 0
+def save_signal(ticker, signal, entry_price, expiration_mins):
+    init_db()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (ticker, signal, entry_price, expiration_mins, timestamp))
+    conn.commit()
+    conn.close()
 
-        for item in items:
-            p = item["pair"]
-            res = item["result"]
-            if p not in pair_data:
-                pair_data[p] = {"requests": 0, "wins": 0, "losses": 0}
-            pair_data[p]["requests"] += 1
-            if res == "WIN":
-                pair_data[p]["wins"] += 1
-                total_wins += 1
-                total_valid += 1
-            elif res == "LOSS":
-                pair_data[p]["losses"] += 1
-                total_valid += 1
-
-        result = {}
-        for p, d in pair_data.items():
-            valid = d["wins"] + d["losses"]
-            wr = (d["wins"] / valid * 100) if valid > 0 else 0.0
-            result[p] = {
-                "requests": d["requests"],
-                "wins": d["wins"],
-                "losses": d["losses"],
-                "winrate": round(wr, 1)
-            }
-
-        overall_wr = (total_wins / total_valid * 100) if total_valid > 0 else 0.0
-        return result, round(overall_wr, 1)
-
-    day_items = [i for i in stats_history if i["timestamp"] >= day_ago]
-    week_items = [i for i in stats_history if i["timestamp"] >= week_ago]
-    return process_items(day_items), process_items(week_items), process_items(stats_history)
-
-def format_stats_text(title, data_tuple):
-    data, overall_wr = data_tuple
-    text = f"📊 *{title}*\n"
-    if not data:
-        text += "\nЩе немає оцінених угод за цей період."
-        return text
-    text += f"🏆 **Загальний вінрейт:** `{overall_wr}%`\n\n"
-    text += "📋 *По парах*:\n"
-    for pair, counts in data.items():
-        text += f"🌟 *{pair}* Всього: `{counts['requests']}` | ✅ `{counts['wins']}` ❌ `{counts['losses']}` | Вінрейт: `{counts['winrate']}%`\n"
-    return text
+def evaluate_and_get_stats(fetch_data_func):
+    """Перевіряє реальні результати зафіксованих сигналів за допомогою поточних котирувань ринку"""
+    init_db()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Беремо невирішені сигнали
+    cursor.execute("SELECT id, ticker, signal, entry_price FROM signals WHERE status = 'PENDING'")
+    rows = cursor.fetchall()
+    
+    for row in rows:
+        sig_id, ticker, signal, entry_price = row
+        df = fetch_data_func(ticker, interval="5m", range_period="1d")
+        if not df.empty:
+            current_price = df['close'].iloc[-1]
+            if signal == 'CALL':
+                result = 'WIN' if current_price > entry_price else 'LOSS'
+            else:
+                result = 'WIN' if current_price < entry_price else 'LOSS'
+            cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ? WHERE id = ?", (result, sig_id))
+            
+    conn.commit()
+    
+    # Рахуємо загальну статистику завершених угод
+    cursor.execute("SELECT COUNT(*), SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) FROM signals WHERE status = 'COMPLETED'")
+    row = cursor.fetchone()
+    conn.close()
+    
+    total = row[0] if row and row[0] else 0
+    wins = row[1] if row and row[1] else 0
+    winrate = round((wins / total) * 100, 1) if total > 0 else 0
+    
+    return {"total": total, "wins": wins, "winrate": winrate}
