@@ -1,14 +1,15 @@
 import os
 import io
+import yfinance as yf
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
 
 from config import TELEGRAM_TOKEN, PAIRS_MAP
 from ai_advisor import AITradingAdvisor
+from indicators import AdaptiveTechnicalAnalysis
+from charts import create_chart_image
 import database
-import indicators
-import charts
 
 app = Flask(__name__)
 
@@ -16,6 +17,7 @@ bot = Bot(token=TELEGRAM_TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
 advisor = AITradingAdvisor()
+analyzer = AdaptiveTechnicalAnalysis()
 active_signals = {}
 
 @app.route("/")
@@ -80,50 +82,66 @@ def button_callback(update, context):
     data = query.data
     
     if data.startswith("scan_"):
-        pair_name = data.replace("scan_", "")
+        ticker = data.replace("scan_", "")
         query.edit_message_text(
-            text=f"🔄 Виконується розрахунок індикаторів для пари **{pair_name}**...",
+            text=f"🔄 Завантаження даних та розрахунок індикаторів для **{ticker}**...",
             parse_mode="Markdown"
         )
         try:
-            sig_data = {"signal": "CALL", "reason": "Сигнал сформовано модулем indicators", "global_trend": "UP", "mid_trend": "UP", "local_trend": "UP", "rsi": 52, "adx": 26, "atr": 0.0012}
+            # Завантажуємо реальні дані з Yahoo Finance
+            df_macro = yf.download(ticker, period="60d", interval="1h", progress=False)
+            df_mid = yf.download(ticker, period="10d", interval="15m", progress=False)
+            df_micro = yf.download(ticker, period="2d", interval="5m", progress=False)
             
-            active_signals[pair_name] = {
+            if df_macro.empty or df_mid.empty:
+                query.edit_message_text(text=f"❌ Помилка: не вдалося завантажити дані для {ticker}")
+                return
+
+            # Генеруємо реальні графіки через модуль charts
+            macro_buf = create_chart_image(df_macro, ticker, "1h")
+            mid_buf = create_chart_image(df_mid, ticker, "15m")
+            micro_buf = create_chart_image(df_micro, ticker, "5m")
+            
+            # Розраховуємо індикатори та тренди
+            df_indicators = analyzer.calculate_indicators(df_mid)
+            sig_data = analyzer.generate_signal(df_indicators, "UP", "UP", "UP")
+            
+            active_signals[ticker] = {
                 "signal_data": sig_data,
-                "macro_chart": io.BytesIO(b"dummy"),
-                "mid_chart": io.BytesIO(b"dummy"),
-                "micro_chart": io.BytesIO(b"dummy")
+                "macro_chart": macro_buf,
+                "mid_chart": mid_buf,
+                "micro_chart": micro_buf
             }
             
-            keyboard = [[InlineKeyboardButton("🔍 Детальний аналіз ШІ", callback_data=f"ai_analyze_{pair_name}")]]
+            keyboard = [[InlineKeyboardButton("🔍 Детальний аналіз ШІ", callback_data=f"ai_analyze_{ticker}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             query.edit_message_text(
-                text=f"📈 **Результат аналізу: {pair_name}**\n⚡ Технічний аналіз опрацьовано.",
+                text=f"📈 **Результат технічного аналізу: {ticker}**\n⚡ Графіки та індикатори готові до перевірки ШІ.",
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
             )
         except Exception as e:
-            query.edit_message_text(text=f"❌ Помилка сканування: {str(e)}")
+            query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
         
     elif data.startswith("ai_analyze_"):
-        pair_name = data.replace("ai_analyze_", "")
+        ticker = data.replace("ai_analyze_", "")
         query.edit_message_text(
-            text=query.message.text + "\n\n⏳ *ШІ аналізує графіки за вашим запитом, зачекайте...*",
+            text=query.message.text + "\n\n⏳ *ШІ аналізує реальні графіки, зачекайте...*",
             parse_mode="Markdown"
         )
         
-        saved_item = active_signals.get(pair_name)
+        saved_item = active_signals.get(ticker)
         if not saved_item:
             query.edit_message_text(
-                text=query.message.text.split("\n\n⏳")[0] + "\n\n❌ *Дані графіків застаріли.*",
+                text=query.message.text.split("\n\n⏳")[0] + "\n\n❌ *Дані застаріли. Зробіть запит повторно.*",
                 parse_mode="Markdown"
             )
             return
             
         sig_data = saved_item["signal_data"]
         ai_result = advisor.evaluate_signal(
-            pair_name, 
+            ticker, 
             sig_data, 
             saved_item["macro_chart"], 
             saved_item["mid_chart"], 
