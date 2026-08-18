@@ -8,9 +8,7 @@ from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, Re
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
 
 from config import TELEGRAM_TOKEN, PAIRS_MAP
-from ai_advisor import AITradingAdvisor
 from indicators import AdaptiveTechnicalAnalysis
-from charts import create_chart_image
 import database
 
 app = Flask(__name__)
@@ -18,9 +16,7 @@ app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
-advisor = AITradingAdvisor()
 analyzer = AdaptiveTechnicalAnalysis()
-active_signals = {}
 
 # Сесія з повними заголовками реального браузера для обходу захисту Yahoo
 session = requests.Session()
@@ -98,7 +94,7 @@ def start(update, context):
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     update.message.reply_text(
-        "Бот Racio_1 успішно запущений! 🚀 Оберіть потрібну опцію в меню нижче:",
+        "Бот Racio_1 успішно запущений (без ШІ)! 🚀 Оберіть потрібну опцію в меню нижче:",
         reply_markup=reply_markup
     )
 
@@ -115,38 +111,34 @@ def handle_text_menu(update, context):
             keyboard.append(row)
             
         reply_markup = InlineKeyboardMarkup(keyboard)
-        update.message.reply_text("📌 Оберіть пару для запиту аналізу:", reply_markup=reply_markup)
+        update.message.reply_text("📌 Оберіть пару для технічного аналізу:", reply_markup=reply_markup)
         
     elif text == "📊 Аналіз усіх пар":
         chat_id = update.message.chat_id
-        update.message.reply_text("🔄 Запущено сканування всіх валютних пар. Очікуйте результати...")
+        update.message.reply_text("🔄 Запущено швидке сканування всіх валютних пар...")
         
         for name, ticker in PAIRS_MAP.items():
             try:
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
-                df_micro = fetch_yahoo_data(ticker, interval="5m", range_period="2d")
                 
                 if df_macro.empty or df_mid.empty:
                     continue
 
-                macro_buf = create_chart_image(df_macro, ticker, "1h")
-                mid_buf = create_chart_image(df_mid, ticker, "15m")
-                micro_buf = create_chart_image(df_micro, ticker, "5m")
-                
+                global_trend = analyzer.get_trend(df_macro, span_val=200)
+                mid_trend = analyzer.get_trend(df_mid, span_val=50)
                 df_indicators = analyzer.calculate_indicators(df_mid)
-                sig_data = analyzer.generate_signal(df_indicators, "UP", "UP", "UP")
-                
-                ai_result = advisor.evaluate_signal(ticker, sig_data, macro_buf, mid_buf, micro_buf)
+                sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
                 
                 msg = (
-                    f"📊 **Авто-сканування: {name} ({ticker})**\n"
-                    f"• Рішення ШІ: **{ai_result.get('decision')}** (Впевненість: {ai_result.get('confidence')}/10)\n"
-                    f"• Експірація: {ai_result.get('expiration')} хв\n"
-                    f"• Висновок: {ai_result.get('reason')}"
+                    f"📊 **Сканування: {name} ({ticker})**\n"
+                    f"• Сигнал: **{sig_data.get('signal')}**\n"
+                    f"• Тренд (глоб/сер): {global_trend} / {mid_trend}\n"
+                    f"• RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
+                    f"• Причина: {sig_data.get('reason')}"
                 )
                 bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                time.sleep(1)
+                time.sleep(0.5)
                 
             except Exception as e:
                 print(f"Помилка сканування {ticker}: {e}")
@@ -172,7 +164,11 @@ def handle_text_menu(update, context):
 
 def button_callback(update, context):
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        print(f"Попередження query.answer(): {e}")
+        
     data = query.data
     
     if data.startswith("scan_"):
@@ -184,70 +180,28 @@ def button_callback(update, context):
         try:
             df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
-            df_micro = fetch_yahoo_data(ticker, interval="5m", range_period="2d")
             
             if df_macro.empty or df_mid.empty:
                 query.edit_message_text(text=f"❌ Помилка: не вдалося завантажити дані для {ticker}")
                 return
 
-            macro_buf = create_chart_image(df_macro, ticker, "1h")
-            mid_buf = create_chart_image(df_mid, ticker, "15m")
-            micro_buf = create_chart_image(df_micro, ticker, "5m")
-            
+            global_trend = analyzer.get_trend(df_macro, span_val=200)
+            mid_trend = analyzer.get_trend(df_mid, span_val=50)
             df_indicators = analyzer.calculate_indicators(df_mid)
-            sig_data = analyzer.generate_signal(df_indicators, "UP", "UP", "UP")
+            sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
             
-            active_signals[ticker] = {
-                "signal_data": sig_data,
-                "macro_chart": macro_buf,
-                "mid_chart": mid_buf,
-                "micro_chart": micro_buf
-            }
-            
-            keyboard = [[InlineKeyboardButton("🔍 Детальний аналіз ШІ", callback_data=f"ai_analyze_{ticker}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            query.edit_message_text(
-                text=f"📈 **Результат технічного аналізу: {ticker}**\n⚡ Графіки та індикатори готові до перевірки ШІ.",
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
+            text = (
+                f"📈 **Технічний аналіз: {ticker}**\n"
+                f"• Сигнал: **{sig_data.get('signal')}**\n"
+                f"• Глобальний тренд: {global_trend}\n"
+                f"• Середній тренд: {mid_trend}\n"
+                f"• RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')} | ATR: {sig_data.get('atr')}\n"
+                f"• Локальний тренд: {sig_data.get('local_trend')}\n"
+                f"• Причина: {sig_data.get('reason')}"
             )
+            query.edit_message_text(text=text, parse_mode="Markdown")
         except Exception as e:
             query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
-        
-    elif data.startswith("ai_analyze_"):
-        ticker = data.replace("ai_analyze_", "")
-        query.edit_message_text(
-            text=query.message.text + "\n\n⏳ *ШІ аналізує реальні графіки, зачекайте...*",
-            parse_mode="Markdown"
-        )
-        
-        saved_item = active_signals.get(ticker)
-        if not saved_item:
-            query.edit_message_text(
-                text=query.message.text.split("\n\n⏳")[0] + "\n\n❌ *Дані застаріли. Зробіть запит повторно.*",
-                parse_mode="Markdown"
-            )
-            return
-            
-        sig_data = saved_item["signal_data"]
-        ai_result = advisor.evaluate_signal(
-            ticker, 
-            sig_data, 
-            saved_item["macro_chart"], 
-            saved_item["mid_chart"], 
-            saved_item["micro_chart"]
-        )
-        
-        clean_text = query.message.text.split("\n\n⏳")[0]
-        updated_text = (
-            f"{clean_text}\n\n"
-            f"🤖 **Результат ШІ-аналізу:**\n"
-            f"• Рішення: **{ai_result.get('decision')}** (Впевненість ШІ: {ai_result.get('confidence')}/10)\n"
-            f"• Експірація: {ai_result.get('expiration')} хв\n"
-            f"• Висновок: {ai_result.get('reason')}"
-        )
-        query.edit_message_text(text=updated_text, parse_mode="Markdown")
 
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
