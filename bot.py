@@ -95,18 +95,18 @@ def calculate_dynamic_expiration(df_mid, atr):
         return 5
 
 def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
-    """Фонова перевірка сигналу з виведенням результату та пунктирної різниці"""
+    """Фонова перевірка сигналу з оновленням повідомлення у вашому дизайні"""
     time.sleep(expiration_mins * 60)
     try:
         result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
         if result:
             pips_str = f"+{pips}" if pips > 0 else str(pips)
             if result == 'WIN':
-                res_icon = f"✅ **WIN (+{pips_str} п.)**"
+                res_icon = f"✅ WIN (Успіх) ({pips_str} п.)"
             else:
-                res_icon = f"❌ **LOSS ({pips_str} п.)**"
+                res_icon = f"❌ LOSS (Збитково) ({pips_str} п.)"
                 
-            updated_text = f"{original_text}\n\n🏁 Результат: {res_icon}"
+            updated_text = f"{original_text}\n🏁 Результат: {res_icon}"
             bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -185,12 +185,11 @@ def handle_text_menu(update, context):
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
                 
                 msg_text = (
-                    f"📊 **Сканування: {name} ({ticker})**\n"
-                    f"{icon} Сигнал: **{action_text}**\n"
-                    f"⏱ Експірація: **{expiration} хв**\n"
-                    f"• Тренд (глоб/сер): {global_trend} / {mid_trend}\n"
-                    f"• RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
-                    f"• Причина: {sig_data.get('reason')}"
+                    f"📊 {name} ({ticker})\n"
+                    f"{icon} {action_text} | ⏱ {expiration} хв\n"
+                    f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
+                    f"📉 RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
+                    f"💡 Причина: {sig_data.get('reason')}"
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
@@ -233,8 +232,10 @@ def button_callback(update, context):
     
     if data.startswith("scan_"):
         ticker = data.replace("scan_", "")
+        name = next((k for k, v in PAIRS_MAP.items() if v == ticker), ticker)
+        
         query.edit_message_text(
-            text=f"🔄 Аналіз для **{ticker}**...",
+            text=f"🔄 Аналіз для **{name} ({ticker})**...",
             parse_mode="Markdown"
         )
         try:
@@ -253,7 +254,7 @@ def button_callback(update, context):
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
                 query.edit_message_text(
-                    text=f"ℹ️ По 🟢 **{ticker}** наразі сигнал **HOLD**. Торгові можливості відсутні.",
+                    text=f"ℹ️ По 🟢 **{name} ({ticker})** наразі сигнал **HOLD**. Торгові можливості відсутні.",
                     parse_mode="Markdown"
                 )
                 return
@@ -268,14 +269,11 @@ def button_callback(update, context):
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
 
             text = (
-                f"📈 **Технічний аналіз: {ticker}**\n"
-                f"{icon} Сигнал: **{action_text}**\n"
-                f"⏱ Експірація: **{expiration} хв**\n"
-                f"• Глобальний тренд: {global_trend}\n"
-                f"• Середній тренд: {mid_trend}\n"
-                f"• RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')} | ATR: {sig_data.get('atr')}\n"
-                f"• Локальний тренд: {sig_data.get('local_trend')}\n"
-                f"• Причина: {sig_data.get('reason')}"
+                f"📊 {name} ({ticker})\n"
+                f"{icon} {action_text} | ⏱ {expiration} хв\n"
+                f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
+                f"📉 RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
+                f"💡 Причина: {sig_data.get('reason')}"
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
