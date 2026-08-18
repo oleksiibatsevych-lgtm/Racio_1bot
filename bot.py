@@ -4,7 +4,7 @@ from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
 
-from config import TOKEN
+from config import TOKEN, PAIRS
 from ai_advisor import AITradingAdvisor
 import database
 import indicators
@@ -43,28 +43,15 @@ def handle_text_menu(update, context):
     text = update.message.text
     
     if text == "💵 Пари":
-        pairs = [
-            ("EUR/USD", "EURUSD"), ("GBP/USD", "GBPUSD"),
-            ("USD/JPY", "USDJPY"), ("AUD/USD", "AUDUSD"),
-            ("USD/CAD", "USDCAD"), ("USD/CHF", "USDCHF"),
-            ("NZD/USD", "NZDUSD"), ("EUR/GBP", "EURGBP"),
-            ("EUR/JPY", "EURJPY"), ("GBP/JPY", "GBPJPY"),
-            ("AUD/JPY", "AUDJPY"), ("EUR/AUD", "EURAUD"),
-            ("EUR/CAD", "EURCAD"), ("GBP/AUD", "GBPAUD"),
-            ("GBP/CAD", "GBPCAD"), ("CHF/JPY", "CHFJPY"),
-            ("CAD/JPY", "CADJPY"), ("NZD/JPY", "NZDJPY"),
-            ("AUD/NZD", "AUDNZD"), ("EUR/CHF", "EURCHF"),
-            ("GBP/CHF", "GBPCHF")
-        ]
         keyboard = []
-        for i in range(0, len(pairs), 2):
-            row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
-            if i + 1 < len(pairs):
-                row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
+        for i in range(0, len(PAIRS), 2):
+            row = [InlineKeyboardButton(PAIRS[i][0], callback_data=f"scan_{PAIRS[i][1]}")]
+            if i + 1 < len(PAIRS):
+                row.append(InlineKeyboardButton(PAIRS[i+1][0], callback_data=f"scan_{PAIRS[i+1][1]}"))
             keyboard.append(row)
             
         reply_markup = InlineKeyboardMarkup(keyboard)
-        update.message.reply_text("📌 Оберіть пару для запиту аналізу через внутрішні модулі:", reply_markup=reply_markup)
+        update.message.reply_text("📌 Оберіть пару для запиту аналізу:", reply_markup=reply_markup)
         
     elif text == "📊 Аналіз усіх пар":
         update.message.reply_text("🔄 Запущено ручний запит на загальне сканування ринку...")
