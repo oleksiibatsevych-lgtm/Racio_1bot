@@ -21,7 +21,6 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 analyzer = AdaptiveTechnicalAnalysis()
 ml_filter = TradingMLFilter()
 
-# Сесія з заголовками для обходу захисту Yahoo
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -30,7 +29,6 @@ session.headers.update({
 })
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
-    """Пряме завантаження історичних даних з Yahoo API"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {
@@ -81,7 +79,6 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
         return pd.DataFrame()
 
 def calculate_dynamic_expiration(df_mid, atr):
-    """Розрахунок динамічної експірації на основі ATR"""
     try:
         if atr is None or pd.isna(atr) or atr == 0:
             return 5
@@ -97,7 +94,6 @@ def calculate_dynamic_expiration(df_mid, atr):
         return 5
 
 def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
-    """Фонова перевірка сигналу з оновленням результату"""
     time.sleep(expiration_mins * 60)
     try:
         result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
@@ -120,7 +116,7 @@ def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, origin
 
 @app.route("/")
 def index():
-    return "Racio_1bot is running with ML filter!"
+    return "Racio_1bot is running with automated ML filter!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -135,20 +131,9 @@ def start(update, context):
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     update.message.reply_text(
-        "Бот Racio_1 успішно запущений із ШІ-фільтром! 🚀 Оберіть потрібну опцію в меню нижче:\n\n"
-        "Доступні команди:\n"
-        "/train_ml - Навчити ШІ на зібраній статистиці\n"
-        "/ai_report - Отримати звіт і поради від моделі",
+        "Бот Racio_1 успішно запущений із ШІ-фільтром! 🚀 Оберіть потрібну опцію в меню нижче:",
         reply_markup=reply_markup
     )
-
-def train_ml_command(update, context):
-    success, msg = ml_filter.train_model()
-    update.message.reply_text(msg)
-
-def ai_report_command(update, context):
-    report = ml_filter.generate_strategy_report()
-    update.message.reply_text(report, parse_mode="Markdown")
 
 def handle_text_menu(update, context):
     text = update.message.text
@@ -192,11 +177,10 @@ def handle_text_menu(update, context):
                 adx = sig_data.get('adx', 20)
                 bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
                 
-                # Перевірка через ШІ-модель (RandomForest)
                 win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width)
                 if win_probability < 0.52:
                     filtered_count += 1
-                    continue # Відсіюємо слабкий сигнал
+                    continue
                 
                 sent_signals_count += 1
                 atr = sig_data.get('atr')
@@ -238,19 +222,25 @@ def handle_text_menu(update, context):
         )
         
     elif text == "📈 Статистика":
-        update.message.reply_text("🔄 Оновлення та перевірка статистики...")
+        update.message.reply_text("🔄 Оновлення статистики та автоматичне перенавчання ШІ...")
         try:
             stats = database.evaluate_and_get_stats(fetch_yahoo_data)
+            ml_filter.train_model()
+            
             stats_text = (
                 f"📈 **Правдива статистика трейдингу:**\n"
                 f"• Успішних угод (WIN): {stats.get('wins', 0)}\n"
                 f"• Усього перевірених угод: {stats.get('total', 0)}\n"
-                f"• Реальний вінрейт: **{stats.get('winrate', 0)}%**"
+                f"• Реальний вінрейт: **{stats.get('winrate', 0)}%**\n\n"
+                f"🤖 *Модель успішно перенавчена на найсвіжіших даних.*"
             )
+            
+            keyboard = [[InlineKeyboardButton("📊 Отримати звіт ШІ та поради", callback_data="get_ai_report")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            update.message.reply_text(stats_text, parse_mode="Markdown", reply_markup=reply_markup)
         except Exception as e:
-            stats_text = f"• Помилка розрахунку статистики: {e}"
-        
-        update.message.reply_text(stats_text, parse_mode="Markdown")
+            update.message.reply_text(f"• Помилка розрахунку статистики: {e}")
 
 def button_callback(update, context):
     query = update.callback_query
@@ -261,6 +251,11 @@ def button_callback(update, context):
         
     data = query.data
     
+    if data == "get_ai_report":
+        report = ml_filter.generate_strategy_report()
+        query.edit_message_text(text=report, parse_mode="Markdown")
+        return
+
     if data.startswith("scan_"):
         ticker = data.replace("scan_", "")
         name = next((k for k, v in PAIRS_MAP.items() if v == ticker), ticker)
@@ -334,7 +329,5 @@ def button_callback(update, context):
             query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
 
 dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("train_ml", train_ml_command))
-dispatcher.add_handler(CommandHandler("ai_report", ai_report_command))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
