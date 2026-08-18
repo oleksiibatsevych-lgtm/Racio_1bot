@@ -1,20 +1,29 @@
+import os
 import io
-from flask import Flask
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackQueryHandler
+from flask import Flask, request
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Dispatcher, CallbackQueryHandler
 from ai_advisor import AITradingAdvisor
 
-# Створюємо Flask-додаток, щоб Gunicorn міг його запустити на Render
 app = Flask(__name__)
+
+# Ініціалізація бота через змінну середовища або безпосередній токен
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "ВАШ_ТОКЕН_БОТА")
+bot = Bot(token=TOKEN)
+dispatcher = Dispatcher(bot, None, use_context=True)
+
+advisor = AITradingAdvisor()
+active_signals = {}
 
 @app.route("/")
 def index():
     return "Racio_1bot is running!"
 
-advisor = AITradingAdvisor()
-
-# Тимчасове сховище графіків для запитів до ШІ за кнопкою
-active_signals = {}
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok", 200
 
 def calculate_ta_confidence(signal_data: dict) -> int:
     score = 0
@@ -44,12 +53,9 @@ def calculate_ta_confidence(signal_data: dict) -> int:
     return score
 
 def process_and_send_signal(pair_name: str, signal_data: dict, macro_chart: io.BytesIO, mid_chart: io.BytesIO, micro_chart: io.BytesIO, context, chat_id: int):
-    # Рахуємо оцінку технічного аналізу
     confidence = calculate_ta_confidence(signal_data)
     
-    # Фільтруємо: публікуємо тільки якщо оцінка 7 або вище
     if confidence >= 7:
-        # Зберігаємо графіки в пам'яті для подальшого аналізу ШІ за запитом
         active_signals[pair_name] = {
             "signal_data": signal_data,
             "macro_chart": macro_chart,
@@ -57,7 +63,6 @@ def process_and_send_signal(pair_name: str, signal_data: dict, macro_chart: io.B
             "micro_chart": micro_chart
         }
         
-        # Створюємо інлайн-кнопку
         keyboard = [[InlineKeyboardButton("🔍 Детальний аналіз ШІ", callback_data=f"ai_analyze_{pair_name}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -84,7 +89,6 @@ def button_callback(update, context):
     if query.data.startswith("ai_analyze_"):
         pair_name = query.data.replace("ai_analyze_", "")
         
-        # Повідомляємо користувача про процес аналізу
         query.edit_message_text(
             text=query.message.text + "\n\n⏳ *ШІ аналізує графіки, зачекайте...*",
             parse_mode="Markdown"
@@ -99,12 +103,13 @@ def button_callback(update, context):
             return
             
         sig_data = saved_item["signal_data"]
-        macro_chart = saved_item["macro_chart"]
-        mid_chart = saved_item["mid_chart"]
-        micro_chart = saved_item["micro_chart"]
-        
-        # Запускаємо аудит ШІ
-        ai_result = advisor.evaluate_signal(pair_name, sig_data, macro_chart, mid_chart, micro_chart)
+        ai_result = advisor.evaluate_signal(
+            pair_name, 
+            sig_data, 
+            saved_item["macro_chart"], 
+            saved_item["mid_chart"], 
+            saved_item["micro_chart"]
+        )
         
         clean_text = query.message.text.split("\n\n⏳")[0]
         updated_text = (
@@ -115,4 +120,7 @@ def button_callback(update, context):
             f"• Висновок: {ai_result.get('reason')}"
         )
         
-        query.edit_message_text(text=updated_text, parse_Mode="Markdown")
+        query.edit_message_text(text=updated_text, parse_mode="Markdown")
+
+# Реєстрація обробників у диспетчері
+dispatcher.add_handler(CallbackQueryHandler(button_callback))
