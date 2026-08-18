@@ -1,4 +1,6 @@
 import sqlite3
+import time
+import pandas as pd
 from datetime import datetime
 
 DB_NAME = "trading_stats.db"
@@ -35,8 +37,17 @@ def save_signal(ticker, signal, entry_price, expiration_mins):
     conn.close()
     return signal_id
 
+def fetch_with_retry(fetch_data_func, ticker, retries=3, delay=2):
+    """Безпечне завантаження з повторними спробами для обходу лімітів Yahoo"""
+    for attempt in range(retries):
+        df = fetch_data_func(ticker, interval="5m", range_period="1d")
+        if not df.empty:
+            return df
+        time.sleep(delay)
+    return pd.DataFrame()
+
 def evaluate_single_signal(signal_id, fetch_data_func):
-    """Перевіряє результат конкретного сигналу після завершення його експірації"""
+    """Перевірка результату сигналу з урахуванням повторних спроб завантаження ціни"""
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -45,28 +56,40 @@ def evaluate_single_signal(signal_id, fetch_data_func):
     row = cursor.fetchone()
     if not row or row[3] != 'PENDING':
         conn.close()
-        return None
+        return None, 0
         
     ticker, signal, entry_price, _ = row
-    df = fetch_data_func(ticker, interval="5m", range_period="1d")
+    conn.close()
+    
+    # Використовуємо захищене завантаження з повторами
+    df = fetch_with_retry(fetch_data_func, ticker)
     
     if df.empty:
-        conn.close()
-        return None
+        return None, 0
         
     current_price = df['close'].iloc[-1]
+    
+    # Розрахунок різниці в пунктах (pips)
+    diff = current_price - entry_price
+    multiplier = 100 if "JPY" in ticker.upper() else 10000
+    pips = round(diff * multiplier, 1)
+    
     if signal == 'CALL':
         result = 'WIN' if current_price > entry_price else 'LOSS'
     else:
         result = 'WIN' if current_price < entry_price else 'LOSS'
         
+    # Зберігаємо результат у базу
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
     cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ? WHERE id = ?", (result, signal_id))
     conn.commit()
     conn.close()
-    return result
+    
+    return result, pips
 
 def evaluate_and_get_stats(fetch_data_func):
-    """Масова перевірка всіх залишкових PENDING сигналів для загальної статистики"""
+    """Масова перевірка всіх залишкових PENDING сигналів"""
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -76,7 +99,7 @@ def evaluate_and_get_stats(fetch_data_func):
     
     for row in rows:
         sig_id, ticker, signal, entry_price = row
-        df = fetch_data_func(ticker, interval="5m", range_period="1d")
+        df = fetch_with_retry(fetch_data_func, ticker)
         if not df.empty:
             current_price = df['close'].iloc[-1]
             if signal == 'CALL':
