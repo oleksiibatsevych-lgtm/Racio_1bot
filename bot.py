@@ -77,6 +77,23 @@ def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
         print(f"Помилка завантаження {ticker}: {e}")
         return pd.DataFrame()
 
+def calculate_dynamic_expiration(df_mid, atr):
+    """Розрахунок динамічної експірації на основі волатильності (ATR) та ціни"""
+    try:
+        if atr is None or pd.isna(atr) or atr == 0:
+            return 5
+        price = df_mid['close'].iloc[-1]
+        atr_pct = (atr / price) * 100
+        # Низька волатильність -> більша експірація, висока -> менша
+        if atr_pct < 0.05:
+            return 15
+        elif atr_pct < 0.15:
+            return 10
+        else:
+            return 5
+    except:
+        return 5
+
 @app.route("/")
 def index():
     return "Racio_1bot is running!"
@@ -94,7 +111,7 @@ def start(update, context):
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     update.message.reply_text(
-        "Бот Racio_1 успішно запущений (без ШІ)! 🚀 Оберіть потрібну опцію в меню нижче:",
+        "Бот Racio_1 успішно запущений! 🚀 Оберіть потрібну опцію в меню нижче:",
         reply_markup=reply_markup
     )
 
@@ -115,8 +132,9 @@ def handle_text_menu(update, context):
         
     elif text == "📊 Аналіз усіх пар":
         chat_id = update.message.chat_id
-        update.message.reply_text("🔄 Запущено швидке сканування всіх валютних пар...")
+        update.message.reply_text("🔄 Запущено сканування всіх валютних пар (HOLD сигнали пропускаються)...")
         
+        sent_signals_count = 0
         for name, ticker in PAIRS_MAP.items():
             try:
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
@@ -130,9 +148,26 @@ def handle_text_menu(update, context):
                 df_indicators = analyzer.calculate_indicators(df_mid)
                 sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
                 
+                signal_type = sig_data.get('signal')
+                # Повністю пропускаємо HOLD
+                if signal_type not in ['CALL', 'PUT']:
+                    continue
+                
+                sent_signals_count += 1
+                atr = sig_data.get('atr')
+                expiration = calculate_dynamic_expiration(df_mid, atr)
+                current_price = df_mid['close'].iloc[-1]
+                
+                # Зберігаємо сигнал для статистики
+                database.save_signal(ticker, signal_type, current_price, expiration)
+
+                icon = "🟢" if signal_type == "CALL" else "🔴"
+                action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
+                
                 msg = (
                     f"📊 **Сканування: {name} ({ticker})**\n"
-                    f"• Сигнал: **{sig_data.get('signal')}**\n"
+                    f"{icon} Сигнал: **{action_text}**\n"
+                    f"⏱ Експірація: **{expiration} хв**\n"
                     f"• Тренд (глоб/сер): {global_trend} / {mid_trend}\n"
                     f"• RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
                     f"• Причина: {sig_data.get('reason')}"
@@ -143,24 +178,22 @@ def handle_text_menu(update, context):
             except Exception as e:
                 print(f"Помилка сканування {ticker}: {e}")
                 
-        bot.send_message(chat_id=chat_id, text="✅ Сканування всіх пар завершено!")
+        bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено! Знайдено активних сигналів: {sent_signals_count}")
         
     elif text == "📈 Статистика":
-        stats_text = "📈 Статистика роботи бота:\n"
+        update.message.reply_text("🔄 Оновлення та перевірка правдивої статистики за результатами ринку...")
         try:
-            stats = database.get_statistics() if hasattr(database, 'get_statistics') else None
-            if stats:
-                stats_text += (
-                    f"• Загальний вінрейт: {stats.get('winrate', 0)}%\n"
-                    f"• Успішних угод: {stats.get('wins', 0)}\n"
-                    f"• Усього угод: {stats.get('total', 0)}"
-                )
-            else:
-                stats_text += "• База даних підключена, збір статистики активний."
-        except Exception:
-            stats_text += "• Статистика обробляється локально через database.py."
+            stats = database.evaluate_and_get_stats(fetch_yahoo_data)
+            stats_text = (
+                f"📈 **Правдива статистика трейдингу:**\n"
+                f"• Успішних угод (WIN): {stats.get('wins', 0)}\n"
+                f"• Усього перевірених угод: {stats.get('total', 0)}\n"
+                f"• Реальний вінрейт: **{stats.get('winrate', 0)}%**"
+            )
+        except Exception as e:
+            stats_text = f"• Помилка розрахунку статистики: {e}"
         
-        update.message.reply_text(stats_text)
+        update.message.reply_text(stats_text, parse_mode="Markdown")
 
 def button_callback(update, context):
     query = update.callback_query
@@ -190,9 +223,28 @@ def button_callback(update, context):
             df_indicators = analyzer.calculate_indicators(df_mid)
             sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
             
+            signal_type = sig_data.get('signal')
+            if signal_type not in ['CALL', 'PUT']:
+                query.edit_message_text(
+                    text=f"ℹ️ По 🟢 **{ticker}** наразі сигнал **HOLD** (утримання). Торгові можливості відсутні.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            atr = sig_data.get('atr')
+            expiration = calculate_dynamic_expiration(df_mid, atr)
+            current_price = df_mid['close'].iloc[-1]
+            
+            # Зберігаємо для статистики
+            database.save_signal(ticker, signal_type, current_price, expiration)
+
+            icon = "🟢" if signal_type == "CALL" else "🔴"
+            action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
+
             text = (
                 f"📈 **Технічний аналіз: {ticker}**\n"
-                f"• Сигнал: **{sig_data.get('signal')}**\n"
+                f"{icon} Сигнал: **{action_text}**\n"
+                f"⏱ Динамічна експірація: **{expiration} хв**\n"
                 f"• Глобальний тренд: {global_trend}\n"
                 f"• Середній тренд: {mid_trend}\n"
                 f"• RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')} | ATR: {sig_data.get('atr')}\n"
