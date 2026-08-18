@@ -6,12 +6,11 @@ import google.generativeai as genai
 class AITradingAdvisor:
 
   def __init__(self):
-    # Ініціалізація Gemini API (ключ автоматично зчитується з환경них змінних Render)
     api_key = os.getenv("GEMINI_API_KEY")
     if api_key:
       genai.configure(api_key=api_key)
 
-    # Використовуємо стабільну і перевірену модель gemini-1.5-flash
+    # Використовуємо стабільну модель
     self.model = genai.GenerativeModel("gemini-1.5-flash")
 
   def evaluate_signal(
@@ -22,7 +21,6 @@ class AITradingAdvisor:
       image_5m,
       asset_name: str,
   ) -> dict:
-    # Базова відповідь за замовчуванням у разі перевантаження чи помилки API
     default_response = {
         "decision": "NO",
         "confidence": 0,
@@ -43,14 +41,11 @@ class AITradingAdvisor:
         """
 
     try:
-      # Надсилаємо промпт разом із трьома скріншотами графіків
       response = self.model.generate_content(
           [prompt, image_1h, image_15m, image_5m]
       )
-
       text_response = response.text.strip()
 
-      # Очищуємо відповідь від markdown-обгорток типу ```json ... ```
       if text_response.startswith("```json"):
         text_response = (
             text_response.removeprefix("```json").removesuffix("```").strip()
