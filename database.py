@@ -1,125 +1,59 @@
-import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
-DB_NAME = "trading_bot.db"
-
-
-def init_db():
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pair TEXT,
-            signal TEXT,
-            entry_price REAL,
-            expiration_time TEXT,
-            status TEXT DEFAULT 'ACTIVE',
-            result TEXT DEFAULT 'PENDING',
-            created_at TEXT
-        )
-    """)
-  conn.commit()
-  conn.close()
-
-
-def save_signal(
-    pair: str, signal: str, entry_price: float, expiration_time_str: str
-):
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute(
-      """
-        INSERT INTO signals (pair, signal, entry_price, expiration_time, status, result, created_at)
-        VALUES (?, ?, ?, ?, 'ACTIVE', 'PENDING', ?)
-    """,
-      (
-          pair,
-          signal,
-          entry_price,
-          expiration_time_str,
-          datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-      ),
-  )
-  conn.commit()
-  conn.close()
-
-
-def get_active_signals():
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute(
-      "SELECT id, pair, signal, entry_price, expiration_time FROM signals"
-      " WHERE status = 'ACTIVE'"
-  )
-  rows = cursor.fetchall()
-  conn.close()
-  return rows
-
-
-def update_signal_result(signal_id: int, result: str):
-  """result може бути 'WIN' або 'LOSS'"""
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute(
-      """
-        UPDATE signals 
-        SET status = 'CLOSED', result = ? 
-        WHERE id = ?
-    """,
-      (result, signal_id),
-  )
-  conn.commit()
-  conn.close()
-
+stats_history = []
+active_signals = {}
+signal_counter = 0
 
 def get_statistics():
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
+    now = datetime.now()
+    day_ago = now - timedelta(days=1)
+    week_ago = now - timedelta(days=7)
 
-  # Загальна кількість закритих сигналів
-  cursor.execute(
-      "SELECT COUNT(*) FROM signals WHERE result IN ('WIN', 'LOSS')"
-  )
-  total = cursor.fetchone()[0]
+    def process_items(items):
+        pair_data = {}
+        total_wins = 0
+        total_valid = 0
 
-  # Кількість перемог
-  cursor.execute("SELECT COUNT(*) FROM signals WHERE result = 'WIN'")
-  wins = cursor.fetchone()[0]
+        for item in items:
+            p = item["pair"]
+            res = item["result"]
+            if p not in pair_data:
+                pair_data[p] = {"requests": 0, "wins": 0, "losses": 0}
+            pair_data[p]["requests"] += 1
+            if res == "WIN":
+                pair_data[p]["wins"] += 1
+                total_wins += 1
+                total_valid += 1
+            elif res == "LOSS":
+                pair_data[p]["losses"] += 1
+                total_valid += 1
 
-  # Кількість поразок
-  cursor.execute("SELECT COUNT(*) FROM signals WHERE result = 'LOSS'")
-  losses = cursor.fetchone()[0]
+        result = {}
+        for p, d in pair_data.items():
+            valid = d["wins"] + d["losses"]
+            wr = (d["wins"] / valid * 100) if valid > 0 else 0.0
+            result[p] = {
+                "requests": d["requests"],
+                "wins": d["wins"],
+                "losses": d["losses"],
+                "winrate": round(wr, 1)
+            }
 
-  conn.close()
+        overall_wr = (total_wins / total_valid * 100) if total_valid > 0 else 0.0
+        return result, round(overall_wr, 1)
 
-  win_rate = (wins / total * 100) if total > 0 else 0.0
-  return {
-      "total": total,
-      "wins": wins,
-      "losses": losses,
-      "win_rate": round(win_rate, 2),
-  }
+    day_items = [i for i in stats_history if i["timestamp"] >= day_ago]
+    week_items = [i for i in stats_history if i["timestamp"] >= week_ago]
+    return process_items(day_items), process_items(week_items), process_items(stats_history)
 
-
-def get_consecutive_losses(pair: str) -> int:
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute(
-      """
-        SELECT result FROM signals 
-        WHERE pair = ? AND result IN ('WIN', 'LOSS') 
-        ORDER BY id DESC LIMIT 5
-    """,
-      (pair,),
-  )
-  rows = cursor.fetchall()
-  conn.close()
-
-  consecutive = 0
-  for row in rows:
-    if row[0] == "LOSS":
-      consecutive += 1
-    else:
-      break
-  return consecutive
+def format_stats_text(title, data_tuple):
+    data, overall_wr = data_tuple
+    text = f"📊 *{title}*\n"
+    if not data:
+        text += "\nЩе немає оцінених угод за цей період."
+        return text
+    text += f"🏆 **Загальний вінрейт:** `{overall_wr}%`\n\n"
+    text += "📋 *По парах*:\n"
+    for pair, counts in data.items():
+        text += f"🌟 *{pair}* Всього: `{counts['requests']}` | ✅ `{counts['wins']}` ❌ `{counts['losses']}` | Вінрейт: `{counts['winrate']}%`\n"
+    return text
