@@ -50,7 +50,7 @@ def fetch_with_retry(fetch_data_func, ticker, retries=3, delay=2):
     return pd.DataFrame()
 
 def evaluate_single_signal(signal_id, fetch_data_func):
-    """Перевірка результату сигналу та розрахунок різниці в цілих пунктах"""
+    """Перевірка результату сигналу та розрахунок точних пунктів під стандарт платформи"""
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -70,9 +70,9 @@ def evaluate_single_signal(signal_id, fetch_data_func):
         
     current_price = df['close'].iloc[-1]
     
-    # Розрахунок різниці в цілих пунктах (pips)
+    # Правильний розрахунок пунктів (1000 для JPY, 100000 для інших пар)
     diff = current_price - entry_price
-    multiplier = 100 if "JPY" in ticker.upper() else 10000
+    multiplier = 1000 if "JPY" in ticker.upper() else 100000
     pips = int(round(diff * multiplier))
     
     if signal == 'CALL':
@@ -103,7 +103,7 @@ def evaluate_and_get_stats(fetch_data_func):
         if not df.empty:
             current_price = df['close'].iloc[-1]
             diff = current_price - entry_price
-            multiplier = 100 if "JPY" in ticker.upper() else 10000
+            multiplier = 1000 if "JPY" in ticker.upper() else 100000
             pips = int(round(diff * multiplier))
             
             if signal == 'CALL':
