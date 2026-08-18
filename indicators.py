@@ -46,6 +46,9 @@ class AdaptiveTechnicalAnalysis:
         bb_std = res_df['close'].rolling(window=bb_window).std()
         res_df['bb_upper'] = res_df['bb_middle'] + (bb_std * 2)
         res_df['bb_lower'] = res_df['bb_middle'] - (bb_std * 2)
+        
+        # Ширина смуг Боллінджера для фільтрації мертвого ринку
+        res_df['bb_width'] = (res_df['bb_upper'] - res_df['bb_lower']) / res_df['bb_middle']
 
         res_df['local_support'] = res_df['low'].rolling(window=15).min()
         res_df['local_resistance'] = res_df['high'].rolling(window=15).max()
@@ -87,40 +90,51 @@ class AdaptiveTechnicalAnalysis:
         ema10 = last['ema_10']
         bb_lower = last['bb_lower']
         bb_upper = last['bb_upper']
+        bb_width = last.get('bb_width', 0.01)
+
+        # 1. Фільтр надто вузького флету (шуму) за допомогою Боллінджера
+        min_width = 0.0005 if "JPY" in asset_name.upper() else 0.001
+        if bb_width < min_width:
+            return {
+                "signal": "HOLD", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
+                "reason": "Низька волатильність (Флет Боллінджера)",
+                "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": "FLAT"
+            }
 
         local_trend = "UP" if c > ema10 else "DOWN"
         is_flat = adx < 18
 
         if is_flat:
-            if c <= bb_lower or (abs(c - l_sup) / c < 0.005 and rsi < 38):
+            if c <= bb_lower or (abs(c - l_sup) / c < 0.005 and rsi < 42):
                 return {
                     "signal": "CALL", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                    "reason": f"Флєт (ADX: {round(adx, 1)}) + Відскок від нижньої межі BB / підтримки (RSI: {round(rsi, 1)})",
+                    "reason": f"Флєт (ADX: {round(adx, 1)}) + Відскок від межі BB/Підтримки (RSI: {round(rsi, 1)})",
                     "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
                 }
-            elif c >= bb_upper or (abs(c - l_res) / c < 0.005 and rsi > 62):
+            elif c >= bb_upper or (abs(c - l_res) / c < 0.005 and rsi > 58):
                 return {
                     "signal": "PUT", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                    "reason": f"Флєт (ADX: {round(adx, 1)}) + Відскок від верхньої межі BB / опору (RSI: {round(rsi, 1)})",
+                    "reason": f"Флєт (ADX: {round(adx, 1)}) + Відскок від межі BB/Опору (RSI: {round(rsi, 1)})",
                     "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
                 }
         else:
             dist_sup = abs(c - l_sup) / c
             dist_res = abs(c - l_res) / c
 
-            if mid_trend == "UP" and local_trend == "UP":
-                if dist_sup < 0.012 or c > ema10:
+            # Адаптивні зони та перевірка тренду для збереження кількості й покращення вінрейту
+            if (global_trend == "UP" or mid_trend == "UP") and local_trend == "UP":
+                if rsi < 52 or dist_sup < 0.012 or c > ema10:
                     return {
                         "signal": "CALL", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                        "reason": f"Короткий тренд ВГОРУ (ADX: {round(adx, 1)}) + Імпульс/Підтримка",
+                        "reason": f"Тренд ВГОРУ (ADX: {round(adx, 1)}) + Адаптивний RSI/Імпульс",
                         "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
                     }
 
-            if mid_trend == "DOWN" and local_trend == "DOWN":
-                if dist_res < 0.012 or c < ema10:
+            if (global_trend == "DOWN" or mid_trend == "DOWN") and local_trend == "DOWN":
+                if rsi > 48 or dist_res < 0.012 or c < ema10:
                     return {
                         "signal": "PUT", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                        "reason": f"Короткий тренд ВНИЗ (ADX: {round(adx, 1)}) + Імпульс/Опір",
+                        "reason": f"Тренд ВНИЗ (ADX: {round(adx, 1)}) + Адаптивний RSI/Імпульс",
                         "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
                     }
 
