@@ -8,3 +8,4 @@ yfinance==0.2.40
 google-genai
 matplotlib==3.9.0
 pandas-ta
+setuptools
