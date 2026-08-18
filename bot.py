@@ -123,7 +123,7 @@ def handle_text_menu(update, context):
             try:
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
-                df_micro = fetch_yahoo_data(ticker, interval="2d", range_period="5m")
+                df_micro = fetch_yahoo_data(ticker, interval="5m", range_period="2d")
                 
                 if df_macro.empty or df_mid.empty:
                     continue
@@ -182,7 +182,7 @@ def button_callback(update, context):
         try:
             df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
-            df_micro = fetch_yahoo_data(ticker, interval="2d", range_period="5m")
+            df_micro = fetch_yahoo_data(ticker, interval="5m", range_period="2d")
             
             if df_macro.empty or df_mid.empty:
                 query.edit_message_text(text=f"❌ Помилка: не вдалося завантажити дані для {ticker}")
