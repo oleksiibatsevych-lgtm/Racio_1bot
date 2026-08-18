@@ -3,7 +3,7 @@ python-telegram-bot==13.15
 gunicorn==22.0.0
 requests==2.32.3
 pandas==2.2.2
-pandas-ta==0.3.14b0
 yfinance==0.2.40
 google-genai
 matplotlib==3.9.0
+git+https://github.com/twopirllc/pandas-ta.git
