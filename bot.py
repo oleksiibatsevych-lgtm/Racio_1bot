@@ -19,7 +19,7 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 
 analyzer = AdaptiveTechnicalAnalysis()
 
-# Сесія з повними заголовками реального браузера для обходу захисту Yahoo
+# Сесія з заголовками для обходу захисту Yahoo
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -28,7 +28,7 @@ session.headers.update({
 })
 
 def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
-    """Пряме завантаження історичних даних з Yahoo API з назвами колонок у нижньому регістрі"""
+    """Пряме завантаження історичних даних з Yahoo API"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {
@@ -79,7 +79,7 @@ def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
         return pd.DataFrame()
 
 def calculate_dynamic_expiration(df_mid, atr):
-    """Розрахунок динамічної експірації на основі волатильності (ATR) та ціни"""
+    """Розрахунок динамічної експірації на основі ATR"""
     try:
         if atr is None or pd.isna(atr) or atr == 0:
             return 5
@@ -95,14 +95,18 @@ def calculate_dynamic_expiration(df_mid, atr):
         return 5
 
 def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
-    """Фонова функція, яка чекає закінчення експірації та оновлює повідомлення результатами"""
-    # Чекаємо час експірації (переводимо хвилини в секунди)
+    """Фонова перевірка сигналу з виведенням результату та пунктирної різниці"""
     time.sleep(expiration_mins * 60)
     try:
-        result = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
+        result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
         if result:
-            res_icon = "✅ **WIN (Успіх)**" if result == 'WIN' else "❌ **LOSS (Збитково)**"
-            updated_text = f"{original_text}\n\n🏁 Результат перевірки: {res_icon}"
+            pips_str = f"+{pips}" if pips > 0 else str(pips)
+            if result == 'WIN':
+                res_icon = f"✅ **WIN (+{pips_str} п.)**"
+            else:
+                res_icon = f"❌ **LOSS ({pips_str} п.)**"
+                
+            updated_text = f"{original_text}\n\n🏁 Результат: {res_icon}"
             bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -150,7 +154,7 @@ def handle_text_menu(update, context):
         
     elif text == "📊 Аналіз усіх пар":
         chat_id = update.message.chat_id
-        update.message.reply_text("🔄 Запущено сканування всіх валютних пар (HOLD сигнали пропускаються)...")
+        update.message.reply_text("🔄 Сканування всіх пар (HOLD пропускаються)...")
         
         sent_signals_count = 0
         for name, ticker in PAIRS_MAP.items():
@@ -175,7 +179,6 @@ def handle_text_menu(update, context):
                 expiration = calculate_dynamic_expiration(df_mid, atr)
                 current_price = df_mid['close'].iloc[-1]
                 
-                # Зберігаємо в БД та отримуємо ID
                 signal_id = database.save_signal(ticker, signal_type, current_price, expiration)
 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
@@ -191,7 +194,6 @@ def handle_text_menu(update, context):
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
-                # Запускаємо фоновий таймер для авто-оновлення результату після експірації
                 threading.Thread(
                     target=delayed_signal_check,
                     args=(chat_id, sent_msg.message_id, signal_id, expiration, msg_text),
@@ -203,10 +205,10 @@ def handle_text_menu(update, context):
             except Exception as e:
                 print(f"Помилка сканування {ticker}: {e}")
                 
-        bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено! Знайдено активних сигналів: {sent_signals_count}")
+        bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено! Активних сигналів: {sent_signals_count}")
         
     elif text == "📈 Статистика":
-        update.message.reply_text("🔄 Оновлення та перевірка правдивої статистики за результатами ринку...")
+        update.message.reply_text("🔄 Оновлення та перевірка статистики...")
         try:
             stats = database.evaluate_and_get_stats(fetch_yahoo_data)
             stats_text = (
@@ -232,7 +234,7 @@ def button_callback(update, context):
     if data.startswith("scan_"):
         ticker = data.replace("scan_", "")
         query.edit_message_text(
-            text=f"🔄 Завантаження даних та розрахунок індикаторів для **{ticker}**...",
+            text=f"🔄 Аналіз для **{ticker}**...",
             parse_mode="Markdown"
         )
         try:
@@ -240,7 +242,7 @@ def button_callback(update, context):
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
             
             if df_macro.empty or df_mid.empty:
-                query.edit_message_text(text=f"❌ Помилка: не вдалося завантажити дані для {ticker}")
+                query.edit_message_text(text=f"❌ Помилка завантаження для {ticker}")
                 return
 
             global_trend = analyzer.get_trend(df_macro, span_val=200)
@@ -251,7 +253,7 @@ def button_callback(update, context):
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
                 query.edit_message_text(
-                    text=f"ℹ️ По 🟢 **{ticker}** наразі сигнал **HOLD** (утримання). Торгові можливості відсутні.",
+                    text=f"ℹ️ По 🟢 **{ticker}** наразі сигнал **HOLD**. Торгові можливості відсутні.",
                     parse_mode="Markdown"
                 )
                 return
@@ -268,7 +270,7 @@ def button_callback(update, context):
             text = (
                 f"📈 **Технічний аналіз: {ticker}**\n"
                 f"{icon} Сигнал: **{action_text}**\n"
-                f"⏱ Динамічна експірація: **{expiration} хв**\n"
+                f"⏱ Експірація: **{expiration} хв**\n"
                 f"• Глобальний тренд: {global_trend}\n"
                 f"• Середній тренд: {mid_trend}\n"
                 f"• RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')} | ATR: {sig_data.get('atr')}\n"
@@ -277,7 +279,6 @@ def button_callback(update, context):
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
-            # Запуск фонової перевірки для цього повідомлення
             threading.Thread(
                 target=delayed_signal_check,
                 args=(query.message.chat_id, query.message.message_id, signal_id, expiration, text),
