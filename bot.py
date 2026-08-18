@@ -1,7 +1,8 @@
 import os
 import io
+import time
 import requests
-import yfinance as yf
+import pandas as pd
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
@@ -21,11 +22,56 @@ advisor = AITradingAdvisor()
 analyzer = AdaptiveTechnicalAnalysis()
 active_signals = {}
 
-# Налаштування сесії для обходу блокування Yahoo Finance на Render
-yf_session = requests.Session()
-yf_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+# Сесія з повними заголовками реального браузера для обходу захисту Yahoo
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9"
 })
+
+def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
+    """Пряме завантаження історичних даних з Yahoo API з обходом блокувань"""
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {
+            "interval": interval,
+            "range": range_period,
+            "includeAdjustedClose": "true"
+        }
+        
+        # Отримуємо куки для сесії перед основним запитом
+        session.get("https://finance.yahoo.com", timeout=5)
+        
+        response = session.get(url, params=params, timeout=10)
+        if response.status_code != 200:
+            return pd.DataFrame()
+            
+        data = response.json()
+        result = data.get("chart", {}).get("result")
+        if not result:
+            return pd.DataFrame()
+            
+        res = result[0]
+        timestamps = res.get("timestamp", [])
+        quotes = res.get("indicators", {}).get("quote", [{}])[0]
+        
+        if not timestamps or not quotes:
+            return pd.DataFrame()
+            
+        df = pd.DataFrame({
+            "Open": quotes.get("open", []),
+            "High": quotes.get("high", []),
+            "Low": quotes.get("low", []),
+            "Close": quotes.get("close", []),
+            "Volume": quotes.get("volume", [])
+        }, index=pd.to_datetime(timestamps, unit="s"))
+        
+        df.dropna(inplace=True)
+        return df
+    except Exception as e:
+        print(f"Помилка завантаження {ticker}: {e}")
+        return pd.DataFrame()
 
 @app.route("/")
 def index():
@@ -69,9 +115,9 @@ def handle_text_menu(update, context):
         
         for name, ticker in PAIRS_MAP.items():
             try:
-                df_macro = yf.download(ticker, period="60d", interval="1h", session=yf_session, progress=False)
-                df_mid = yf.download(ticker, period="10d", interval="15m", session=yf_session, progress=False)
-                df_micro = yf.download(ticker, period="2d", interval="5m", session=yf_session, progress=False)
+                df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
+                df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
+                df_micro = fetch_yahoo_data(ticker, interval="5m", range_period="2d")
                 
                 if df_macro.empty or df_mid.empty:
                     continue
@@ -92,6 +138,7 @@ def handle_text_menu(update, context):
                     f"• Висновок: {ai_result.get('reason')}"
                 )
                 bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                time.sleep(1) # Невелика пауза між запитами, щоб уникнути лімітів
                 
             except Exception as e:
                 print(f"Помилка сканування {ticker}: {e}")
@@ -127,9 +174,9 @@ def button_callback(update, context):
             parse_mode="Markdown"
         )
         try:
-            df_macro = yf.download(ticker, period="60d", interval="1h", session=yf_session, progress=False)
-            df_mid = yf.download(ticker, period="10d", interval="15m", session=yf_session, progress=False)
-            df_micro = yf.download(ticker, period="2d", interval="5m", session=yf_session, progress=False)
+            df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
+            df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
+            df_micro = fetch_yahoo_data(ticker, interval="5m", range_period="2d")
             
             if df_macro.empty or df_mid.empty:
                 query.edit_message_text(text=f"❌ Помилка: не вдалося завантажити дані для {ticker}")
