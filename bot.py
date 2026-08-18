@@ -31,7 +31,7 @@ session.headers.update({
 })
 
 def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
-    """Пряме завантаження історичних даних з Yahoo API з обходом блокувань"""
+    """Пряме завантаження історичних даних з Yahoo API з коректною обробкою валютних пар без обсягів"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {
@@ -40,9 +40,7 @@ def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
             "includeAdjustedClose": "true"
         }
         
-        # Отримуємо куки для сесії перед основним запитом
         session.get("https://finance.yahoo.com", timeout=5)
-        
         response = session.get(url, params=params, timeout=10)
         if response.status_code != 200:
             return pd.DataFrame()
@@ -59,15 +57,23 @@ def fetch_yahoo_data(ticker, interval="1h", range_period="60d"):
         if not timestamps or not quotes:
             return pd.DataFrame()
             
+        opens = quotes.get("open", [])
+        highs = quotes.get("high", [])
+        lows = quotes.get("low", [])
+        closes = quotes.get("close", [])
+        volumes = quotes.get("volume", [])
+        
         df = pd.DataFrame({
-            "Open": quotes.get("open", []),
-            "High": quotes.get("high", []),
-            "Low": quotes.get("low", []),
-            "Close": quotes.get("close", []),
-            "Volume": quotes.get("volume", [])
+            "Open": opens,
+            "High": highs,
+            "Low": lows,
+            "Close": closes,
+            "Volume": volumes if volumes else [0] * len(timestamps)
         }, index=pd.to_datetime(timestamps, unit="s"))
         
-        df.dropna(inplace=True)
+        df.dropna(subset=["Open", "High", "Low", "Close"], inplace=True)
+        df["Volume"] = df["Volume"].fillna(0)
+        
         return df
     except Exception as e:
         print(f"Помилка завантаження {ticker}: {e}")
@@ -117,7 +123,7 @@ def handle_text_menu(update, context):
             try:
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
-                df_micro = fetch_yahoo_data(ticker, interval="5m", range_period="2d")
+                df_micro = fetch_yahoo_data(ticker, interval="2d", range_period="5m")
                 
                 if df_macro.empty or df_mid.empty:
                     continue
@@ -138,7 +144,7 @@ def handle_text_menu(update, context):
                     f"• Висновок: {ai_result.get('reason')}"
                 )
                 bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                time.sleep(1) # Невелика пауза між запитами, щоб уникнути лімітів
+                time.sleep(1)
                 
             except Exception as e:
                 print(f"Помилка сканування {ticker}: {e}")
@@ -176,7 +182,7 @@ def button_callback(update, context):
         try:
             df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
-            df_micro = fetch_yahoo_data(ticker, interval="5m", range_period="2d")
+            df_micro = fetch_yahoo_data(ticker, interval="2d", range_period="5m")
             
             if df_macro.empty or df_mid.empty:
                 query.edit_message_text(text=f"❌ Помилка: не вдалося завантажити дані для {ticker}")
