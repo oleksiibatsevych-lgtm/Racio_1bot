@@ -1,7 +1,6 @@
 import os
 import io
 import time
-import threading
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -22,7 +21,6 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 analyzer = AdaptiveTechnicalAnalysis()
 ml_filter = TradingMLFilter()
 
-# Глобальний словник для захисту від спаму (кулдаун 5 хвилин = 300 секунд)
 last_sent_signals = {}
 
 session = requests.Session()
@@ -96,29 +94,6 @@ def calculate_dynamic_expiration(df_fast, atr):
     except:
         return 5
 
-def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
-    """Фонова перевірка сигналу через заданий час експірації без кнопок"""
-    time.sleep(expiration_mins * 60)
-    try:
-        # Використовуємо вашу функцію з database.py для оцінки результату
-        result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
-        if result:
-            pips_str = f"+{pips}" if pips > 0 else str(pips)
-            if result == 'WIN':
-                res_icon = f"🏁 Результат: ✅ WIN (Успіх) ({pips_str} п.)"
-            else:
-                res_icon = f"🏁 Результат: ❌ LOSS (Збитково) ({pips_str} п.)"
-                
-            updated_text = f"{original_text}\n{res_icon}"
-            bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=updated_text,
-                parse_mode="Markdown"
-            )
-    except Exception as e:
-        print(f"Помилка фонової перевірки сигналу ID {signal_id}: {e}")
-
 @app.route("/")
 def index():
     return "Racio_1bot is running!"
@@ -149,6 +124,32 @@ def ai_report_command(update, context):
     update.message.reply_text(report, parse_mode="Markdown")
 
 def handle_text_menu(update, context):
+    chat_id = update.message.chat_id
+    
+    # 🔄 Перевірка прострочених угод та оновлення повідомлень у чаті цілими пунктами
+    try:
+        stats = database.evaluate_and_get_stats(fetch_yahoo_data)
+        for sig in stats.get("updated_signals", []):
+            if sig.get("chat_id") and sig.get("message_id") and sig.get("message_text"):
+                pips_val = sig['pips']
+                pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
+                
+                if sig['result'] == 'WIN':
+                    res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
+                else:
+                    res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
+                
+                orig_txt = sig["message_text"]
+                if "🏁 Результат" not in orig_txt:
+                    new_text = f"{orig_txt}\n{res_icon}"
+                    bot.edit_message_text(
+                        chat_id=sig["chat_id"],
+                        message_id=sig["message_id"],
+                        text=new_text
+                    )
+    except Exception as e:
+        print(f"Помилка автоперевірки угод: {e}")
+
     text = update.message.text
     
     if text == "💵 Пари":
@@ -164,7 +165,6 @@ def handle_text_menu(update, context):
         update.message.reply_text("📌 Оберіть пару для технічного аналізу:", reply_markup=reply_markup)
         
     elif text == "📊 Аналіз усіх пар":
-        chat_id = update.message.chat_id
         update.message.reply_text("🔄 Сканування та ШІ-фільтрація всіх пар (1h + 15m + 5m)...")
         
         sent_signals_count = 0
@@ -173,7 +173,6 @@ def handle_text_menu(update, context):
         
         for name, ticker in PAIRS_MAP.items():
             try:
-                # Кулдаун 5 хвилин (300 секунд) для захисту від спаму
                 if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
                     continue
 
@@ -208,14 +207,16 @@ def handle_text_menu(update, context):
                 
                 atr = sig_data.get('atr')
                 expiration = calculate_dynamic_expiration(df_fast, atr)
-                current_price = df_fast['close'].iloc[-1]
+                current_price = float(df_fast['close'].iloc[-1])
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
                 
+                # Додано рядок ціни входу у повідомлення
                 msg_text = (
                     f"📊 {name} ({ticker})\n"
                     f"{icon} {action_text} | ⏱ {expiration} хв\n"
+                    f"🎯 Ціна входу: {current_price:.5f}\n"
                     f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
                     f"📉 RSI: {rsi} | ADX (5m): {adx}\n"
                     f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
@@ -223,18 +224,10 @@ def handle_text_menu(update, context):
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
-                # Зберігаємо сигнал у базу даних із передачею всіх параметрів для повної сумісності
-                signal_id = database.save_signal(
+                database.save_signal(
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
                     rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
                 )
-                
-                # Автоматичний фоновий потік очікування експірації та закриття угоди без кнопок
-                threading.Thread(
-                    target=delayed_signal_check,
-                    args=(chat_id, sent_msg.message_id, signal_id, expiration, msg_text),
-                    daemon=True
-                ).start()
                 
                 time.sleep(0.5)
                 
@@ -247,33 +240,9 @@ def handle_text_menu(update, context):
         )
         
     elif text == "📈 Статистика":
-        update.message.reply_text("🔄 Оновлення статистики та перевірка угод...")
+        update.message.reply_text("🔄 Оновлення статистики та перевірка завершених угод...")
         try:
             stats = database.evaluate_and_get_stats(fetch_yahoo_data)
-            
-            for sig in stats.get("updated_signals", []):
-                try:
-                    if sig.get("chat_id") and sig.get("message_id") and sig.get("message_text"):
-                        pips_val = sig['pips']
-                        pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
-                        
-                        if sig['result'] == 'WIN':
-                            res_icon = f"🏁 Результат: ✅ WIN (Успіх) ({pips_str} п.)"
-                        else:
-                            res_icon = f"🏁 Результат: ❌ LOSS (Збитково) ({pips_str} п.)"
-                        
-                        orig_txt = sig["message_text"]
-                        if "🏁 Результат" not in orig_txt:
-                            new_text = f"{orig_txt}\n{res_icon}"
-                            bot.edit_message_text(
-                                chat_id=sig["chat_id"],
-                                message_id=sig["message_id"],
-                                text=new_text,
-                                parse_mode="Markdown"
-                            )
-                except Exception as e:
-                    print(f"Не вдалося оновити повідомлення в чаті: {e}")
-
             ml_filter.train_model()
             
             stats_text = (
@@ -350,14 +319,16 @@ def button_callback(update, context):
 
             atr = sig_data.get('atr')
             expiration = calculate_dynamic_expiration(df_fast, atr)
-            current_price = df_fast['close'].iloc[-1]
+            current_price = float(df_fast['close'].iloc[-1])
             
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
 
+            # Додано рядок ціни входу у повідомлення
             text = (
                 f"📊 {name} ({ticker})\n"
                 f"{icon} {action_text} | ⏱ {expiration} хв\n"
+                f"🎯 Ціна входу: {current_price:.5f}\n"
                 f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
                 f"📉 RSI: {rsi} | ADX (5m): {adx}\n"
                 f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
@@ -365,16 +336,10 @@ def button_callback(update, context):
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
-            signal_id = database.save_signal(
+            database.save_signal(
                 ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
                 rsi=rsi, adx=adx, bb_width=bb_width, message_text=text
             )
-            
-            threading.Thread(
-                target=delayed_signal_check,
-                args=(query.message.chat_id, query.message.message_id, signal_id, expiration, text),
-                daemon=True
-            ).start()
             
         except Exception as e:
             query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
