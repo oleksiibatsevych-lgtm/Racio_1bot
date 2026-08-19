@@ -47,7 +47,6 @@ class AdaptiveTechnicalAnalysis:
         res_df['bb_upper'] = res_df['bb_middle'] + (bb_std * 2)
         res_df['bb_lower'] = res_df['bb_middle'] - (bb_std * 2)
         
-        # Ширина смуг Боллінджера для фільтрації мертвого ринку
         res_df['bb_width'] = (res_df['bb_upper'] - res_df['bb_lower']) / res_df['bb_middle']
 
         res_df['local_support'] = res_df['low'].rolling(window=15).min()
@@ -92,7 +91,6 @@ class AdaptiveTechnicalAnalysis:
         bb_upper = last['bb_upper']
         bb_width = last.get('bb_width', 0.01)
 
-        # 1. Фільтр надто вузького флету (шуму) за допомогою Боллінджера
         min_width = 0.0005 if "JPY" in asset_name.upper() else 0.001
         if bb_width < min_width:
             return {
@@ -102,8 +100,6 @@ class AdaptiveTechnicalAnalysis:
             }
 
         local_trend = "UP" if c > ema10 else "DOWN"
-        
-        # Визначення флету за 5-хвилинним ADX (< 22)
         is_flat = adx < 22
 
         if is_flat:
@@ -123,7 +119,6 @@ class AdaptiveTechnicalAnalysis:
             dist_sup = abs(c - l_sup) / c
             dist_res = abs(c - l_res) / c
 
-            # Трендові входи (коли ADX >= 22 на 5m)
             if (global_trend == "UP" or mid_trend == "UP") and local_trend == "UP":
                 if rsi < 52 or dist_sup < 0.012 or c > ema10:
                     return {
