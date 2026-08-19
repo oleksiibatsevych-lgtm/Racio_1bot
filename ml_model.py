@@ -12,7 +12,26 @@ DB_NAME = "trading_stats.db"
 class TradingMLFilter:
     def __init__(self):
         self.model = None
+        self.init_db()  # Автоматично створюємо таблицю, якщо її немає
         self.load_model()
+
+    def init_db(self):
+        """Створює таблицю signals, якщо вона ще не існує"""
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                pair TEXT,
+                rsi REAL,
+                adx REAL,
+                bb_width REAL,
+                result TEXT,
+                status TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
 
     def load_model(self):
         if os.path.exists(MODEL_FILE):
@@ -23,7 +42,6 @@ class TradingMLFilter:
 
     def get_data_for_training(self):
         conn = sqlite3.connect(DB_NAME)
-        # Витягуємо timestamp, щоб дістати годину
         df = pd.read_sql_query(
             "SELECT rsi, adx, bb_width, timestamp, result FROM signals WHERE status = 'COMPLETED'", conn
         )
@@ -33,14 +51,12 @@ class TradingMLFilter:
     def train_model(self):
         df = self.get_data_for_training()
         if df.empty or 'timestamp' not in df.columns:
-            return False, "База даних відсутня або не містить необхідних даних."
+            return False, "База даних порожня або не містить необхідних даних."
         
-        # Витягуємо годину з timestamp (формат "YYYY-MM-DD HH:MM:SS")
         df['hour'] = pd.to_datetime(df['timestamp']).dt.hour
         df['target'] = df['result'].apply(lambda x: 1 if x == 'WIN' else 0)
         df = df.dropna()
 
-        # ПОРОГ: 200 угод для серйозного навчання
         if len(df) < 200:
             return False, f"⚠️ Недостатньо даних для об'єктивного навчання (накопичено: {len(df)}/200)"
 
@@ -54,18 +70,15 @@ class TradingMLFilter:
         return True, f"✅ Модель успішно перенавчена на {len(df)} угодах з урахуванням часу!"
 
     def predict_signal_probability(self, rsi, adx, bb_width) -> float:
-        # Перевірка: якщо угод менше 200 — вимикаємо фільтрацію (пропускаємо все)
         conn = sqlite3.connect(DB_NAME)
         count = conn.execute("SELECT count(*) FROM signals WHERE status = 'COMPLETED'").fetchone()[0]
         conn.close()
         
         if count < 200 or self.model is None:
-            return 1.0  # Фільтр вимкнено до накопичення 200 угод
+            return 1.0  # Пропускаємо все до накопичення 200 угод
             
         try:
-            # Отримуємо поточну годину
             current_hour = datetime.now().hour
-            
             X_new = pd.DataFrame([[rsi, adx, bb_width, current_hour]], 
                                  columns=['rsi', 'adx', 'bb_width', 'hour'])
             proba = self.model.predict_proba(X_new)[0][1]
