@@ -78,11 +78,11 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
         print(f"Помилка завантаження {ticker}: {e}")
         return pd.DataFrame()
 
-def calculate_dynamic_expiration(df_mid, atr):
+def calculate_dynamic_expiration(df_fast, atr):
     try:
         if atr is None or pd.isna(atr) or atr == 0:
             return 5
-        price = df_mid['close'].iloc[-1]
+        price = df_fast['close'].iloc[-1]
         atr_pct = (atr / price) * 100
         if atr_pct < 0.05:
             return 15
@@ -161,21 +161,25 @@ def handle_text_menu(update, context):
         
     elif text == "📊 Аналіз усіх пар":
         chat_id = update.message.chat_id
-        update.message.reply_text("🔄 Сканування та ШІ-фільтрація всіх пар...")
+        update.message.reply_text("🔄 Сканування та ШІ-фільтрація всіх пар (1h + 15m + 5m)...")
         
         sent_signals_count = 0
         filtered_count = 0
         for name, ticker in PAIRS_MAP.items():
             try:
+                # Завантажуємо три таймфрейми для каскадного аналізу
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
+                df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
                 
-                if df_macro.empty or df_mid.empty:
+                if df_macro.empty or df_mid.empty or df_fast.empty:
                     continue
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
-                df_indicators = analyzer.calculate_indicators(df_mid)
+                
+                # Розраховуємо індикатори та ADX безпосередньо на 5-хвилинному графіку
+                df_indicators = analyzer.calculate_indicators(df_fast)
                 sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
                 
                 signal_type = sig_data.get('signal')
@@ -193,8 +197,8 @@ def handle_text_menu(update, context):
                 
                 sent_signals_count += 1
                 atr = sig_data.get('atr')
-                expiration = calculate_dynamic_expiration(df_mid, atr)
-                current_price = df_mid['close'].iloc[-1]
+                expiration = calculate_dynamic_expiration(df_fast, atr)
+                current_price = df_fast['close'].iloc[-1]
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -203,7 +207,7 @@ def handle_text_menu(update, context):
                     f"📊 {name} ({ticker})\n"
                     f"{icon} {action_text} | ⏱ {expiration} хв\n"
                     f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                    f"📉 RSI: {rsi} | ADX: {adx}\n"
+                    f"📉 RSI: {rsi} | ADX (5m): {adx}\n"
                     f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
                     f"💡 Причина: {sig_data.get('reason')}"
                 )
@@ -214,7 +218,7 @@ def handle_text_menu(update, context):
                     rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
                 )
                 
-                # Запускаємо фоновий потік оновлення
+                # Запускаємо фоновий потік оновлення результату
                 threading.Thread(
                     target=delayed_signal_check,
                     args=(chat_id, sent_msg.message_id, signal_id, expiration, msg_text),
@@ -236,7 +240,6 @@ def handle_text_menu(update, context):
         try:
             stats = database.evaluate_and_get_stats(fetch_yahoo_data)
             
-            # Якщо фоновий потік не спрацював, кнопка статистики опрацює все автоматично за збереженим текстом
             for sig in stats.get("updated_signals", []):
                 try:
                     if sig.get("chat_id") and sig.get("message_id") and sig.get("message_text"):
@@ -296,20 +299,22 @@ def button_callback(update, context):
         name = next((k for k, v in PAIRS_MAP.items() if v == ticker), ticker)
         
         query.edit_message_text(
-            text=f"🔄 Аналіз для **{name} ({ticker})**...",
+            text=f"🔄 Аналіз для **{name} ({ticker})** (1h + 15m + 5m)...",
             parse_mode="Markdown"
         )
         try:
             df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
+            df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
             
-            if df_macro.empty or df_mid.empty:
-                query.edit_message_text(text=f"❌ Помилка завантаження для {ticker}")
+            if df_macro.empty or df_mid.empty or df_fast.empty:
+                query.edit_message_text(text=f"❌ Помилка завантаження даних для {ticker}")
                 return
 
             global_trend = analyzer.get_trend(df_macro, span_val=200)
             mid_trend = analyzer.get_trend(df_mid, span_val=50)
-            df_indicators = analyzer.calculate_indicators(df_mid)
+            
+            df_indicators = analyzer.calculate_indicators(df_fast)
             sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
             
             signal_type = sig_data.get('signal')
@@ -333,8 +338,8 @@ def button_callback(update, context):
                 return
 
             atr = sig_data.get('atr')
-            expiration = calculate_dynamic_expiration(df_mid, atr)
-            current_price = df_mid['close'].iloc[-1]
+            expiration = calculate_dynamic_expiration(df_fast, atr)
+            current_price = df_fast['close'].iloc[-1]
             
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -343,7 +348,7 @@ def button_callback(update, context):
                 f"📊 {name} ({ticker})\n"
                 f"{icon} {action_text} | ⏱ {expiration} хв\n"
                 f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                f"📉 RSI: {rsi} | ADX: {adx}\n"
+                f"📉 RSI: {rsi} | ADX (5m): {adx}\n"
                 f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
                 f"💡 Причина: {sig_data.get('reason')}"
             )
