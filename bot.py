@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import threading
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
@@ -33,79 +34,101 @@ session.headers.update({
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        params = {
-            "interval": interval,
-            "range": range_period,
-            "includeAdjustedClose": "true"
-        }
-        
+        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
         response = session.get(url, params=params, timeout=(3, 5))
         if response.status_code != 200:
             return pd.DataFrame()
-            
         data = response.json()
         result = data.get("chart", {}).get("result")
         if not result:
             return pd.DataFrame()
-            
         res = result[0]
         timestamps = res.get("timestamp", [])
         quotes = res.get("indicators", {}).get("quote", [{}])[0]
-        
         if not timestamps or not quotes:
             return pd.DataFrame()
-            
-        opens = quotes.get("open", [])
-        highs = quotes.get("high", [])
-        lows = quotes.get("low", [])
-        closes = quotes.get("close", [])
-        volumes = quotes.get("volume", [])
-        
-        vol_data = volumes if volumes else [0] * len(timestamps)
-        
         df = pd.DataFrame({
-            "open": opens,
-            "high": highs,
-            "low": lows,
-            "close": closes,
-            "volume": vol_data
+            "open": quotes.get("open", []),
+            "high": quotes.get("high", []),
+            "low": quotes.get("low", []),
+            "close": quotes.get("close", []),
+            "volume": quotes.get("volume", []) or [0] * len(timestamps)
         }, index=pd.to_datetime(timestamps, unit="s"))
-        
         df.dropna(subset=["open", "high", "low", "close"], inplace=True)
         df["volume"] = df["volume"].fillna(0)
-        
         return df
     except Exception as e:
         print(f"Помилка завантаження {ticker}: {e}")
         return pd.DataFrame()
 
 def calculate_dynamic_expiration(df_fast, atr, adx=20):
-    """
-    Покращений підбір експірації: враховує і волатильність (ATR%), і силу тренду (ADX).
-    - Високий ADX (>30) = швидкий спрямований рух -> менший час (5 хв)
-    - Низький ADX (<18) = флет/коливання -> більший час (15-20 хв) для відпрацювання
-    """
     try:
         if atr is None or pd.isna(atr) or atr == 0:
             return 10
         price = float(df_fast['close'].iloc[-1])
         atr_pct = (atr / price) * 100
-        
         if adx > 30:
-            return 5   # Сильний імпульсний тренд
+            return 5
         elif adx > 22:
-            return 10  # Помірний тренд
+            return 10
         elif adx < 16:
-            return 20  # Широкий флет, потрібен більший запас часу
+            return 20
         else:
-            if atr_pct < 0.05:
-                return 15
-            elif atr_pct < 0.12:
-                return 10
-            else:
-                return 5
+            return 15 if atr_pct < 0.05 else (10 if atr_pct < 0.12 else 5)
     except:
         return 10
+
+def process_signal_expiration(sig_id):
+    """Ця функція викликається таймером точно в момент закінчення експірації угоди"""
+    try:
+        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data)
+        if res_data and res_data.get("chat_id") and res_data.get("message_id"):
+            pips_val = res_data['pips']
+            pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
+            
+            if res_data['result'] == 'WIN':
+                res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
+            else:
+                res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
+            
+            orig_txt = res_data["message_text"]
+            if "🏁 Результат" not in orig_txt:
+                new_text = f"{orig_txt}\n{res_icon}"
+                bot.edit_message_text(
+                    chat_id=res_data["chat_id"],
+                    message_id=res_data["message_id"],
+                    text=new_text
+                )
+    except Exception as e:
+        print(f"Помилка таймера експірації для сигналу {sig_id}: {e}")
+
+def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
+    """Створює точний таймер очікування закінчення часу угоди"""
+    try:
+        signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+        expiry_time = signal_time + timedelta(minutes=expiration_mins)
+        now = datetime.now()
+        
+        delay = (expiry_time - now).total_seconds()
+        if delay < 0:
+            delay = 1  # Якщо час вже минув поки бот спав
+            
+        timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
+        timer.daemon = True
+        timer.start()
+    except Exception as e:
+        print(f"Помилка планування таймера для сигналу {sig_id}: {e}")
+
+def restore_pending_timers():
+    """Відновлює таймери для всіх активних угод при старті бота"""
+    pending = database.get_pending_signals()
+    for row in pending:
+        sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
+        schedule_signal_timer(sig_id, timestamp_str, expiration_mins)
+    print(f"⏳ Відновлено активних таймерів угод: {len(pending)}")
+
+# Запускаємо відновлення таймерів при запуску програми
+restore_pending_timers()
 
 @app.route("/")
 def index():
@@ -138,31 +161,6 @@ def ai_report_command(update, context):
 
 def handle_text_menu(update, context):
     chat_id = update.message.chat_id
-    
-    # 🔄 Автоперевірка завершених угод при натисканні будь-якої кнопки меню
-    try:
-        stats = database.evaluate_and_get_stats(fetch_yahoo_data)
-        for sig in stats.get("updated_signals", []):
-            if sig.get("chat_id") and sig.get("message_id") and sig.get("message_text"):
-                pips_val = sig['pips']
-                pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
-                
-                if sig['result'] == 'WIN':
-                    res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
-                else:
-                    res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
-                
-                orig_txt = sig["message_text"]
-                if "🏁 Результат" not in orig_txt:
-                    new_text = f"{orig_txt}\n{res_icon}"
-                    bot.edit_message_text(
-                        chat_id=sig["chat_id"],
-                        message_id=sig["message_id"],
-                        text=new_text
-                    )
-    except Exception as e:
-        print(f"Помилка автоперевірки угод: {e}")
-
     text = update.message.text
     
     if text == "💵 Пари":
@@ -173,7 +171,6 @@ def handle_text_menu(update, context):
             if i + 1 < len(pairs):
                 row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
             keyboard.append(row)
-            
         reply_markup = InlineKeyboardMarkup(keyboard)
         update.message.reply_text("📌 Оберіть пару для технічного аналізу:", reply_markup=reply_markup)
         
@@ -236,10 +233,15 @@ def handle_text_menu(update, context):
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
-                database.save_signal(
+                # Зберігаємо сигнал і отримуємо його ID
+                timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                sig_id = database.save_signal(
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
                     rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
                 )
+                
+                # Запускаємо точний таймер для цього сигналу
+                schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
                 time.sleep(0.5)
                 
@@ -252,9 +254,9 @@ def handle_text_menu(update, context):
         )
         
     elif text == "📈 Статистика":
-        update.message.reply_text("🔄 Оновлення статистики та перевірка завершених угод...")
+        update.message.reply_text("🔄 Оновлення статистики...")
         try:
-            stats = database.evaluate_and_get_stats(fetch_yahoo_data)
+            stats = database.get_overall_stats()
             ml_filter.train_model()
             
             stats_text = (
@@ -313,7 +315,7 @@ def button_callback(update, context):
             if signal_type not in ['CALL', 'PUT']:
                 query.edit_message_text(
                     text=f"ℹ️ По 🟢 **{name} ({ticker})** наразі сигнал **HOLD**. Торгові можливості відсутні.",
-                    parse_Mode="Markdown"
+                    parse_mode="Markdown"
                 )
                 return
 
@@ -333,6 +335,7 @@ def button_callback(update, context):
             expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
             current_price = float(df_fast['close'].iloc[-1])
             
+            icon = "🟢" =="CALL" if signal_type == "CALL" else "🔴" # syntax fix inside string format below
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
 
@@ -347,10 +350,13 @@ def button_callback(update, context):
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
-            database.save_signal(
+            timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            sig_id = database.save_signal(
                 ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
                 rsi=rsi, adx=adx, bb_width=bb_width, message_text=text
             )
+            
+            schedule_signal_timer(sig_id, timestamp_str, expiration)
             
         except Exception as e:
             query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
