@@ -12,17 +12,20 @@ DB_NAME = "trading_stats.db"
 class TradingMLFilter:
     def __init__(self):
         self.model = None
-        self.init_db()  # Автоматично створюємо таблицю, якщо її немає
+        self.init_db()  # Автоматичне створення таблиці з усіма необхідними полями
         self.load_model()
 
     def init_db(self):
-        """Створює таблицю signals, якщо вона ще не існує"""
+        """Створює таблицю signals з полями для автоперевірки, якщо її ще немає"""
         conn = sqlite3.connect(DB_NAME)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
                 pair TEXT,
+                action TEXT,
+                entry_price REAL,
+                duration_min INTEGER,
                 rsi REAL,
                 adx REAL,
                 bb_width REAL,
@@ -53,10 +56,12 @@ class TradingMLFilter:
         if df.empty or 'timestamp' not in df.columns:
             return False, "База даних порожня або не містить необхідних даних."
         
+        # Витягуємо годину з timestamp для аналізу часових закономірностей
         df['hour'] = pd.to_datetime(df['timestamp']).dt.hour
         df['target'] = df['result'].apply(lambda x: 1 if x == 'WIN' else 0)
         df = df.dropna()
 
+        # Суворий поріг: 200 угод для об'єктивної статистики
         if len(df) < 200:
             return False, f"⚠️ Недостатньо даних для об'єктивного навчання (накопичено: {len(df)}/200)"
 
@@ -74,8 +79,9 @@ class TradingMLFilter:
         count = conn.execute("SELECT count(*) FROM signals WHERE status = 'COMPLETED'").fetchone()[0]
         conn.close()
         
+        # Якщо угод менше 200 — вимикаємо фільтрацію (пропускаємо все для збору бази)
         if count < 200 or self.model is None:
-            return 1.0  # Пропускаємо все до накопичення 200 угод
+            return 1.0  
             
         try:
             current_hour = datetime.now().hour
