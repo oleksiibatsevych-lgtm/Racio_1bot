@@ -49,14 +49,14 @@ class TradingMLFilter:
 
     def predict_signal_probability(self, rsi, adx, bb_width) -> float:
         if self.model is None:
-            return 1.0  
+            return 0.50  
         try:
             X_new = pd.DataFrame([[rsi, adx, bb_width]], columns=['rsi', 'adx', 'bb_width'])
             proba = self.model.predict_proba(X_new)[0][1]
             return float(proba)
         except Exception as e:
             print(f"Помилка предикту ML: {e}")
-            return 1.0
+            return 0.50
 
     def generate_strategy_report(self) -> str:
         if self.model is None:
