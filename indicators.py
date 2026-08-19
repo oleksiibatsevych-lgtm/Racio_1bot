@@ -102,31 +102,33 @@ class AdaptiveTechnicalAnalysis:
             }
 
         local_trend = "UP" if c > ema10 else "DOWN"
-        is_flat = adx < 18
+        
+        # Визначення флету за 5-хвилинним ADX (< 22)
+        is_flat = adx < 22
 
         if is_flat:
-            if c <= bb_lower or (abs(c - l_sup) / c < 0.005 and rsi < 42):
+            if c <= bb_lower or (abs(c - l_sup) / c < 0.005 and rsi < 45):
                 return {
                     "signal": "CALL", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                    "reason": f"Флєт (ADX: {round(adx, 1)}) + Відскок від межі BB/Підтримки (RSI: {round(rsi, 1)})",
+                    "reason": f"Флєт 5m (ADX: {round(adx, 1)}) + Відскок від межі BB/Підтримки (RSI: {round(rsi, 1)})",
                     "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
                 }
-            elif c >= bb_upper or (abs(c - l_res) / c < 0.005 and rsi > 58):
+            elif c >= bb_upper or (abs(c - l_res) / c < 0.005 and rsi > 55):
                 return {
                     "signal": "PUT", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                    "reason": f"Флєт (ADX: {round(adx, 1)}) + Відскок від межі BB/Опору (RSI: {round(rsi, 1)})",
+                    "reason": f"Флєт 5m (ADX: {round(adx, 1)}) + Відскок від межі BB/Опору (RSI: {round(rsi, 1)})",
                     "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
                 }
         else:
             dist_sup = abs(c - l_sup) / c
             dist_res = abs(c - l_res) / c
 
-            # Адаптивні зони та перевірка тренду для збереження кількості й покращення вінрейту
+            # Трендові входи (коли ADX >= 22 на 5m)
             if (global_trend == "UP" or mid_trend == "UP") and local_trend == "UP":
                 if rsi < 52 or dist_sup < 0.012 or c > ema10:
                     return {
                         "signal": "CALL", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                        "reason": f"Тренд ВГОРУ (ADX: {round(adx, 1)}) + Адаптивний RSI/Імпульс",
+                        "reason": f"Тренд ВГОРУ 5m (ADX: {round(adx, 1)}) + Адаптивний RSI/Імпульс",
                         "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
                     }
 
@@ -134,7 +136,7 @@ class AdaptiveTechnicalAnalysis:
                 if rsi > 48 or dist_res < 0.012 or c < ema10:
                     return {
                         "signal": "PUT", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                        "reason": f"Тренд ВНИЗ (ADX: {round(adx, 1)}) + Адаптивний RSI/Імпульс",
+                        "reason": f"Тренд ВНИЗ 5m (ADX: {round(adx, 1)}) + Адаптивний RSI/Імпульс",
                         "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
                     }
 
