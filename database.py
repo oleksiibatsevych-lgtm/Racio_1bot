@@ -8,6 +8,8 @@ DB_NAME = "trading_stats.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    
+    # Створюємо базову таблицю, якщо її немає
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,6 +29,35 @@ def init_db():
             message_text TEXT
         )
     ''')
+    
+    # Автоматична перевірка та додавання будь-яких відсутніх колонок (міграція)
+    cursor.execute("PRAGMA table_info(signals)")
+    existing_columns = [col[1] for col in cursor.fetchall()]
+    
+    required_columns = {
+        "ticker": "TEXT",
+        "signal": "TEXT",
+        "entry_price": "REAL",
+        "expiration_mins": "INTEGER",
+        "timestamp": "TEXT",
+        "status": "TEXT DEFAULT 'PENDING'",
+        "result": "TEXT DEFAULT 'UNKNOWN'",
+        "chat_id": "INTEGER",
+        "message_id": "INTEGER",
+        "pips": "INTEGER DEFAULT 0",
+        "rsi": "REAL",
+        "adx": "REAL",
+        "bb_width": "REAL",
+        "message_text": "TEXT"
+    }
+    
+    for col_name, col_type in required_columns.items():
+        if col_name not in existing_columns:
+            try:
+                cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
+            except Exception as e:
+                print(f"Помилка додавання колонки {col_name}: {e}")
+                
     conn.commit()
     conn.close()
 
@@ -66,22 +97,20 @@ def evaluate_and_get_stats(fetch_data_func):
     for row in rows:
         sig_id, ticker, signal, entry_price, expiration_mins, timestamp_str, chat_id, message_id, message_text = row
         
-        # ⏱ Сувора перевірка часу експірації
         try:
             signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
             expiry_time = signal_time + timedelta(minutes=expiration_mins)
             if now < expiry_time:
-                continue  # Час експірації ще не минув, пропускаємо угоду
+                continue  # Час ще не вийшов
         except Exception as e:
             print(f"Помилка парсингу часу для сигналу {sig_id}: {e}")
             continue
         
-        # Отримуємо свіжі дані ринку для перевірки результату
         df = fetch_with_retry(fetch_data_func, ticker)
         if df.empty:
             continue
             
-        current_price = df['close'].iloc[-1]
+        current_price = float(df['close'].iloc[-1])
         diff = current_price - entry_price
         multiplier = 1000 if "JPY" in ticker.upper() else 100000
         pips = int(round(diff * multiplier))  # Цілі пункти
