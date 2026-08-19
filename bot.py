@@ -21,6 +21,9 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 analyzer = AdaptiveTechnicalAnalysis()
 ml_filter = TradingMLFilter()
 
+# Глобальний словник для захисту від спаму (кулдаун 5 хвилин = 300 секунд)
+last_sent_signals = {}
+
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -37,8 +40,7 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
             "includeAdjustedClose": "true"
         }
         
-        session.get("https://finance.yahoo.com", timeout=5)
-        response = session.get(url, params=params, timeout=10)
+        response = session.get(url, params=params, timeout=(3, 5))
         if response.status_code != 200:
             return pd.DataFrame()
             
@@ -94,7 +96,6 @@ def calculate_dynamic_expiration(df_fast, atr):
         return 5
 
 def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
-    """Фоновий потік для автоматичного оновлення результату по закінченню часу"""
     time.sleep(expiration_mins * 60)
     try:
         result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
@@ -165,9 +166,14 @@ def handle_text_menu(update, context):
         
         sent_signals_count = 0
         filtered_count = 0
+        current_time = time.time()
+        
         for name, ticker in PAIRS_MAP.items():
             try:
-                # Завантажуємо три таймфрейми для каскадного аналізу
+                # Кулдаун 5 хвилин (300 секунд) для захисту від спаму
+                if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
+                    continue
+
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
                 df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
@@ -178,7 +184,6 @@ def handle_text_menu(update, context):
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
                 
-                # Розраховуємо індикатори та ADX безпосередньо на 5-хвилинному графіку
                 df_indicators = analyzer.calculate_indicators(df_fast)
                 sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
                 
@@ -196,6 +201,8 @@ def handle_text_menu(update, context):
                     continue
                 
                 sent_signals_count += 1
+                last_sent_signals[ticker] = time.time()  
+                
                 atr = sig_data.get('atr')
                 expiration = calculate_dynamic_expiration(df_fast, atr)
                 current_price = df_fast['close'].iloc[-1]
@@ -218,7 +225,6 @@ def handle_text_menu(update, context):
                     rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
                 )
                 
-                # Запускаємо фоновий потік оновлення результату
                 threading.Thread(
                     target=delayed_signal_check,
                     args=(chat_id, sent_msg.message_id, signal_id, expiration, msg_text),
