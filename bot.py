@@ -79,20 +79,33 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
         print(f"Помилка завантаження {ticker}: {e}")
         return pd.DataFrame()
 
-def calculate_dynamic_expiration(df_fast, atr):
+def calculate_dynamic_expiration(df_fast, atr, adx=20):
+    """
+    Покращений підбір експірації: враховує і волатильність (ATR%), і силу тренду (ADX).
+    - Високий ADX (>30) = швидкий спрямований рух -> менший час (5 хв)
+    - Низький ADX (<18) = флет/коливання -> більший час (15-20 хв) для відпрацювання
+    """
     try:
         if atr is None or pd.isna(atr) or atr == 0:
-            return 5
-        price = df_fast['close'].iloc[-1]
-        atr_pct = (atr / price) * 100
-        if atr_pct < 0.05:
-            return 15
-        elif atr_pct < 0.15:
             return 10
+        price = float(df_fast['close'].iloc[-1])
+        atr_pct = (atr / price) * 100
+        
+        if adx > 30:
+            return 5   # Сильний імпульсний тренд
+        elif adx > 22:
+            return 10  # Помірний тренд
+        elif adx < 16:
+            return 20  # Широкий флет, потрібен більший запас часу
         else:
-            return 5
+            if atr_pct < 0.05:
+                return 15
+            elif atr_pct < 0.12:
+                return 10
+            else:
+                return 5
     except:
-        return 5
+        return 10
 
 @app.route("/")
 def index():
@@ -126,7 +139,7 @@ def ai_report_command(update, context):
 def handle_text_menu(update, context):
     chat_id = update.message.chat_id
     
-    # 🔄 Перевірка прострочених угод та оновлення повідомлень у чаті цілими пунктами
+    # 🔄 Автоперевірка завершених угод при натисканні будь-якої кнопки меню
     try:
         stats = database.evaluate_and_get_stats(fetch_yahoo_data)
         for sig in stats.get("updated_signals", []):
@@ -206,13 +219,12 @@ def handle_text_menu(update, context):
                 last_sent_signals[ticker] = time.time()  
                 
                 atr = sig_data.get('atr')
-                expiration = calculate_dynamic_expiration(df_fast, atr)
+                expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
                 current_price = float(df_fast['close'].iloc[-1])
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
                 
-                # Додано рядок ціни входу у повідомлення
                 msg_text = (
                     f"📊 {name} ({ticker})\n"
                     f"{icon} {action_text} | ⏱ {expiration} хв\n"
@@ -301,7 +313,7 @@ def button_callback(update, context):
             if signal_type not in ['CALL', 'PUT']:
                 query.edit_message_text(
                     text=f"ℹ️ По 🟢 **{name} ({ticker})** наразі сигнал **HOLD**. Торгові можливості відсутні.",
-                    parse_mode="Markdown"
+                    parse_Mode="Markdown"
                 )
                 return
 
@@ -318,13 +330,12 @@ def button_callback(update, context):
                 return
 
             atr = sig_data.get('atr')
-            expiration = calculate_dynamic_expiration(df_fast, atr)
+            expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
             current_price = float(df_fast['close'].iloc[-1])
             
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
 
-            # Додано рядок ціни входу у повідомлення
             text = (
                 f"📊 {name} ({ticker})\n"
                 f"{icon} {action_text} | ⏱ {expiration} хв\n"
