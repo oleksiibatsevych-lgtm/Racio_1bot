@@ -8,8 +8,6 @@ DB_NAME = "trading_stats.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
-    # Створюємо базову таблицю, якщо її немає
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,34 +28,21 @@ def init_db():
         )
     ''')
     
-    # Автоматична перевірка та додавання будь-яких відсутніх колонок (міграція)
+    # Автоміграція колонок на випадок старих баз
     cursor.execute("PRAGMA table_info(signals)")
     existing_columns = [col[1] for col in cursor.fetchall()]
-    
     required_columns = {
-        "ticker": "TEXT",
-        "signal": "TEXT",
-        "entry_price": "REAL",
-        "expiration_mins": "INTEGER",
-        "timestamp": "TEXT",
-        "status": "TEXT DEFAULT 'PENDING'",
-        "result": "TEXT DEFAULT 'UNKNOWN'",
-        "chat_id": "INTEGER",
-        "message_id": "INTEGER",
-        "pips": "INTEGER DEFAULT 0",
-        "rsi": "REAL",
-        "adx": "REAL",
-        "bb_width": "REAL",
-        "message_text": "TEXT"
+        "ticker": "TEXT", "signal": "TEXT", "entry_price": "REAL",
+        "expiration_mins": "INTEGER", "timestamp": "TEXT", "status": "TEXT DEFAULT 'PENDING'",
+        "result": "TEXT DEFAULT 'UNKNOWN'", "chat_id": "INTEGER", "message_id": "INTEGER",
+        "pips": "INTEGER DEFAULT 0", "rsi": "REAL", "adx": "REAL", "bb_width": "REAL", "message_text": "TEXT"
     }
-    
     for col_name, col_type in required_columns.items():
         if col_name not in existing_columns:
             try:
                 cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
-            except Exception as e:
-                print(f"Помилка додавання колонки {col_name}: {e}")
-                
+            except:
+                pass
     conn.commit()
     conn.close()
 
@@ -75,61 +60,66 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
     conn.close()
     return signal_id
 
-def fetch_with_retry(fetch_data_func, ticker, retries=3, delay=2):
-    for attempt in range(retries):
-        df = fetch_data_func(ticker, interval="15m", range_period="10d")
-        if not df.empty:
-            return df
-        time.sleep(delay)
-    return pd.DataFrame()
+def get_pending_signals():
+    init_db()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, message_text FROM signals WHERE status = 'PENDING'")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
-def evaluate_and_get_stats(fetch_data_func):
+def evaluate_single_signal(sig_id, fetch_data_func):
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    cursor.execute("SELECT id, ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, message_text FROM signals WHERE status = 'PENDING'")
-    rows = cursor.fetchall()
+    cursor.execute("SELECT ticker, signal, entry_price, chat_id, message_id, message_text, status FROM signals WHERE id = ?", (sig_id,))
+    row = cursor.fetchone()
+    if not row or row[6] != 'PENDING':
+        conn.close()
+        return None
+        
+    ticker, signal, entry_price, chat_id, message_id, message_text, _ = row
     
-    updated_signals = []
-    now = datetime.now()
+    # Отримуємо свіжі дані ринку
+    df = pd.DataFrame()
+    for _ in range(3):
+        df = fetch_data_func(ticker, interval="15m", range_period="10d")
+        if not df.empty:
+            break
+        time.sleep(2)
+        
+    if df.empty:
+        conn.close()
+        return None
+        
+    current_price = float(df['close'].iloc[-1])
+    diff = current_price - entry_price
+    multiplier = 1000 if "JPY" in ticker.upper() else 100000
+    pips = int(round(diff * multiplier))
     
-    for row in rows:
-        sig_id, ticker, signal, entry_price, expiration_mins, timestamp_str, chat_id, message_id, message_text = row
+    if signal == 'CALL':
+        result = 'WIN' if current_price > entry_price else 'LOSS'
+    else:
+        result = 'WIN' if current_price < entry_price else 'LOSS'
         
-        try:
-            signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-            expiry_time = signal_time + timedelta(minutes=expiration_mins)
-            if now < expiry_time:
-                continue  # Час ще не вийшов
-        except Exception as e:
-            print(f"Помилка парсингу часу для сигналу {sig_id}: {e}")
-            continue
-        
-        df = fetch_with_retry(fetch_data_func, ticker)
-        if df.empty:
-            continue
-            
-        current_price = float(df['close'].iloc[-1])
-        diff = current_price - entry_price
-        multiplier = 1000 if "JPY" in ticker.upper() else 100000
-        pips = int(round(diff * multiplier))  # Цілі пункти
-        
-        if signal == 'CALL':
-            result = 'WIN' if current_price > entry_price else 'LOSS'
-        else:
-            result = 'WIN' if current_price < entry_price else 'LOSS'
-            
-        cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, sig_id))
-        updated_signals.append({
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "result": result,
-            "pips": pips,
-            "message_text": message_text
-        })
-            
+    cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, sig_id))
     conn.commit()
+    conn.close()
+    
+    return {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "result": result,
+        "pips": pips,
+        "message_text": message_text
+    }
+
+def get_overall_stats():
+    init_db()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) FROM signals WHERE status = 'COMPLETED'")
     row = cursor.fetchone()
     conn.close()
@@ -137,5 +127,4 @@ def evaluate_and_get_stats(fetch_data_func):
     total = row[0] if row and row[0] else 0
     wins = row[1] if row and row[1] else 0
     winrate = round((wins / total) * 100, 1) if total > 0 else 0
-    
-    return {"total": total, "wins": wins, "winrate": winrate, "updated_signals": updated_signals}
+    return {"total": total, "wins": wins, "winrate": winrate}
