@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import threading
 import requests
 import pandas as pd
 from flask import Flask, request
@@ -91,6 +92,28 @@ def calculate_dynamic_expiration(df_mid, atr):
             return 5
     except:
         return 5
+
+def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
+    """Фоновий потік для автоматичного оновлення результату по закінченню часу"""
+    time.sleep(expiration_mins * 60)
+    try:
+        result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
+        if result:
+            pips_str = f"+{pips}" if pips > 0 else str(pips)
+            if result == 'WIN':
+                res_icon = f"🏁 Результат: ✅ WIN (Успіх) ({pips_str} п.)"
+            else:
+                res_icon = f"🏁 Результат: ❌ LOSS (Збитково) ({pips_str} п.)"
+                
+            updated_text = f"{original_text}\n{res_icon}"
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=updated_text,
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        print(f"Помилка фонової перевірки сигналу ID {signal_id}: {e}")
 
 @app.route("/")
 def index():
@@ -186,10 +209,17 @@ def handle_text_menu(update, context):
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
-                database.save_signal(
+                signal_id = database.save_signal(
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
-                    rsi=rsi, adx=adx, bb_width=bb_width
+                    rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
                 )
+                
+                # Запускаємо фоновий потік оновлення
+                threading.Thread(
+                    target=delayed_signal_check,
+                    args=(chat_id, sent_msg.message_id, signal_id, expiration, msg_text),
+                    daemon=True
+                ).start()
                 
                 time.sleep(0.5)
                 
@@ -206,10 +236,10 @@ def handle_text_menu(update, context):
         try:
             stats = database.evaluate_and_get_stats(fetch_yahoo_data)
             
-            # Автоматично дописуємо результати та пункти під старими повідомленнями в чаті
+            # Якщо фоновий потік не спрацював, кнопка статистики опрацює все автоматично за збереженим текстом
             for sig in stats.get("updated_signals", []):
                 try:
-                    if sig.get("chat_id") and sig.get("message_id"):
+                    if sig.get("chat_id") and sig.get("message_id") and sig.get("message_text"):
                         pips_val = sig['pips']
                         pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
                         
@@ -218,9 +248,9 @@ def handle_text_menu(update, context):
                         else:
                             res_icon = f"🏁 Результат: ❌ LOSS (Збитково) ({pips_str} п.)"
                         
-                        msg = bot.get_message(chat_id=sig["chat_id"], message_id=sig["message_id"])
-                        if msg and msg.text and "🏁 Результат" not in msg.text:
-                            new_text = f"{msg.text}\n{res_icon}"
+                        orig_txt = sig["message_text"]
+                        if "🏁 Результат" not in orig_txt:
+                            new_text = f"{orig_txt}\n{res_icon}"
                             bot.edit_message_text(
                                 chat_id=sig["chat_id"],
                                 message_id=sig["message_id"],
@@ -319,10 +349,16 @@ def button_callback(update, context):
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
-            database.save_signal(
+            signal_id = database.save_signal(
                 ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
-                rsi=rsi, adx=adx, bb_width=bb_width
+                rsi=rsi, adx=adx, bb_width=bb_width, message_text=text
             )
+            
+            threading.Thread(
+                target=delayed_signal_check,
+                args=(query.message.chat_id, query.message.message_id, signal_id, expiration, text),
+                daemon=True
+            ).start()
             
         except Exception as e:
             query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
