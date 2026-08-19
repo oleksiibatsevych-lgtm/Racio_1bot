@@ -4,6 +4,7 @@ import time
 import threading
 import requests
 import pandas as pd
+from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
@@ -96,8 +97,10 @@ def calculate_dynamic_expiration(df_fast, atr):
         return 5
 
 def delayed_signal_check(chat_id, message_id, signal_id, expiration_mins, original_text):
+    """Фонова перевірка сигналу через заданий час експірації без кнопок"""
     time.sleep(expiration_mins * 60)
     try:
+        # Використовуємо вашу функцію з database.py для оцінки результату
         result, pips = database.evaluate_single_signal(signal_id, fetch_yahoo_data)
         if result:
             pips_str = f"+{pips}" if pips > 0 else str(pips)
@@ -220,11 +223,13 @@ def handle_text_menu(update, context):
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
+                # Зберігаємо сигнал у базу даних із передачею всіх параметрів для повної сумісності
                 signal_id = database.save_signal(
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
                     rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
                 )
                 
+                # Автоматичний фоновий потік очікування експірації та закриття угоди без кнопок
                 threading.Thread(
                     target=delayed_signal_check,
                     args=(chat_id, sent_msg.message_id, signal_id, expiration, msg_text),
