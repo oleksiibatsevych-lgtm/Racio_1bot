@@ -23,21 +23,22 @@ def init_db():
             pips INTEGER DEFAULT 0,
             rsi REAL,
             adx REAL,
-            bb_width REAL
+            bb_width REAL,
+            message_text TEXT
         )
     ''')
     conn.commit()
     conn.close()
 
-def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, rsi=0.0, adx=0.0, bb_width=0.0):
+def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, rsi=0.0, adx=0.0, bb_width=0.0, message_text=""):
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
-        INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, rsi, adx, bb_width)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, rsi, adx, bb_width))
+        INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, rsi, adx, bb_width, message_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, rsi, adx, bb_width, message_text))
     signal_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -91,12 +92,12 @@ def evaluate_and_get_stats(fetch_data_func):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    cursor.execute("SELECT id, ticker, signal, entry_price, chat_id, message_id FROM signals WHERE status = 'PENDING'")
+    cursor.execute("SELECT id, ticker, signal, entry_price, chat_id, message_id, message_text FROM signals WHERE status = 'PENDING'")
     rows = cursor.fetchall()
     
     updated_signals = []
     for row in rows:
-        sig_id, ticker, signal, entry_price, chat_id, message_id = row
+        sig_id, ticker, signal, entry_price, chat_id, message_id, message_text = row
         df = fetch_with_retry(fetch_data_func, ticker)
         if not df.empty:
             current_price = df['close'].iloc[-1]
@@ -114,7 +115,8 @@ def evaluate_and_get_stats(fetch_data_func):
                 "chat_id": chat_id,
                 "message_id": message_id,
                 "result": result,
-                "pips": pips
+                "pips": pips,
+                "message_text": message_text
             })
             
     conn.commit()
