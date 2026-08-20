@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 DB_NAME = "trading_stats.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    # check_same_thread=False гарантує, що фонові потоки таймерів зможуть безпечно писати в базу
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS signals (
@@ -47,7 +48,7 @@ def init_db():
 
 def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, rsi=0.0, adx=0.0, bb_width=0.0, message_text=""):
     init_db()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     cursor = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
@@ -61,10 +62,10 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
 
 def get_pending_signals():
     init_db()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     cursor = conn.cursor()
     
-    # Автоматично закриваємо старі завислі сигнали (старші за 2 години), щоб вони не блокували статистику
+    # Автоматично закриваємо старі завислі сигнали (старші за 2 години)
     two_hours_ago = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("UPDATE signals SET status = 'EXPIRED', result = 'EXPIRED' WHERE status = 'PENDING' AND timestamp < ?", (two_hours_ago,))
     conn.commit()
@@ -76,30 +77,49 @@ def get_pending_signals():
 
 def evaluate_single_signal(sig_id, fetch_data_func):
     init_db()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     cursor = conn.cursor()
     
-    cursor.execute("SELECT ticker, signal, entry_price, chat_id, message_id, message_text, status FROM signals WHERE id = ?", (sig_id,))
+    # Витягуємо всі необхідні дані включно з часом створення та часом експірації
+    cursor.execute("""
+        SELECT ticker, signal, entry_price, chat_id, message_id, message_text, status, timestamp, expiration_mins 
+        FROM signals WHERE id = ?
+    """, (sig_id,))
     row = cursor.fetchone()
     if not row or row[6] != 'PENDING':
         conn.close()
         return None
         
-    ticker, signal, entry_price, chat_id, message_id, message_text, _ = row
+    ticker, signal, entry_price, chat_id, message_id, message_text, _, timestamp_str, expiration_mins = row
     
+    # Визначаємо точний час завершення угоди
+    signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+    expiry_time = signal_time + timedelta(minutes=expiration_mins)
+    
+    # Завантажуємо свіжі дані для точного пошуку ціни на момент експірації
     df = pd.DataFrame()
     for _ in range(3):
-        df = fetch_data_func(ticker, interval="15m", range_period="10d")
+        df = fetch_data_func(ticker, interval="5m", range_period="2d")
         if not df.empty:
             break
         time.sleep(2)
         
     if df.empty:
+        cursor.execute("UPDATE signals SET status = 'ERROR', result = 'ERROR' WHERE id = ?", (sig_id,))
+        conn.commit()
         conn.close()
         return None
         
-    current_price = float(df['close'].iloc[-1])
+    # Шукаємо ціну закриття свічки на момент експірації угоди
+    future_df = df[df.index >= expiry_time]
+    if not future_df.empty:
+        current_price = float(future_df['close'].iloc[0])
+    else:
+        current_price = float(df['close'].iloc[-1])
+        
     diff = current_price - entry_price
+    
+    # Розрахунок у цілих пунктах (1000 для JPY, 100000 для інших)
     multiplier = 1000 if "JPY" in ticker.upper() else 100000
     pips = int(round(diff * multiplier))
     
@@ -122,7 +142,7 @@ def evaluate_single_signal(sig_id, fetch_data_func):
 
 def get_overall_stats():
     init_db()
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) FROM signals WHERE status = 'COMPLETED'")
     row = cursor.fetchone()
