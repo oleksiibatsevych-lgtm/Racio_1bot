@@ -1,138 +1,130 @@
-import numpy as np
 import pandas as pd
+import numpy as np
 
 class AdaptiveTechnicalAnalysis:
-    def __init__(self):
-        self.rsi_window = 14
+    def calculate_indicators(self, df):
+        if df.empty or len(df) < 14:
+            return df
+        
+        # RSI 14
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        df['rsi'] = df['rsi'].fillna(50)
 
-    def calculate_adx(self, df: pd.DataFrame, window=14) -> pd.Series:
-        plus_dm = df['high'].diff()
-        minus_dm = df['low'].diff()
+        # Bollinger Bands
+        sma = df['close'].rolling(window=20).mean()
+        std = df['close'].rolling(window=20).std()
+        df['bb_upper'] = sma + (std * 2)
+        df['bb_lower'] = sma - (std * 2)
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
+        df['bb_width'] = df['bb_width'].fillna(0.001)
+
+        # ADX та ATR
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        plus_dm = high.diff()
+        minus_dm = low.diff()
         plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
         minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
-
-        tr1 = df['high'] - df['low']
-        tr2 = (df['high'] - df['close'].shift(1)).abs()
-        tr3 = (df['low'] - df['close'].shift(1)).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-        atr = tr.ewm(span=window, adjust=False).mean()
-        plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(span=window, adjust=False).mean() / (atr + 1e-9)
-        minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(span=window, adjust=False).mean() / (atr + 1e-9)
-
-        dx = 100 * (plus_di - minus_di).abs() / ((plus_di + minus_di) + 1e-9)
-        adx = dx.ewm(span=window, adjust=False).mean()
-        return adx
-
-    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        res_df = df.copy()
-        if isinstance(res_df.columns, pd.MultiIndex):
-            res_df.columns = res_df.columns.get_level_values(0)
-        res_df.columns = [str(c).lower() for c in res_df.columns]
-
-        delta = res_df['close'].diff()
-        gain = delta.clip(lower=0)
-        loss = -1 * delta.clip(upper=0.0)
-        avg_gain = gain.ewm(com=self.rsi_window - 1, adjust=False).mean()
-        avg_loss = loss.ewm(com=self.rsi_window - 1, adjust=False).mean()
-        rs = avg_gain / (avg_loss + 1e-9)
-        res_df['rsi'] = 100 - (100 / (1 + rs))
-
-        res_df['ema_10'] = res_df['close'].ewm(span=10, adjust=False).mean()
-        res_df['ema_20'] = res_df['close'].ewm(span=20, adjust=False).mean()
-
-        bb_window = 20
-        res_df['bb_middle'] = res_df['close'].rolling(window=bb_window).mean()
-        bb_std = res_df['close'].rolling(window=bb_window).std()
-        res_df['bb_upper'] = res_df['bb_middle'] + (bb_std * 2)
-        res_df['bb_lower'] = res_df['bb_middle'] - (bb_std * 2)
         
-        res_df['bb_width'] = (res_df['bb_upper'] - res_df['bb_lower']) / res_df['bb_middle']
-
-        res_df['local_support'] = res_df['low'].rolling(window=15).min()
-        res_df['local_resistance'] = res_df['high'].rolling(window=15).max()
-
-        tr1 = res_df['high'] - res_df['low']
-        tr2 = (res_df['high'] - res_df['close'].shift(1)).abs()
-        tr3 = (res_df['low'] - res_df['close'].shift(1)).abs()
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        res_df['atr'] = tr.ewm(span=14, adjust=False).mean()
+        atr = tr.rolling(window=14).mean()
+        df['atr'] = atr.fillna(0.0010)
 
-        res_df['adx'] = self.calculate_adx(res_df, window=14)
-        return res_df
+        plus_di = 100 * pd.Series(plus_dm).rolling(window=14).mean() / atr
+        minus_di = 100 * pd.Series(minus_dm).rolling(window=14).mean() / atr
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
+        df['adx'] = dx.rolling(window=14).mean().fillna(20)
 
-    def get_trend(self, df: pd.DataFrame, span_val=200) -> str:
-        if df is None or df.empty:
+        return df
+
+    def get_trend(self, df, span_val=50):
+        if df.empty or len(df) < span_val:
             return "NEUTRAL"
-        g_df = df.copy()
-        g_df['ema'] = g_df['close'].ewm(span=span_val, adjust=False).mean()
-        last_close = g_df['close'].iloc[-1]
-        last_ema = g_df['ema'].iloc[-1]
-        return "UP" if last_close > last_ema else "DOWN"
+        ema = df['close'].ewm(span=span_val, adjust=False).mean()
+        current_price = df['close'].iloc[-1]
+        current_ema = ema.iloc[-1]
+        if current_price > current_ema * 1.001:
+            return "BULLISH"
+        elif current_price < current_ema * 0.999:
+            return "BEARISH"
+        return "NEUTRAL"
 
-    def generate_signal(self, df_5m: pd.DataFrame, global_trend: str, mid_trend: str, asset_name: str) -> dict:
-        default = {
-            "signal": "HOLD", "rsi": None, "atr": None, "adx": None,
-            "reason": "No setup", "global_trend": global_trend,
-            "mid_trend": mid_trend, "local_trend": "NEUTRAL"
+    def calculate_pivots(self, df_macro):
+        """Розрахунок ключових рівнів Pivot Points"""
+        if df_macro.empty or len(df_macro) < 2:
+            return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
+        high = float(df_macro['high'].iloc[-2])
+        low = float(df_macro['low'].iloc[-2])
+        close = float(df_macro['close'].iloc[-2])
+        p = (high + low + close) / 3
+        r1 = (2 * p) - low
+        s1 = (2 * p) - high
+        r2 = p + (high - low)
+        s2 = p - (high - low)
+        return {"P": p, "R1": r1, "S1": s1, "R2": r2, "S2": s2}
+
+    def detect_divergence(self, df):
+        """Визначення цінових дивергенцій між ціною та RSI"""
+        if df.empty or 'rsi' not in df.columns or len(df) < 15:
+            return "NONE"
+        
+        recent_prices = df['close'].iloc[-10:].values
+        recent_rsi = df['rsi'].iloc[-10:].values
+        
+        # Бичача дивергенція: ціна формує нижчий мінімум, а RSI — вищий
+        price_lower_low = recent_prices[-1] < recent_prices[-5] and recent_prices[-5] < recent_prices[0]
+        rsi_higher_low = recent_rsi[-1] > recent_rsi[-5] and recent_rsi[-5] > recent_rsi[0]
+        if price_lower_low and rsi_higher_low:
+            return "BULLISH_DIV"
+
+        # Ведмежа дивергенція: ціна формує вищий максимум, а RSI — нижчий
+        price_higher_high = recent_prices[-1] > recent_prices[-5] and recent_prices[-5] > recent_prices[0]
+        rsi_lower_high = recent_rsi[-1] < recent_rsi[-5] and recent_rsi[-5] < recent_rsi[0]
+        if price_higher_high and rsi_lower_high:
+            return "BEARISH_DIV"
+
+        return "NONE"
+
+    def generate_signal(self, df, global_trend, mid_trend, ticker):
+        if df.empty or len(df) < 15:
+            return {'signal': 'HOLD', 'reason': 'Мало даних'}
+
+        last_row = df.iloc[-1]
+        rsi = float(last_row.get('rsi', 50))
+        adx = float(last_row.get('adx', 20))
+        atr = float(last_row.get('atr', 0.001))
+        div = self.detect_divergence(df)
+
+        signal = 'HOLD'
+        reason_parts = []
+
+        if global_trend == 'BULLISH' and mid_trend in ['BULLISH', 'NEUTRAL']:
+            if rsi < 38 or div == 'BULLISH_DIV':
+                signal = 'CALL'
+                reason_parts.append("Тренд вгору")
+                if rsi < 38: reason_parts.append(f"RSI перепроданий ({rsi:.1f})")
+                if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція RSI")
+        elif global_trend == 'BEARISH' and mid_trend in ['BEARISH', 'NEUTRAL']:
+            if rsi > 62 or div == 'BEARISH_DIV':
+                signal = 'PUT'
+                reason_parts.append("Тренд вниз")
+                if rsi > 62: reason_parts.append(f"RSI перекуплений ({rsi:.1f})")
+                if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція RSI")
+
+        reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
+        return {
+            'signal': signal,
+            'rsi': round(rsi, 1),
+            'adx': round(adx, 1),
+            'atr': atr,
+            'divergence': div,
+            'reason': reason
         }
-        if len(df_5m) < 25:
-            return default
-
-        last = df_5m.iloc[-1]
-        c = last['close']
-        l_sup = last['local_support']
-        l_res = last['local_resistance']
-        rsi = last['rsi']
-        atr = last['atr']
-        adx = last['adx']
-        ema10 = last['ema_10']
-        bb_lower = last['bb_lower']
-        bb_upper = last['bb_upper']
-        bb_width = last.get('bb_width', 0.01)
-
-        min_width = 0.0005 if "JPY" in asset_name.upper() else 0.001
-        if bb_width < min_width:
-            return {
-                "signal": "HOLD", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                "reason": "Низька волатильність (Флет Боллінджера)",
-                "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": "FLAT"
-            }
-
-        local_trend = "UP" if c > ema10 else "DOWN"
-        is_flat = adx < 22
-
-        if is_flat:
-            if c <= bb_lower or (abs(c - l_sup) / c < 0.005 and rsi < 45):
-                return {
-                    "signal": "CALL", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                    "reason": f"Флєт 5m (ADX: {round(adx, 1)}) + Відскок від межі BB/Підтримки (RSI: {round(rsi, 1)})",
-                    "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
-                }
-            elif c >= bb_upper or (abs(c - l_res) / c < 0.005 and rsi > 55):
-                return {
-                    "signal": "PUT", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                    "reason": f"Флєт 5m (ADX: {round(adx, 1)}) + Відскок від межі BB/Опору (RSI: {round(rsi, 1)})",
-                    "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
-                }
-        else:
-            dist_sup = abs(c - l_sup) / c
-            dist_res = abs(c - l_res) / c
-
-            if (global_trend == "UP" or mid_trend == "UP") and local_trend == "UP":
-                if rsi < 52 or dist_sup < 0.012 or c > ema10:
-                    return {
-                        "signal": "CALL", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                        "reason": f"Тренд ВГОРУ 5m (ADX: {round(adx, 1)}) + Адаптивний RSI/Імпульс",
-                        "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
-                    }
-
-            if (global_trend == "DOWN" or mid_trend == "DOWN") and local_trend == "DOWN":
-                if rsi > 48 or dist_res < 0.012 or c < ema10:
-                    return {
-                        "signal": "PUT", "rsi": round(float(rsi), 2), "atr": round(float(atr), 5), "adx": round(float(adx), 2),
-                        "reason": f"Тренд ВНИЗ 5m (ADX: {round(adx, 1)}) + Адаптивний RSI/Імпульс",
-                        "global_trend": global_trend, "mid_trend": mid_trend, "local_trend": local_trend
-                    }
-
-        return default
