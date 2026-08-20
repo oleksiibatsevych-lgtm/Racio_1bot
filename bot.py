@@ -97,7 +97,7 @@ def calculate_dynamic_expiration(df_fast, atr, adx=20):
         return 10
 
 def process_signal_expiration(sig_id):
-    """Спрацьовує точно в момент закінчення експірації угоди"""
+    """Спрацьовує точно в момент закінчення експірації угоди та оновлює повідомлення"""
     try:
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
@@ -138,7 +138,7 @@ def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
         print(f"Помилка планування таймера для сигналу {sig_id}: {e}")
 
 def restore_pending_timers():
-    """Відновлює таймери для активних угод із затримкою, щоб не тригерити захист Yahoo"""
+    """Відновлює таймери для активних угод із затримкою"""
     pending = database.get_pending_signals()
     for i, row in enumerate(pending):
         sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
@@ -149,7 +149,7 @@ def restore_pending_timers():
             
             delay = (expiry_time - now).total_seconds()
             if delay < 0:
-                delay = 2 + (i * 3)  # Розносимо запуск старих угод у часі
+                delay = 2 + (i * 3)
                 
             timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
@@ -271,7 +271,6 @@ def handle_text_menu(update, context):
                 )
                 
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
-                
                 time.sleep(0.5)
                 
             except Exception as e:
