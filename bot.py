@@ -25,19 +25,10 @@ ml_filter = TradingMLFilter()
 last_sent_signals = {}
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
-    """Повністю безпечна для багатопоточності функція запиту даних Yahoo Finance"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        params = {
-            "interval": interval,
-            "range": range_period,
-            "includeAdjustedClose": "true"
-        }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9"
-        }
+        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         
         response = requests.get(url, headers=headers, params=params, timeout=(3, 5))
         if response.status_code != 200:
@@ -55,29 +46,49 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
         if not timestamps or not quotes:
             return pd.DataFrame()
             
-        opens = quotes.get("open", [])
-        highs = quotes.get("high", [])
-        lows = quotes.get("low", [])
-        closes = quotes.get("close", [])
-        volumes = quotes.get("volume", [])
-        
-        vol_data = volumes if volumes else [0] * len(timestamps)
-        
         df = pd.DataFrame({
-            "open": opens,
-            "high": highs,
-            "low": lows,
-            "close": closes,
-            "volume": vol_data
+            "open": quotes.get("open", []),
+            "high": quotes.get("high", []),
+            "low": quotes.get("low", []),
+            "close": quotes.get("close", []),
+            "volume": quotes.get("volume", [0] * len(timestamps))
         }, index=pd.to_datetime(timestamps, unit="s"))
         
         df.dropna(subset=["open", "high", "low", "close"], inplace=True)
         df["volume"] = df["volume"].fillna(0)
-        
         return df
     except Exception as e:
         print(f"Помилка завантаження {ticker}: {e}")
         return pd.DataFrame()
+
+def get_current_session_info():
+    """Визначає поточну світову торгову сесію за UTC"""
+    now_utc = datetime.utcnow()
+    hour = now_utc.hour
+    sessions = []
+    session_code = 1
+    if 0 <= hour < 8:
+        sessions.append("Азія")
+        session_code = 0
+    if 7 <= hour < 16:
+        sessions.append("Лондон")
+        session_code = 1
+    if 13 <= hour < 21:
+        sessions.append("Нью-Йорк")
+        session_code = 2
+    if 13 <= hour < 16:
+        sessions.append("🔥 Перетин Лондон/Нью-Йорк")
+        session_code = 3
+    
+    session_str = ", ".join(sessions) if sessions else "Тихоокеанська сесія"
+    return session_str, session_code, hour
+
+def is_news_blackout_window():
+    """Фільтр хвилинок підвищеного новинного ризику (перші хвилини годин високої активності)"""
+    now_utc = datetime.utcnow()
+    if now_utc.minute < 10 and now_utc.hour in [12, 13, 14, 15, 18]:
+        return True
+    return False
 
 def calculate_dynamic_expiration(df_fast, atr, adx=20):
     try:
@@ -85,80 +96,52 @@ def calculate_dynamic_expiration(df_fast, atr, adx=20):
             return 10
         price = float(df_fast['close'].iloc[-1])
         atr_pct = (atr / price) * 100
-        if adx > 30:
-            return 5
-        elif adx > 22:
-            return 10
-        elif adx < 16:
-            return 20
-        else:
-            return 15 if atr_pct < 0.05 else (10 if atr_pct < 0.12 else 5)
+        if adx > 30: return 5
+        elif adx > 22: return 10
+        elif adx < 16: return 20
+        else: return 15 if atr_pct < 0.05 else (10 if atr_pct < 0.12 else 5)
     except:
         return 10
 
 def process_signal_expiration(sig_id):
-    """Спрацьовує точно в момент закінчення експірації угоди та оновлює повідомлення"""
     try:
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
             pips_val = res_data['pips']
             pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
             
-            if res_data['result'] == 'WIN':
-                res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
-            else:
-                res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
-            
+            res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)" if res_data['result'] == 'WIN' else f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
             orig_txt = res_data["message_text"]
             if "🏁 Результат" not in orig_txt:
-                new_text = f"{orig_txt}\n{res_icon}"
-                bot.edit_message_text(
-                    chat_id=res_data["chat_id"],
-                    message_id=res_data["message_id"],
-                    text=new_text
-                )
+                bot.edit_message_text(chat_id=res_data["chat_id"], message_id=res_data["message_id"], text=f"{orig_txt}\n{res_icon}")
     except Exception as e:
-        print(f"Помилка таймера експірації для сигналу {sig_id}: {e}")
+        print(f"Помилка таймера експірації {sig_id}: {e}")
 
 def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
-    """Створює точковий таймер очікування закінчення часу угоди"""
     try:
         signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
-        now = datetime.now()
-        
-        delay = (expiry_time - now).total_seconds()
-        if delay < 0:
-            delay = 1
-            
+        delay = max((expiry_time - datetime.now()).total_seconds(), 1)
         timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
         timer.daemon = True
         timer.start()
     except Exception as e:
-        print(f"Помилка планування таймера для сигналу {sig_id}: {e}")
+        print(f"Помилка планування таймера {sig_id}: {e}")
 
 def restore_pending_timers():
-    """Відновлює таймери для активних угод із затримкою"""
     pending = database.get_pending_signals()
     for i, row in enumerate(pending):
         sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
         try:
-            signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-            expiry_time = signal_time + timedelta(minutes=expiration_mins)
-            now = datetime.now()
-            
-            delay = (expiry_time - now).total_seconds()
-            if delay < 0:
-                delay = 2 + (i * 3)
-                
+            expiry_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S") + timedelta(minutes=expiration_mins)
+            delay = max((expiry_time - datetime.now()).total_seconds(), 2 + (i * 2))
             timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
-        except Exception as e:
-            print(f"Помилка відновлення таймера для сигналу {sig_id}: {e}")
-    print(f"⏳ Відновлено активних таймерів угод: {len(pending)}")
+        except:
+            pass
+    print(f"⏳ Відновлено активних таймерів: {len(pending)}")
 
-# Відновлюємо незавершені таймери при запуску
 restore_pending_timers()
 
 @app.route("/")
@@ -176,19 +159,11 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    update.message.reply_text(
-        "Бот Racio_1 успішно запущений! 🚀 Оберіть потрібну опцію в меню нижче:",
-        reply_markup=reply_markup
-    )
+    update.message.reply_text("Бот Racio_1 готовий до роботи з повною комплексною стратегією! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
-    success, msg = ml_filter.train_model()
+    _, msg = ml_filter.train_model()
     update.message.reply_text(msg)
-
-def ai_report_command(update, context):
-    report = ml_filter.generate_strategy_report()
-    update.message.reply_text(report, parse_mode="Markdown")
 
 def handle_text_menu(update, context):
     chat_id = update.message.chat_id
@@ -199,14 +174,17 @@ def handle_text_menu(update, context):
         keyboard = []
         for i in range(0, len(pairs), 2):
             row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
-            if i + 1 < len(pairs):
-                row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
+            if i + 1 < len(pairs): row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
             keyboard.append(row)
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        update.message.reply_text("📌 Оберіть пару для технічного аналізу:", reply_markup=reply_markup)
+        update.message.reply_text("📌 Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(keyboard))
         
     elif text == "📊 Аналіз усіх пар":
-        update.message.reply_text("🔄 Сканування та ШІ-фільтрація всіх пар (1h + 15m + 5m)...")
+        if is_news_blackout_window():
+            update.message.reply_text("⚠️ Увага: Зараз період підвищеної новинної волатильності. Сканування тимчасово призупинено для захисту капіталу.")
+            return
+
+        update.message.reply_text("🔄 Глибоке сканування та ШІ-фільтрація (Сесії + Дивергенції + Pivot)...")
+        session_str, session_code, hour = get_current_session_info()
         
         sent_signals_count = 0
         filtered_count = 0
@@ -221,25 +199,28 @@ def handle_text_menu(update, context):
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
                 df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
                 
-                if df_macro.empty or df_mid.empty or df_fast.empty:
-                    continue
+                if df_macro.empty or df_mid.empty or df_fast.empty: continue
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
+                pivots = analyzer.calculate_pivots(df_macro)
                 
                 df_indicators = analyzer.calculate_indicators(df_fast)
                 sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
                 
                 signal_type = sig_data.get('signal')
-                if signal_type not in ['CALL', 'PUT']:
-                    continue
+                if signal_type not in ['CALL', 'PUT']: continue
                 
                 rsi = sig_data.get('rsi', 50)
                 adx = sig_data.get('adx', 20)
                 bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
+                div_code = 1 if sig_data.get('divergence') != 'NONE' else 0
                 
-                win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width)
-                if win_probability < 0.52:
+                current_price = float(df_fast['close'].iloc[-1])
+                dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
+                
+                win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width, session_code, hour, div_code, dist_pivot)
+                if win_probability < 0.54:
                     filtered_count += 1
                     continue
                 
@@ -248,7 +229,6 @@ def handle_text_menu(update, context):
                 
                 atr = sig_data.get('atr')
                 expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
-                current_price = float(df_fast['close'].iloc[-1])
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -258,9 +238,10 @@ def handle_text_menu(update, context):
                     f"{icon} {action_text} | ⏱ {expiration} хв\n"
                     f"🎯 Ціна входу: {current_price:.5f}\n"
                     f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                    f"📉 RSI: {rsi} | ADX (5m): {adx}\n"
+                    f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {sig_data.get('divergence')}\n"
+                    f"🌐 Сесія: {session_str}\n"
                     f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
-                    f"💡 Причина: {sig_data.get('reason')}"
+                    f"💡 Точна причина: {sig_data.get('reason')}"
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
@@ -269,61 +250,48 @@ def handle_text_menu(update, context):
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
                     rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
                 )
-                
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 time.sleep(0.5)
-                
             except Exception as e:
-                print(f"Помилка сканування {ticker}: {e}")
+                print(f"Помилка {ticker}: {e}")
                 
-        bot.send_message(
-            chat_id=chat_id, 
-            text=f"✅ Сканування завершено!\n📤 Надіслано сильних сигналів: {sent_signals_count}\n🛡 Відсіяно ШІ як ризикові: {filtered_count}"
-        )
+        bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено!\n📤 Надіслано сильних сигналів: {sent_signals_count}\n🛡 Відсіяно ШІ/фільтрами: {filtered_count}")
         
     elif text == "📈 Статистика":
-        update.message.reply_text("🔄 Оновлення статистики...")
+        update.message.reply_text("🔄 Розрахунок правдивої статистики...")
         try:
             stats = database.get_overall_stats()
             ml_filter.train_model()
-            
             stats_text = (
                 f"📈 **Правдива статистика трейдингу:**\n"
                 f"• Успішних угод (WIN): {stats.get('wins', 0)}\n"
                 f"• Усього перевірених угод: {stats.get('total', 0)}\n"
                 f"• Реальний вінрейт: **{stats.get('winrate', 0)}%**\n\n"
-                f"🤖 *Модель успішно перенавчена на найсвіжіших даних.*"
+                f"🤖 *Модель успішно перенавчена.*"
             )
-            
-            keyboard = [[InlineKeyboardButton("📊 Отримати звіт ШІ та поради", callback_data="get_ai_report")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            update.message.reply_text(stats_text, parse_mode="Markdown", reply_markup=reply_markup)
+            update.message.reply_text(stats_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Звіт ШІ", callback_data="get_ai_report")]]))
         except Exception as e:
-            update.message.reply_text(f"• Помилка розрахунку статистики: {e}")
+            update.message.reply_text(f"Помилка статистики: {e}")
 
 def button_callback(update, context):
     query = update.callback_query
-    try:
-        query.answer()
-    except Exception as e:
-        print(f"Попередження query.answer(): {e}")
-        
-    data = query.data
+    try: query.answer()
+    except: pass
     
-    if data == "get_ai_report":
-        report = ml_filter.generate_strategy_report()
-        query.edit_message_text(text=report, parse_mode="Markdown")
+    if query.data == "get_ai_report":
+        query.edit_message_text(text=ml_filter.generate_strategy_report(), parse_mode="Markdown")
         return
 
-    if data.startswith("scan_"):
-        ticker = data.replace("scan_", "")
+    if query.data.startswith("scan_"):
+        if is_news_blackout_window():
+            query.edit_message_text(text="⚠️ Новинне вікно високого ризику. Сканування заблоковано.")
+            return
+
+        ticker = query.data.replace("scan_", "")
         name = next((k for k, v in PAIRS_MAP.items() if v == ticker), ticker)
+        session_str, session_code, hour = get_current_session_info()
         
-        query.edit_message_text(
-            text=f"🔄 Аналіз для **{name} ({ticker})** (1h + 15m + 5m)...",
-            parse_mode="Markdown"
-        )
+        query.edit_message_text(text=f"🔄 Аналіз **{name}** з урахуванням сесій та дивергенцій...", parse_mode="Markdown")
         try:
             df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
@@ -335,34 +303,31 @@ def button_callback(update, context):
 
             global_trend = analyzer.get_trend(df_macro, span_val=200)
             mid_trend = analyzer.get_trend(df_mid, span_val=50)
+            pivots = analyzer.calculate_pivots(df_macro)
             
             df_indicators = analyzer.calculate_indicators(df_fast)
             sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
             
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
-                query.edit_message_text(
-                    text=f"ℹ️ По 🟢 **{name} ({ticker})** наразі сигнал **HOLD**. Торгові можливості відсутні.",
-                    parse_mode="Markdown"
-                )
+                query.edit_message_text(text=f"ℹ️ По **{name}** наразі сигнал **HOLD** (умови не сформовані).", parse_mode="Markdown")
                 return
 
             rsi = sig_data.get('rsi', 50)
             adx = sig_data.get('adx', 20)
             bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
+            div_code = 1 if sig_data.get('divergence') != 'NONE' else 0
             
-            win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width)
-            if win_probability < 0.52:
-                query.edit_message_text(
-                    text=f"🛡 По **{name}** знайдено сигнал `{signal_type}`, але ШІ-фільтр відхилив його через високий ризик (Ймовірність успіху: `{round(win_probability * 100, 1)}%`).",
-                    parse_mode="Markdown"
-                )
+            current_price = float(df_fast['close'].iloc[-1])
+            dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
+            
+            win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width, session_code, hour, div_code, dist_pivot)
+            if win_probability < 0.54:
+                query.edit_message_text(text=f"🛡 ШІ відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% є нижчою за поріг безпеки).", parse_mode="Markdown")
                 return
 
             atr = sig_data.get('atr')
             expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
-            current_price = float(df_fast['close'].iloc[-1])
-            
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
 
@@ -371,9 +336,10 @@ def button_callback(update, context):
                 f"{icon} {action_text} | ⏱ {expiration} хв\n"
                 f"🎯 Ціна входу: {current_price:.5f}\n"
                 f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                f"📉 RSI: {rsi} | ADX (5m): {adx}\n"
+                f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {sig_data.get('divergence')}\n"
+                f"🌐 Сесія: {session_str}\n"
                 f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
-                f"💡 Причина: {sig_data.get('reason')}"
+                f"💡 Точна причина: {sig_data.get('reason')}"
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
@@ -382,14 +348,11 @@ def button_callback(update, context):
                 ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
                 rsi=rsi, adx=adx, bb_width=bb_width, message_text=text
             )
-            
             schedule_signal_timer(sig_id, timestamp_str, expiration)
-            
         except Exception as e:
             query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
 
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("train_ml", train_ml_command))
-dispatcher.add_handler(CommandHandler("ai_report", ai_report_command))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
