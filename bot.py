@@ -138,11 +138,24 @@ def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
         print(f"Помилка планування таймера для сигналу {sig_id}: {e}")
 
 def restore_pending_timers():
-    """Відновлює таймери для всіх активних угод при старті бота"""
+    """Відновлює таймери для активних угод із затримкою, щоб не тригерити захист Yahoo"""
     pending = database.get_pending_signals()
-    for row in pending:
+    for i, row in enumerate(pending):
         sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
-        schedule_signal_timer(sig_id, timestamp_str, expiration_mins)
+        try:
+            signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+            expiry_time = signal_time + timedelta(minutes=expiration_mins)
+            now = datetime.now()
+            
+            delay = (expiry_time - now).total_seconds()
+            if delay < 0:
+                delay = 2 + (i * 3)  # Розносимо запуск старих угод у часі
+                
+            timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
+            timer.daemon = True
+            timer.start()
+        except Exception as e:
+            print(f"Помилка відновлення таймера для сигналу {sig_id}: {e}")
     print(f"⏳ Відновлено активних таймерів угод: {len(pending)}")
 
 # Відновлюємо незавершені таймери при запуску
