@@ -6,8 +6,9 @@ from datetime import datetime, timedelta
 DB_NAME = "trading_stats.db"
 
 def init_db():
-    # check_same_thread=False гарантує, що фонові потоки таймерів зможуть безпечно писати в базу
+    # check_same_thread=False та режим WAL гарантують безпечну роботу фонових потоків таймерів з базою
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS signals (
@@ -49,6 +50,7 @@ def init_db():
 def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, rsi=0.0, adx=0.0, bb_width=0.0, message_text=""):
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
@@ -63,6 +65,7 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
 def get_pending_signals():
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     
     # Автоматично закриваємо старі завислі сигнали (старші за 2 години)
@@ -78,9 +81,9 @@ def get_pending_signals():
 def evaluate_single_signal(sig_id, fetch_data_func):
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     
-    # Витягуємо всі необхідні дані включно з часом створення та часом експірації
     cursor.execute("""
         SELECT ticker, signal, entry_price, chat_id, message_id, message_text, status, timestamp, expiration_mins 
         FROM signals WHERE id = ?
@@ -92,11 +95,9 @@ def evaluate_single_signal(sig_id, fetch_data_func):
         
     ticker, signal, entry_price, chat_id, message_id, message_text, _, timestamp_str, expiration_mins = row
     
-    # Визначаємо точний час завершення угоди
     signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
     expiry_time = signal_time + timedelta(minutes=expiration_mins)
     
-    # Завантажуємо свіжі дані для точного пошуку ціни на момент експірації
     df = pd.DataFrame()
     for _ in range(3):
         df = fetch_data_func(ticker, interval="5m", range_period="2d")
@@ -110,24 +111,24 @@ def evaluate_single_signal(sig_id, fetch_data_func):
         conn.close()
         return None
         
-    # Шукаємо ціну закриття свічки на момент експірації угоди
     future_df = df[df.index >= expiry_time]
     if not future_df.empty:
         current_price = float(future_df['close'].iloc[0])
     else:
         current_price = float(df['close'].iloc[-1])
         
-    diff = current_price - entry_price
-    
-    # Розрахунок у цілих пунктах (1000 для JPY, 100000 для інших)
     multiplier = 1000 if "JPY" in ticker.upper() else 100000
-    pips = int(round(diff * multiplier))
     
+    # Сувора логіка розрахунку пунктів та результату для CALL і PUT
     if signal == 'CALL':
+        diff_pips = current_price - entry_price
         result = 'WIN' if current_price > entry_price else 'LOSS'
-    else:
+    else:  # PUT
+        diff_pips = entry_price - current_price
         result = 'WIN' if current_price < entry_price else 'LOSS'
         
+    pips = int(round(diff_pips * multiplier))
+    
     cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, sig_id))
     conn.commit()
     conn.close()
@@ -143,6 +144,7 @@ def evaluate_single_signal(sig_id, fetch_data_func):
 def get_overall_stats():
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) FROM signals WHERE status = 'COMPLETED'")
     row = cursor.fetchone()
