@@ -28,7 +28,6 @@ def init_db():
         )
     ''')
     
-    # Автоміграція колонок на випадок старих баз
     cursor.execute("PRAGMA table_info(signals)")
     existing_columns = [col[1] for col in cursor.fetchall()]
     required_columns = {
@@ -64,6 +63,12 @@ def get_pending_signals():
     init_db()
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    
+    # Автоматично закриваємо старі завислі сигнали (старші за 2 години), щоб вони не блокували статистику
+    two_hours_ago = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute("UPDATE signals SET status = 'EXPIRED', result = 'EXPIRED' WHERE status = 'PENDING' AND timestamp < ?", (two_hours_ago,))
+    conn.commit()
+    
     cursor.execute("SELECT id, ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, message_text FROM signals WHERE status = 'PENDING'")
     rows = cursor.fetchall()
     conn.close()
@@ -82,7 +87,6 @@ def evaluate_single_signal(sig_id, fetch_data_func):
         
     ticker, signal, entry_price, chat_id, message_id, message_text, _ = row
     
-    # Отримуємо свіжі дані ринку
     df = pd.DataFrame()
     for _ in range(3):
         df = fetch_data_func(ticker, interval="15m", range_period="10d")
