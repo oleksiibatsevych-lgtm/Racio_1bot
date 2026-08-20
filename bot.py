@@ -24,38 +24,56 @@ ml_filter = TradingMLFilter()
 
 last_sent_signals = {}
 
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9"
-})
-
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
+    """Повністю безпечна для багатопоточності функція запиту даних Yahoo Finance"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
-        response = session.get(url, params=params, timeout=(3, 5))
+        params = {
+            "interval": interval,
+            "range": range_period,
+            "includeAdjustedClose": "true"
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+        
+        response = requests.get(url, headers=headers, params=params, timeout=(3, 5))
         if response.status_code != 200:
             return pd.DataFrame()
+            
         data = response.json()
         result = data.get("chart", {}).get("result")
         if not result:
             return pd.DataFrame()
+            
         res = result[0]
         timestamps = res.get("timestamp", [])
         quotes = res.get("indicators", {}).get("quote", [{}])[0]
+        
         if not timestamps or not quotes:
             return pd.DataFrame()
+            
+        opens = quotes.get("open", [])
+        highs = quotes.get("high", [])
+        lows = quotes.get("low", [])
+        closes = quotes.get("close", [])
+        volumes = quotes.get("volume", [])
+        
+        vol_data = volumes if volumes else [0] * len(timestamps)
+        
         df = pd.DataFrame({
-            "open": quotes.get("open", []),
-            "high": quotes.get("high", []),
-            "low": quotes.get("low", []),
-            "close": quotes.get("close", []),
-            "volume": quotes.get("volume", []) or [0] * len(timestamps)
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": vol_data
         }, index=pd.to_datetime(timestamps, unit="s"))
+        
         df.dropna(subset=["open", "high", "low", "close"], inplace=True)
         df["volume"] = df["volume"].fillna(0)
+        
         return df
     except Exception as e:
         print(f"Помилка завантаження {ticker}: {e}")
@@ -79,7 +97,7 @@ def calculate_dynamic_expiration(df_fast, atr, adx=20):
         return 10
 
 def process_signal_expiration(sig_id):
-    """Ця функція викликається таймером точно в момент закінчення експірації угоди"""
+    """Спрацьовує точно в момент закінчення експірації угоди"""
     try:
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
@@ -103,7 +121,7 @@ def process_signal_expiration(sig_id):
         print(f"Помилка таймера експірації для сигналу {sig_id}: {e}")
 
 def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
-    """Створює точний таймер очікування закінчення часу угоди"""
+    """Створює точковий таймер очікування закінчення часу угоди"""
     try:
         signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
@@ -111,7 +129,7 @@ def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
         
         delay = (expiry_time - now).total_seconds()
         if delay < 0:
-            delay = 1  # Якщо час вже минув поки бот спав
+            delay = 1
             
         timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
         timer.daemon = True
@@ -127,7 +145,7 @@ def restore_pending_timers():
         schedule_signal_timer(sig_id, timestamp_str, expiration_mins)
     print(f"⏳ Відновлено активних таймерів угод: {len(pending)}")
 
-# Запускаємо відновлення таймерів при запуску програми
+# Відновлюємо незавершені таймери при запуску
 restore_pending_timers()
 
 @app.route("/")
@@ -233,14 +251,12 @@ def handle_text_menu(update, context):
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
-                # Зберігаємо сигнал і отримуємо його ID
                 timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 sig_id = database.save_signal(
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
                     rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
                 )
                 
-                # Запускаємо точний таймер для цього сигналу
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
                 time.sleep(0.5)
@@ -335,7 +351,6 @@ def button_callback(update, context):
             expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
             current_price = float(df_fast['close'].iloc[-1])
             
-            icon = "🟢" =="CALL" if signal_type == "CALL" else "🔴" # syntax fix inside string format below
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
 
