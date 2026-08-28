@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 DB_NAME = "trading_stats.db"
 
 def init_db():
-    # check_same_thread=False та режим WAL гарантують безпечну роботу фонових потоків таймерів з базою
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
@@ -26,6 +25,11 @@ def init_db():
             rsi REAL,
             adx REAL,
             bb_width REAL,
+            z_score REAL,
+            session_code INTEGER,
+            hour INTEGER,
+            divergence TEXT,
+            dist_pivot REAL,
             message_text TEXT
         )
     ''')
@@ -36,7 +40,9 @@ def init_db():
         "ticker": "TEXT", "signal": "TEXT", "entry_price": "REAL",
         "expiration_mins": "INTEGER", "timestamp": "TEXT", "status": "TEXT DEFAULT 'PENDING'",
         "result": "TEXT DEFAULT 'UNKNOWN'", "chat_id": "INTEGER", "message_id": "INTEGER",
-        "pips": "INTEGER DEFAULT 0", "rsi": "REAL", "adx": "REAL", "bb_width": "REAL", "message_text": "TEXT"
+        "pips": "INTEGER DEFAULT 0", "rsi": "REAL", "adx": "REAL", "bb_width": "REAL",
+        "z_score": "REAL", "session_code": "INTEGER", "hour": "INTEGER",
+        "divergence": "TEXT", "dist_pivot": "REAL", "message_text": "TEXT"
     }
     for col_name, col_type in required_columns.items():
         if col_name not in existing_columns:
@@ -47,16 +53,20 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, rsi=0.0, adx=0.0, bb_width=0.0, message_text=""):
+def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, 
+                rsi=0.0, adx=0.0, bb_width=0.0, z_score=0.0, session_code=1, hour=12, 
+                divergence="NONE", dist_pivot=0.0, message_text=""):
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
-        INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, rsi, adx, bb_width, message_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, rsi, adx, bb_width, message_text))
+        INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
+                             rsi, adx, bb_width, z_score, session_code, hour, divergence, dist_pivot, message_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
+          rsi, adx, bb_width, z_score, session_code, hour, divergence, dist_pivot, message_text))
     signal_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -68,7 +78,6 @@ def get_pending_signals():
     conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     
-    # Автоматично закриваємо старі завислі сигнали (старші за 2 години)
     two_hours_ago = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("UPDATE signals SET status = 'EXPIRED', result = 'EXPIRED' WHERE status = 'PENDING' AND timestamp < ?", (two_hours_ago,))
     conn.commit()
@@ -100,7 +109,7 @@ def evaluate_single_signal(sig_id, fetch_data_func):
     
     df = pd.DataFrame()
     for _ in range(3):
-        df = fetch_data_func(ticker, interval="5m", range_period="2d")
+        df = fetch_data_func(ticker, interval="3m", range_period="2d")
         if not df.empty:
             break
         time.sleep(2)
@@ -119,11 +128,10 @@ def evaluate_single_signal(sig_id, fetch_data_func):
         
     multiplier = 1000 if "JPY" in ticker.upper() else 100000
     
-    # Сувора логіка розрахунку пунктів та результату для CALL і PUT
     if signal == 'CALL':
         diff_pips = current_price - entry_price
         result = 'WIN' if current_price > entry_price else 'LOSS'
-    else:  # PUT
+    else: 
         diff_pips = entry_price - current_price
         result = 'WIN' if current_price < entry_price else 'LOSS'
         
