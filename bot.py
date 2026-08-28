@@ -62,7 +62,6 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
         return pd.DataFrame()
 
 def get_current_session_info():
-    """Визначає поточну світову торгову сесію за UTC"""
     now_utc = datetime.utcnow()
     hour = now_utc.hour
     sessions = []
@@ -84,7 +83,6 @@ def get_current_session_info():
     return session_str, session_code, hour
 
 def is_news_blackout_window():
-    """Фільтр хвилин підвищеного новинного ризику"""
     now_utc = datetime.utcnow()
     if now_utc.minute < 10 and now_utc.hour in [12, 13, 14, 15, 18]:
         return True
@@ -214,12 +212,14 @@ def handle_text_menu(update, context):
                 rsi = sig_data.get('rsi', 50)
                 adx = sig_data.get('adx', 20)
                 bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
-                div_code = 1 if sig_data.get('divergence') != 'NONE' else 0
+                divergence_str = str(sig_data.get('divergence', 'NONE'))
                 
                 current_price = float(df_fast['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
-                win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width, session_code, hour, div_code, dist_pivot)
+                win_probability = ml_filter.predict_signal_probability(
+                    rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
+                )
                 if win_probability < 0.54:
                     filtered_count += 1
                     continue
@@ -238,7 +238,7 @@ def handle_text_menu(update, context):
                     f"{icon} {action_text} | ⏱ {expiration} хв\n"
                     f"🎯 Ціна входу: {current_price:.5f}\n"
                     f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                    f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {sig_data.get('divergence')}\n"
+                    f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                     f"🌐 Сесія: {session_str}\n"
                     f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
                     f"💡 Точна причина: {sig_data.get('reason')}"
@@ -248,7 +248,9 @@ def handle_text_menu(update, context):
                 timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 sig_id = database.save_signal(
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
-                    rsi=rsi, adx=adx, bb_width=bb_width, message_text=msg_text
+                    rsi=rsi, adx=adx, bb_width=bb_width,
+                    session_code=session_code, hour=hour, divergence=divergence_str,
+                    dist_pivot=dist_pivot, message_text=msg_text
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 time.sleep(0.5)
@@ -316,12 +318,14 @@ def button_callback(update, context):
             rsi = sig_data.get('rsi', 50)
             adx = sig_data.get('adx', 20)
             bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
-            div_code = 1 if sig_data.get('divergence') != 'NONE' else 0
+            divergence_str = str(sig_data.get('divergence', 'NONE'))
             
             current_price = float(df_fast['close'].iloc[-1])
             dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
             
-            win_probability = ml_filter.predict_signal_probability(rsi, adx, bb_width, session_code, hour, div_code, dist_pivot)
+            win_probability = ml_filter.predict_signal_probability(
+                rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
+            )
             if win_probability < 0.54:
                 query.edit_message_text(text=f"🛡 ШІ відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% є нижчою за поріг безпеки).", parse_mode="Markdown")
                 return
@@ -336,7 +340,7 @@ def button_callback(update, context):
                 f"{icon} {action_text} | ⏱ {expiration} хв\n"
                 f"🎯 Ціна входу: {current_price:.5f}\n"
                 f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {sig_data.get('divergence')}\n"
+                f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                 f"🌐 Сесія: {session_str}\n"
                 f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
                 f"💡 Точна причина: {sig_data.get('reason')}"
@@ -346,7 +350,9 @@ def button_callback(update, context):
             timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             sig_id = database.save_signal(
                 ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
-                rsi=rsi, adx=adx, bb_width=bb_width, message_text=text
+                rsi=rsi, adx=adx, bb_width=bb_width,
+                session_code=session_code, hour=hour, divergence=divergence_str,
+                dist_pivot=dist_pivot, message_text=text
             )
             schedule_signal_timer(sig_id, timestamp_str, expiration)
         except Exception as e:
