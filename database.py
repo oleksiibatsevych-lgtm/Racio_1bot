@@ -25,7 +25,6 @@ def init_db():
             rsi REAL,
             adx REAL,
             bb_width REAL,
-            z_score REAL,
             session_code INTEGER,
             hour INTEGER,
             divergence TEXT,
@@ -33,28 +32,11 @@ def init_db():
             message_text TEXT
         )
     ''')
-    
-    cursor.execute("PRAGMA table_info(signals)")
-    existing_columns = [col[1] for col in cursor.fetchall()]
-    required_columns = {
-        "ticker": "TEXT", "signal": "TEXT", "entry_price": "REAL",
-        "expiration_mins": "INTEGER", "timestamp": "TEXT", "status": "TEXT DEFAULT 'PENDING'",
-        "result": "TEXT DEFAULT 'UNKNOWN'", "chat_id": "INTEGER", "message_id": "INTEGER",
-        "pips": "INTEGER DEFAULT 0", "rsi": "REAL", "adx": "REAL", "bb_width": "REAL",
-        "z_score": "REAL", "session_code": "INTEGER", "hour": "INTEGER",
-        "divergence": "TEXT", "dist_pivot": "REAL", "message_text": "TEXT"
-    }
-    for col_name, col_type in required_columns.items():
-        if col_name not in existing_columns:
-            try:
-                cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
-            except:
-                pass
     conn.commit()
     conn.close()
 
 def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, 
-                rsi=0.0, adx=0.0, bb_width=0.0, z_score=0.0, session_code=1, hour=12, 
+                rsi=0.0, adx=0.0, bb_width=0.0, session_code=1, hour=12, 
                 divergence="NONE", dist_pivot=0.0, message_text=""):
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
@@ -63,10 +45,10 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
-                             rsi, adx, bb_width, z_score, session_code, hour, divergence, dist_pivot, message_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
-          rsi, adx, bb_width, z_score, session_code, hour, divergence, dist_pivot, message_text))
+          rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text))
     signal_id = cursor.lastrowid
     conn.commit()
     conn.close()
