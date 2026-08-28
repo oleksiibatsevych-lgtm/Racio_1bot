@@ -14,13 +14,17 @@ class AdaptiveTechnicalAnalysis:
         df['rsi'] = 100 - (100 / (1 + rs))
         df['rsi'] = df['rsi'].fillna(50)
 
-        # Bollinger Bands
+        # Bollinger Bands та Z-Score
         sma = df['close'].rolling(window=20).mean()
         std = df['close'].rolling(window=20).std()
         df['bb_upper'] = sma + (std * 2)
         df['bb_lower'] = sma - (std * 2)
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
+        
+        # Z-Score як індикатор для точок відкату та перекупленості/перепроданості
+        df['z_score'] = (df['close'] - sma) / (std + 1e-9)
+        df['z_score'] = df['z_score'].fillna(0.0)
 
         # ADX та ATR
         high = df['high']
@@ -38,8 +42,8 @@ class AdaptiveTechnicalAnalysis:
         atr = tr.rolling(window=14).mean()
         df['atr'] = atr.fillna(0.0010)
 
-        plus_di = 100 * pd.Series(plus_dm).rolling(window=14).mean() / atr
-        minus_di = 100 * pd.Series(minus_dm).rolling(window=14).mean() / atr
+        plus_di = 100 * pd.Series(plus_dm).rolling(window=14).mean() / (atr + 1e-9)
+        minus_di = 100 * pd.Series(minus_dm).rolling(window=14).mean() / (atr + 1e-9)
         dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
         df['adx'] = dx.rolling(window=14).mean().fillna(20)
 
@@ -58,7 +62,6 @@ class AdaptiveTechnicalAnalysis:
         return "NEUTRAL"
 
     def calculate_pivots(self, df_macro):
-        """Розрахунок ключових рівнів Pivot Points"""
         if df_macro.empty or len(df_macro) < 2:
             return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
         high = float(df_macro['high'].iloc[-2])
@@ -72,20 +75,17 @@ class AdaptiveTechnicalAnalysis:
         return {"P": p, "R1": r1, "S1": s1, "R2": r2, "S2": s2}
 
     def detect_divergence(self, df):
-        """Визначення цінових дивергенцій між ціною та RSI"""
         if df.empty or 'rsi' not in df.columns or len(df) < 15:
             return "NONE"
         
         recent_prices = df['close'].iloc[-10:].values
         recent_rsi = df['rsi'].iloc[-10:].values
         
-        # Бичача дивергенція: ціна формує нижчий мінімум, а RSI — вищий
         price_lower_low = recent_prices[-1] < recent_prices[-5] and recent_prices[-5] < recent_prices[0]
         rsi_higher_low = recent_rsi[-1] > recent_rsi[-5] and recent_rsi[-5] > recent_rsi[0]
         if price_lower_low and rsi_higher_low:
             return "BULLISH_DIV"
 
-        # Ведмежа дивергенція: ціна формує вищий максимум, а RSI — нижчий
         price_higher_high = recent_prices[-1] > recent_prices[-5] and recent_prices[-5] > recent_prices[0]
         rsi_lower_high = recent_rsi[-1] < recent_rsi[-5] and recent_rsi[-5] < recent_rsi[0]
         if price_higher_high and rsi_lower_high:
@@ -101,23 +101,30 @@ class AdaptiveTechnicalAnalysis:
         rsi = float(last_row.get('rsi', 50))
         adx = float(last_row.get('adx', 20))
         atr = float(last_row.get('atr', 0.001))
+        z_score = float(last_row.get('z_score', 0.0))
         div = self.detect_divergence(df)
 
         signal = 'HOLD'
         reason_parts = []
 
+        # Z-Score фільтр відкату (допоміжний для точного входження на 3m/5m таймфреймі)
+        z_pullback_call = z_score < -1.4
+        z_pullback_put = z_score > 1.4
+
         if global_trend == 'BULLISH' and mid_trend in ['BULLISH', 'NEUTRAL']:
-            if rsi < 38 or div == 'BULLISH_DIV':
+            if (rsi < 40 or div == 'BULLISH_DIV') and z_pullback_call:
                 signal = 'CALL'
                 reason_parts.append("Тренд вгору")
-                if rsi < 38: reason_parts.append(f"RSI перепроданий ({rsi:.1f})")
-                if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція RSI")
+                if rsi < 40: reason_parts.append(f"RSI перепроданий ({rsi:.1f})")
+                if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
+                reason_parts.append(f"Z-Score відкат ({z_score:.2f})")
         elif global_trend == 'BEARISH' and mid_trend in ['BEARISH', 'NEUTRAL']:
-            if rsi > 62 or div == 'BEARISH_DIV':
+            if (rsi > 60 or div == 'BEARISH_DIV') and z_pullback_put:
                 signal = 'PUT'
                 reason_parts.append("Тренд вниз")
-                if rsi > 62: reason_parts.append(f"RSI перекуплений ({rsi:.1f})")
-                if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція RSI")
+                if rsi > 60: reason_parts.append(f"RSI перекуплений ({rsi:.1f})")
+                if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
+                reason_parts.append(f"Z-Score відкат ({z_score:.2f})")
 
         reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
         return {
@@ -125,6 +132,7 @@ class AdaptiveTechnicalAnalysis:
             'rsi': round(rsi, 1),
             'adx': round(adx, 1),
             'atr': atr,
+            'z_score': round(z_score, 2),
             'divergence': div,
             'reason': reason
         }
