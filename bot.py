@@ -180,28 +180,10 @@ def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
     update.message.reply_text(msg)
 
-def handle_text_menu(update, context):
-    chat_id = update.message.chat_id
-    text = update.message.text
-    
-    if text == "💵 Пари":
-        pairs = list(PAIRS_MAP.items())
-        keyboard = []
-        for i in range(0, len(pairs), 2):
-            row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
-            if i + 1 < len(pairs): 
-                row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
-            keyboard.append(row)
-        update.message.reply_text("📌 Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    elif text == "📊 Аналіз усіх пар":
-        if is_news_blackout_window():
-            update.message.reply_text("⚠️ Увага: Зараз період підвищеної новинної волатильності. Сканування тимчасово призупинено.")
-            return
-
-        update.message.reply_text("🔄 Глибоке сканування за оновленою стратегією (Сесії + Дивергенції + Pivot + ШІ-аудит)...")
+def run_full_scan_background(chat_id):
+    """Фонова функція для сканування всіх пар, щоб уникнути таймауту вебреквесту"""
+    try:
         session_str, session_code, hour = get_current_session_info()
-        
         sent_signals_count = 0
         filtered_count = 0
         current_time = time.time()
@@ -305,6 +287,31 @@ def handle_text_menu(update, context):
                 print(f"Помилка {ticker}: {e}")
                 
         bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено!\n📤 Надіслано сигналів: {sent_signals_count}\n🛡 Відсіяно фільтрами (ML + ШІ): {filtered_count}")
+    except Exception as e:
+        print(f"Помилка у фоновому скануванні: {e}")
+
+def handle_text_menu(update, context):
+    chat_id = update.message.chat_id
+    text = update.message.text
+    
+    if text == "💵 Пари":
+        pairs = list(PAIRS_MAP.items())
+        keyboard = []
+        for i in range(0, len(pairs), 2):
+            row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
+            if i + 1 < len(pairs): 
+                row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
+            keyboard.append(row)
+        update.message.reply_text("📌 Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    elif text == "📊 Аналіз усіх пар":
+        if is_news_blackout_window():
+            update.message.reply_text("⚠️ Увага: Зараз період підвищеної новинної волатильності. Сканування тимчасово призупинено.")
+            return
+
+        update.message.reply_text("🔄 Глибоке сканування запущено у фоновому режимі...")
+        # Запускаємо в окремому потоці, щоб вебхук миттєво відповів Telegram і не викликав зациклення
+        threading.Thread(target=run_full_scan_background, args=(chat_id,)).start()
         
     elif text == "📈 Статистика":
         update.message.reply_text("🔄 Розрахунок правдивої статистики...")
