@@ -29,7 +29,6 @@ ai_advisor = AITradingAdvisor()
 last_sent_signals = {}
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
-    # Спроба 1: Прямий швидкий запит через requests (основний метод)[span_4](start_span)[span_4](end_span)
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
@@ -58,7 +57,6 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     except Exception as e:
         print(f"⚠️ Прямий запит для {ticker} не вдався: {e}. Перемикаємось на резервний yfinance...")
 
-    # Спроба 2: Резервне джерело через бібліотеку yfinance (фолбек)[span_5](start_span)[span_5](end_span)
     try:
         yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
         mapped_interval = yf_interval_map.get(interval, "15m")
@@ -191,7 +189,8 @@ def handle_text_menu(update, context):
         keyboard = []
         for i in range(0, len(pairs), 2):
             row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
-            if i + 1 < len(pairs): row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
+            if i + 1 < len(pairs): 
+                row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
             keyboard.append(row)
         update.message.reply_text("📌 Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(keyboard))
         
@@ -243,7 +242,6 @@ def handle_text_menu(update, context):
                     filtered_count += 1
                     continue
                 
-                # 🧠 Інтеграція мультитаймфреймового ШІ-аудиту (Gemini)[span_6](start_span)[span_6](end_span)
                 ai_confidence = 5
                 ai_reason = "Аудит пропущено"
                 try:
