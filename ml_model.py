@@ -26,20 +26,19 @@ class TradingMLFilter:
         except:
             pass
 
-    def extract_features(self, rsi, adx, bb_width, z_score, session_code=1, hour=12, divergence=0, dist_pivot=0.0):
+    def extract_features(self, rsi, adx, bb_width, session_code=1, hour=12, divergence=0, dist_pivot=0.0):
         div_encoded = 1 if divergence != "NONE" else 0
-        return [[float(rsi), float(adx), float(bb_width), float(z_score), int(session_code), int(hour), int(div_encoded), float(dist_pivot)]]
+        return [[float(rsi), float(adx), float(bb_width), int(session_code), int(hour), int(div_encoded), float(dist_pivot)]]
 
-    def predict_signal_probability(self, rsi, adx, bb_width, z_score, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0):
+    def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0):
         if self.model is None:
             base = 0.58
             if rsi < 35 or rsi > 65: base += 0.06
             if adx > 25: base += 0.05
             if divergence != "NONE": base += 0.08
-            if abs(z_score) > 1.5: base += 0.05
             return min(round(base, 2), 0.95)
         try:
-            X = self.extract_features(rsi, adx, bb_width, z_score, session_code, hour, divergence, dist_pivot)
+            X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot)
             proba = self.model.predict_proba(X)[0][1]
             return float(proba)
         except:
@@ -48,7 +47,7 @@ class TradingMLFilter:
     def train_model(self):
         try:
             conn = sqlite3.connect("trading_stats.db")
-            query = "SELECT rsi, adx, bb_width, COALESCE(z_score, 0.0) as z_score, COALESCE(session_code, 1) as session_code, COALESCE(hour, 12) as hour, COALESCE(divergence, 'NONE') as divergence, COALESCE(dist_pivot, 0.0) as dist_pivot, COALESCE(result, 'UNKNOWN') as res FROM signals WHERE status = 'COMPLETED'"
+            query = "SELECT rsi, adx, bb_width, COALESCE(session_code, 1) as session_code, COALESCE(hour, 12) as hour, COALESCE(divergence, 'NONE') as divergence, COALESCE(dist_pivot, 0.0) as dist_pivot, COALESCE(result, 'UNKNOWN') as res FROM signals WHERE status = 'COMPLETED'"
             df = pd.read_sql(query, conn)
             conn.close()
 
@@ -62,7 +61,6 @@ class TradingMLFilter:
                 df['rsi'].fillna(50),
                 df['adx'].fillna(20),
                 df['bb_width'].fillna(0.001),
-                df['z_score'].fillna(0.0),
                 df['session_code'].fillna(1),
                 df['hour'].fillna(12),
                 df['div_encoded'],
@@ -80,7 +78,7 @@ class TradingMLFilter:
     def generate_strategy_report(self):
         return (
             "📊 *Повний звіт ШІ-стратегії та ринкового аналізу*:\n\n"
-            "• **Фільтрація:** Інтегровано тренди, RSI, дивергенції, Z-Score та рівні Pivot.\n"
+            "• **Фільтрація:** Інтегровано тренди, RSI, дивергенції та рівні Pivot.\n"
             "• **Макрозахист:** Автоматично блокуються хвилини підвищеної новинної волатильності.\n"
             "• **Експірація:** Адаптивний час тримання з урахуванням імпульсів та відкатів.\n"
             "• **Статус:** Модель навчається на збережених реальних параметрах."
