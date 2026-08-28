@@ -42,7 +42,7 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
                              rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text)
@@ -60,7 +60,7 @@ def get_pending_signals():
     conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     
-    two_hours_ago = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+    two_hours_ago = (datetime.utcnow() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute("UPDATE signals SET status = 'EXPIRED', result = 'EXPIRED' WHERE status = 'PENDING' AND timestamp < ?", (two_hours_ago,))
     conn.commit()
     
@@ -91,7 +91,7 @@ def evaluate_single_signal(sig_id, fetch_data_func):
     
     df = pd.DataFrame()
     for _ in range(3):
-        df = fetch_data_func(ticker, interval="3m", range_period="2d")
+        df = fetch_data_func(ticker, interval="5m", range_period="2d")
         if not df.empty:
             break
         time.sleep(2)
