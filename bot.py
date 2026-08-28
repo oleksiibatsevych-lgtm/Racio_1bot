@@ -13,7 +13,7 @@ from config import TELEGRAM_TOKEN, PAIRS_MAP
 from indicators import AdaptiveTechnicalAnalysis
 import database
 from ml_model import TradingMLFilter
-from Ai_advisor import AITradingAdvisor
+from from ai_advisor import AITradingAdvisor
 from charts import create_chart_image
 
 app = Flask(__name__)
