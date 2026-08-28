@@ -22,7 +22,7 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
         
-        # Z-Score як індикатор для точок відкату та перекупленості/перепроданості
+        # Z-Score для відхилень і меж
         df['z_score'] = (df['close'] - sma) / (std + 1e-9)
         df['z_score'] = df['z_score'].fillna(0.0)
 
@@ -87,7 +87,7 @@ class AdaptiveTechnicalAnalysis:
             return "BULLISH_DIV"
 
         price_higher_high = recent_prices[-1] > recent_prices[-5] and recent_prices[-5] > recent_prices[0]
-        rsi_lower_high = recent_rsi[-1] < recent_rsi[-5] and recent_rsi[-5] < recent_rsi[0]
+        rsi_lower_high = recent_rsi[-1] < recent_rsi[-5] and recent_rsi[-5] > recent_rsi[0]
         if price_higher_high and rsi_lower_high:
             return "BEARISH_DIV"
 
@@ -102,29 +102,45 @@ class AdaptiveTechnicalAnalysis:
         adx = float(last_row.get('adx', 20))
         atr = float(last_row.get('atr', 0.001))
         z_score = float(last_row.get('z_score', 0.0))
+        bb_upper = float(last_row.get('bb_upper', 0))
+        bb_lower = float(last_row.get('bb_lower', 0))
+        close_price = float(last_row['close'])
         div = self.detect_divergence(df)
 
         signal = 'HOLD'
         reason_parts = []
 
-        # Z-Score фільтр відкату (допоміжний для точного входження на 3m/5m таймфреймі)
-        z_pullback_call = z_score < -1.4
-        z_pullback_put = z_score > 1.4
-
-        if global_trend == 'BULLISH' and mid_trend in ['BULLISH', 'NEUTRAL']:
-            if (rsi < 40 or div == 'BULLISH_DIV') and z_pullback_call:
+        # РЕЖИМ 1: ФЛЕТ / КАНАЛ (ADX < 20) — робота від меж та Z-Score як гнучка точка входу
+        if adx < 20:
+            if close_price <= bb_lower * 1.005 or rsi < 42 or z_score <= -1.2:
                 signal = 'CALL'
-                reason_parts.append("Тренд вгору")
-                if rsi < 40: reason_parts.append(f"RSI перепроданий ({rsi:.1f})")
-                if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
-                reason_parts.append(f"Z-Score відкат ({z_score:.2f})")
-        elif global_trend == 'BEARISH' and mid_trend in ['BEARISH', 'NEUTRAL']:
-            if (rsi > 60 or div == 'BEARISH_DIV') and z_pullback_put:
+                reason_parts.append("Флет/Канал (відскок)")
+                if z_score <= -1.2: reason_parts.append(f"Z-Score вхід ({z_score:.2f})")
+                if close_price <= bb_lower * 1.005: reason_parts.append("Нижня межа BB")
+                if rsi < 42: reason_parts.append(f"RSI ({rsi:.1f})")
+            elif close_price >= bb_upper * 0.995 or rsi > 58 or z_score >= 1.2:
                 signal = 'PUT'
-                reason_parts.append("Тренд вниз")
-                if rsi > 60: reason_parts.append(f"RSI перекуплений ({rsi:.1f})")
-                if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
-                reason_parts.append(f"Z-Score відкат ({z_score:.2f})")
+                reason_parts.append("Флет/Канал (відскок)")
+                if z_score >= 1.2: reason_parts.append(f"Z-Score вхід ({z_score:.2f})")
+                if close_price >= bb_upper * 0.995: reason_parts.append("Верхня межа BB")
+                if rsi > 58: reason_parts.append(f"RSI ({rsi:.1f})")
+
+        # РЕЖИМ 2: ТРЕНД (ADX >= 20) — трендова торгівля з відкатом через RSI, дивергенції або Z-Score
+        else:
+            if global_trend == 'BULLISH' and mid_trend in ['BULLISH', 'NEUTRAL']:
+                if rsi < 48 or div == 'BULLISH_DIV' or z_score < -1.0:
+                    signal = 'CALL'
+                    reason_parts.append("Тренд вгору")
+                    if rsi < 48: reason_parts.append(f"RSI відкат ({rsi:.1f})")
+                    if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
+                    if z_score < -1.0: reason_parts.append(f"Z-Score точка входу ({z_score:.2f})")
+            elif global_trend == 'BEARISH' and mid_trend in ['BEARISH', 'NEUTRAL']:
+                if rsi > 52 or div == 'BEARISH_DIV' or z_score > 1.0:
+                    signal = 'PUT'
+                    reason_parts.append("Тренд вниз")
+                    if rsi > 52: reason_parts.append(f"RSI відкат ({rsi:.1f})")
+                    if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
+                    if z_score > 1.0: reason_parts.append(f"Z-Score точка входу ({z_score:.2f})")
 
         reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
         return {
