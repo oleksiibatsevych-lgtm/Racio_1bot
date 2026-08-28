@@ -181,7 +181,6 @@ def train_ml_command(update, context):
     update.message.reply_text(msg)
 
 def run_full_scan_background(chat_id):
-    """Фонова функція для сканування всіх пар, щоб уникнути таймауту вебреквесту"""
     try:
         session_str, session_code, hour = get_current_session_info()
         sent_signals_count = 0
@@ -310,7 +309,6 @@ def handle_text_menu(update, context):
             return
 
         update.message.reply_text("🔄 Глибоке сканування запущено у фоновому режимі...")
-        # Запускаємо в окремому потоці, щоб вебхук миттєво відповів Telegram і не викликав зациклення
         threading.Thread(target=run_full_scan_background, args=(chat_id,)).start()
         
     elif text == "📈 Статистика":
@@ -447,4 +445,12 @@ dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_te
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if render_url:
+        webhook_url = f"{render_url}/webhook"
+        bot.set_webhook(webhook_url)
+        print(f"🔗 Вебхук успішно встановлено: {webhook_url}")
+        
+    app.run(host="0.0.0.0", port=port)
