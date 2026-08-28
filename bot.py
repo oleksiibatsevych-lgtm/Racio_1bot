@@ -119,7 +119,8 @@ def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
     try:
         signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
-        delay = max((expiry_time - datetime.now()).total_seconds(), 1)
+        # Використовуємо datetime.utcnow() для правильного розрахунку затримки
+        delay = max((expiry_time - datetime.utcnow()).total_seconds(), 1)
         timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
         timer.daemon = True
         timer.start()
@@ -132,7 +133,7 @@ def restore_pending_timers():
         sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
         try:
             expiry_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S") + timedelta(minutes=expiration_mins)
-            delay = max((expiry_time - datetime.now()).total_seconds(), 2 + (i * 2))
+            delay = max((expiry_time - datetime.utcnow()).total_seconds(), 2 + (i * 2))
             timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
@@ -245,7 +246,7 @@ def handle_text_menu(update, context):
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
-                timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 sig_id = database.save_signal(
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
                     rsi=rsi, adx=adx, bb_width=bb_width,
@@ -347,7 +348,7 @@ def button_callback(update, context):
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
-            timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             sig_id = database.save_signal(
                 ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
                 rsi=rsi, adx=adx, bb_width=bb_width,
