@@ -14,17 +14,13 @@ class AdaptiveTechnicalAnalysis:
         df['rsi'] = 100 - (100 / (1 + rs))
         df['rsi'] = df['rsi'].fillna(50)
 
-        # Bollinger Bands та Z-Score
+        # Bollinger Bands
         sma = df['close'].rolling(window=20).mean()
         std = df['close'].rolling(window=20).std()
         df['bb_upper'] = sma + (std * 2)
         df['bb_lower'] = sma - (std * 2)
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
-        
-        # Z-Score для відхилень і меж
-        df['z_score'] = (df['close'] - sma) / (std + 1e-9)
-        df['z_score'] = df['z_score'].fillna(0.0)
 
         # ADX та ATR
         high = df['high']
@@ -101,7 +97,6 @@ class AdaptiveTechnicalAnalysis:
         rsi = float(last_row.get('rsi', 50))
         adx = float(last_row.get('adx', 20))
         atr = float(last_row.get('atr', 0.001))
-        z_score = float(last_row.get('z_score', 0.0))
         bb_upper = float(last_row.get('bb_upper', 0))
         bb_lower = float(last_row.get('bb_lower', 0))
         close_price = float(last_row['close'])
@@ -110,37 +105,33 @@ class AdaptiveTechnicalAnalysis:
         signal = 'HOLD'
         reason_parts = []
 
-        # РЕЖИМ 1: ФЛЕТ / КАНАЛ (ADX < 20) — робота від меж та Z-Score як гнучка точка входу
+        # РЕЖИМ 1: ФЛЕТ / КАНАЛ (ADX < 20) — робота від меж BB та RSI
         if adx < 20:
-            if close_price <= bb_lower * 1.005 or rsi < 42 or z_score <= -1.2:
+            if close_price <= bb_lower * 1.005 or rsi < 42:
                 signal = 'CALL'
                 reason_parts.append("Флет/Канал (відскок)")
-                if z_score <= -1.2: reason_parts.append(f"Z-Score вхід ({z_score:.2f})")
                 if close_price <= bb_lower * 1.005: reason_parts.append("Нижня межа BB")
                 if rsi < 42: reason_parts.append(f"RSI ({rsi:.1f})")
-            elif close_price >= bb_upper * 0.995 or rsi > 58 or z_score >= 1.2:
+            elif close_price >= bb_upper * 0.995 or rsi > 58:
                 signal = 'PUT'
                 reason_parts.append("Флет/Канал (відскок)")
-                if z_score >= 1.2: reason_parts.append(f"Z-Score вхід ({z_score:.2f})")
                 if close_price >= bb_upper * 0.995: reason_parts.append("Верхня межа BB")
                 if rsi > 58: reason_parts.append(f"RSI ({rsi:.1f})")
 
-        # РЕЖИМ 2: ТРЕНД (ADX >= 20) — трендова торгівля з відкатом через RSI, дивергенції або Z-Score
+        # РЕЖИМ 2: ТРЕНД (ADX >= 20) — трендова торгівля через RSI або дивергенцію
         else:
             if global_trend == 'BULLISH' and mid_trend in ['BULLISH', 'NEUTRAL']:
-                if rsi < 48 or div == 'BULLISH_DIV' or z_score < -1.0:
+                if rsi < 48 or div == 'BULLISH_DIV':
                     signal = 'CALL'
                     reason_parts.append("Тренд вгору")
                     if rsi < 48: reason_parts.append(f"RSI відкат ({rsi:.1f})")
                     if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
-                    if z_score < -1.0: reason_parts.append(f"Z-Score точка входу ({z_score:.2f})")
             elif global_trend == 'BEARISH' and mid_trend in ['BEARISH', 'NEUTRAL']:
-                if rsi > 52 or div == 'BEARISH_DIV' or z_score > 1.0:
+                if rsi > 52 or div == 'BEARISH_DIV':
                     signal = 'PUT'
                     reason_parts.append("Тренд вниз")
                     if rsi > 52: reason_parts.append(f"RSI відкат ({rsi:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
-                    if z_score > 1.0: reason_parts.append(f"Z-Score точка входу ({z_score:.2f})")
 
         reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
         return {
@@ -148,7 +139,6 @@ class AdaptiveTechnicalAnalysis:
             'rsi': round(rsi, 1),
             'adx': round(adx, 1),
             'atr': atr,
-            'z_score': round(z_score, 2),
             'divergence': div,
             'reason': reason
         }
