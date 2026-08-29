@@ -112,12 +112,17 @@ def evaluate_single_signal(sig_id, fetch_data_func):
     
     if signal == 'CALL':
         diff_pips = current_price - entry_price
-        result = 'WIN' if current_price > entry_price else 'LOSS'
     else: 
         diff_pips = entry_price - current_price
-        result = 'WIN' if current_price < entry_price else 'LOSS'
         
     pips = int(round(diff_pips * multiplier))
+    
+    if pips > 0:
+        result = 'WIN'
+    elif pips == 0:
+        result = 'NEUTRAL'
+    else:
+        result = 'LOSS'
     
     cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, sig_id))
     conn.commit()
@@ -136,11 +141,20 @@ def get_overall_stats():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*), SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) FROM signals WHERE status = 'COMPLETED'")
-    row = cursor.fetchone()
+    cursor.execute("SELECT result, COUNT(*) FROM signals WHERE status = 'COMPLETED' GROUP BY result")
+    data = dict(cursor.fetchall())
     conn.close()
     
-    total = row[0] if row and row[0] else 0
-    wins = row[1] if row and row[1] else 0
-    winrate = round((wins / total) * 100, 1) if total > 0 else 0
-    return {"total": total, "wins": wins, "winrate": winrate}
+    wins = data.get('WIN', 0)
+    neutral = data.get('NEUTRAL', 0)
+    losses = data.get('LOSS', 0)
+    total = wins + neutral + losses
+    
+    winrate = round((wins / total) * 100, 1) if total > 0 else 0.0
+    return {
+        "total": total, 
+        "wins": wins, 
+        "neutral": neutral, 
+        "losses": losses, 
+        "winrate": winrate
+    }
