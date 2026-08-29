@@ -11,4 +11,4 @@ matplotlib==3.9.0
 scikit-learn
 joblib
 google-generativeai
-git+https://github.com/twopirllc/pandas-ta.git
+pandas-ta
