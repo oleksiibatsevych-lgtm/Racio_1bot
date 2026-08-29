@@ -122,13 +122,24 @@ def process_signal_expiration(sig_id):
     try:
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
-            pips_val = res_data['pips']
+            pips_val = res_data.get('pips', 0.0)
             pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
+            result_status = res_data.get('result', 'LOSS')
             
-            res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)" if res_data['result'] == 'WIN' else f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
-            orig_txt = res_data["message_text"]
+            if result_status == 'WIN':
+                res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
+            elif result_status == 'DRAW':
+                res_icon = f"🏁 Результат: DRAW ⚪️ (Без змін, 0.0 п.)"
+            else:
+                res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
+                
+            orig_txt = res_data.get("message_text", "")
             if "🏁 Результат" not in orig_txt:
-                bot.edit_message_text(chat_id=res_data["chat_id"], message_id=res_data["message_id"], text=f"{orig_txt}\n{res_icon}")
+                bot.edit_message_text(
+                    chat_id=res_data["chat_id"], 
+                    message_id=res_data["message_id"], 
+                    text=f"{orig_txt}\n{res_icon}"
+                )
     except Exception as e:
         print(f"Помилка таймера експірації {sig_id}: {e}")
 
@@ -426,31 +437,24 @@ def button_callback(update, context):
                 f"💡 Технічна причина: {sig_data.get('reason')}\n"
                 f"🤖 Візуальний вердикт ШІ: {ai_reason}"
             )
-            query.edit_message_text(text=text, parse_mode="Markdown")
+            sent_msg = query.edit_message_text(text=text, parse_mode="Markdown")
             
             timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             sig_id = database.save_signal(
-                ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
+                ticker, signal_type, current_price, expiration, query.message.chat_id, sent_msg.message_id,
                 rsi=rsi, adx=adx, bb_width=bb_width,
                 session_code=session_code, hour=hour, divergence=divergence_str,
                 dist_pivot=dist_pivot, message_text=text
             )
             schedule_signal_timer(sig_id, timestamp_str, expiration)
         except Exception as e:
-            query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
+            print(f"Помилка ручного аналізу {ticker}: {e}")
 
 dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("train_ml", train_ml_command))
+dispatcher.add_handler(CommandHandler("train", train_ml_command))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    
-    render_url = os.environ.get("RENDER_EXTERNAL_URL")
-    if render_url:
-        webhook_url = f"{render_url}/webhook"
-        bot.set_webhook(webhook_url)
-        print(f"🔗 Вебхук успішно встановлено: {webhook_url}")
-        
     app.run(host="0.0.0.0", port=port)
