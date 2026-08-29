@@ -125,7 +125,15 @@ def process_signal_expiration(sig_id):
             pips_val = res_data['pips']
             pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
             
-            res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)" if res_data['result'] == 'WIN' else f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
+            # Виправлено обробку результатів з урахуванням NEUTRAL
+            res_result = res_data['result']
+            if res_result == 'WIN':
+                res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
+            elif res_result == 'NEUTRAL':
+                res_icon = f"🏁 Результат: NEUTRAL ➖ ({pips_str} п.)"
+            else:
+                res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
+
             orig_txt = res_data["message_text"]
             if "🏁 Результат" not in orig_txt:
                 bot.edit_message_text(chat_id=res_data["chat_id"], message_id=res_data["message_id"], text=f"{orig_txt}\n{res_icon}")
@@ -310,7 +318,6 @@ def handle_text_menu(update, context):
             return
 
         update.message.reply_text("🔄 Глибоке сканування запущено у фоновому режимі...")
-        # Запускаємо в окремому потоці, щоб вебхук миттєво відповів Telegram і не викликав зациклення
         threading.Thread(target=run_full_scan_background, args=(chat_id,)).start()
         
     elif text == "📈 Статистика":
@@ -321,6 +328,8 @@ def handle_text_menu(update, context):
             stats_text = (
                 f"📈 **Правдива статистика трейдингу:**\n"
                 f"• Успішних угод (WIN): {stats.get('wins', 0)}\n"
+                f"• Нейтральних угод (BE): {stats.get('neutral', 0)}\n"
+                f"• Збиткових угод (LOSS): {stats.get('losses', 0)}\n"
                 f"• Усього перевірених угод: {stats.get('total', 0)}\n"
                 f"• Реальний вінрейт: **{stats.get('winrate', 0)}%**\n\n"
                 f"🤖 *Модель успішно перенавчена.*"
