@@ -5,7 +5,7 @@ from PIL import Image
 
 class AITradingAdvisor:
     def __init__(self):
-        # Список моделей у порядку пріоритету (знизу вгору або від нової до старих)
+        # Список моделей у порядку пріоритету
         self.models_to_try = [
             "gemini-3.6-flash",
             "gemini-2.5-flash",
@@ -40,7 +40,11 @@ class AITradingAdvisor:
         content_parts = [prompt]
         for chart in [macro_chart, mid_chart, micro_chart]:
             if chart:
-                content_parts.append(chart)
+                try:
+                    chart.seek(0)
+                    content_parts.append(Image.open(chart))
+                except Exception as e:
+                    print(f"⚠️ Помилка відкриття графіка для ШІ: {e}")
 
         response_text = None
         for model_name in self.models_to_try:
