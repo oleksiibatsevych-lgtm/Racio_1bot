@@ -1,10 +1,11 @@
 import os
 import json
-from PIL import Image
 import google.generativeai as genai
+from PIL import Image
 
 class AITradingAdvisor:
     def __init__(self):
+        # Список моделей у порядку пріоритету (знизу вгору або від нової до старих)
         self.models_to_try = [
             "gemini-3.6-flash",
             "gemini-2.5-flash",
@@ -12,6 +13,9 @@ class AITradingAdvisor:
         ]
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
+        """
+        Проводить візуальний та технічний аудит сигналу за допомогою Gemini Vision з підтримкою fallback.
+        """
         prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки (1h, 15m, 5m) для активу {name}.
         Параметри сигналу:
@@ -36,12 +40,7 @@ class AITradingAdvisor:
         content_parts = [prompt]
         for chart in [macro_chart, mid_chart, micro_chart]:
             if chart:
-                try:
-                    chart.seek(0)
-                    pil_img = Image.open(chart)
-                    content_parts.append(pil_img)
-                except Exception as e:
-                    print(f"⚠️ Помилка конвертації графіку в PIL.Image: {e}")
+                content_parts.append(chart)
 
         response_text = None
         for model_name in self.models_to_try:
