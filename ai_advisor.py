@@ -5,11 +5,11 @@ from PIL import Image
 
 class AITradingAdvisor:
     def __init__(self):
-        # Список моделей у порядку пріоритету
+        # Оновлений список актуальних моделей для уникнення помилок 404
         self.models_to_try = [
-            "gemini-3.6-flash",
-            "gemini-2.5-flash",
-            "gemini-1.5-flash"
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro"
         ]
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
