@@ -125,7 +125,6 @@ def process_signal_expiration(sig_id):
             pips_val = res_data['pips']
             pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
             
-            # Виправлено обробку результатів з урахуванням NEUTRAL
             res_result = res_data['result']
             if res_result == 'WIN':
                 res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
@@ -189,7 +188,7 @@ def train_ml_command(update, context):
     update.message.reply_text(msg)
 
 def run_full_scan_background(chat_id):
-    """Фонова функція для сканування всіх пар, щоб уникнути таймауту вебреквесту"""
+    """Фонова функція для сканування всіх пар з паузою для захисту від Rate Limit"""
     try:
         session_str, session_code, hour = get_current_session_info()
         sent_signals_count = 0
@@ -290,7 +289,9 @@ def run_full_scan_background(chat_id):
                     dist_pivot=dist_pivot, message_text=msg_text
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
-                time.sleep(0.5)
+                
+                # 🛡 Контрольна пауза 5 секунд між запитами до ШІ для уникнення Rate Limit
+                time.sleep(5)
             except Exception as e:
                 print(f"Помилка {ticker}: {e}")
                 
@@ -437,23 +438,29 @@ def button_callback(update, context):
                 f"💡 Технічна причина: {sig_data.get('reason')}\n"
                 f"🤖 Візуальний вердикт ШІ: {ai_reason}"
             )
-            query.edit_message_text(text=text, parse_mode="Markdown")
+            sent_msg = bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
             
             timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             sig_id = database.save_signal(
-                ticker, signal_type, current_price, expiration, query.message.chat_id, query.message.message_id,
+                ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
                 rsi=rsi, adx=adx, bb_width=bb_width,
                 session_code=session_code, hour=hour, divergence=divergence_str,
                 dist_pivot=dist_pivot, message_text=text
             )
             schedule_signal_timer(sig_id, timestamp_str, expiration)
+            query.edit_message_text(text=text, parse_mode="Markdown")
         except Exception as e:
-            query.edit_message_text(text=f"❌ Помилка обробки: {str(e)}")
+            print(f"Помилка аналізу пари {ticker}: {e}")
+            try:
+                query.edit_message_text(text=f"❌ Помилка аналізу {name}")
+            except:
+                pass
 
 dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("train_ml", train_ml_command))
+dispatcher.add_handler(CommandHandler("train", train_ml_command))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
