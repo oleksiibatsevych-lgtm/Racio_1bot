@@ -3,6 +3,7 @@ import io
 import time
 import threading
 import requests
+import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 from flask import Flask, request
@@ -13,6 +14,8 @@ from config import TELEGRAM_TOKEN, PAIRS_MAP
 from indicators import AdaptiveTechnicalAnalysis
 import database
 from ml_model import TradingMLFilter
+from ai_advisor import AITradingAdvisor
+from charts import create_chart_image
 
 app = Flask(__name__)
 
@@ -21,6 +24,7 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 
 analyzer = AdaptiveTechnicalAnalysis()
 ml_filter = TradingMLFilter()
+ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
 
@@ -28,38 +32,51 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         
         response = requests.get(url, headers=headers, params=params, timeout=(3, 5))
-        if response.status_code != 200:
-            return pd.DataFrame()
-            
-        data = response.json()
-        result = data.get("chart", {}).get("result")
-        if not result:
-            return pd.DataFrame()
-            
-        res = result[0]
-        timestamps = res.get("timestamp", [])
-        quotes = res.get("indicators", {}).get("quote", [{}])[0]
-        
-        if not timestamps or not quotes:
-            return pd.DataFrame()
-            
-        df = pd.DataFrame({
-            "open": quotes.get("open", []),
-            "high": quotes.get("high", []),
-            "low": quotes.get("low", []),
-            "close": quotes.get("close", []),
-            "volume": quotes.get("volume", [0] * len(timestamps))
-        }, index=pd.to_datetime(timestamps, unit="s"))
-        
-        df.dropna(subset=["open", "high", "low", "close"], inplace=True)
-        df["volume"] = df["volume"].fillna(0)
-        return df
+        if response.status_code == 200:
+            data = response.json()
+            result = data.get("chart", {}).get("result")
+            if result:
+                res = result[0]
+                timestamps = res.get("timestamp", [])
+                quotes = res.get("indicators", {}).get("quote", [{}])[0]
+                if timestamps and quotes:
+                    df = pd.DataFrame({
+                        "open": quotes.get("open", []),
+                        "high": quotes.get("high", []),
+                        "low": quotes.get("low", []),
+                        "close": quotes.get("close", []),
+                        "volume": quotes.get("volume", [0] * len(timestamps))
+                    }, index=pd.to_datetime(timestamps, unit="s"))
+                    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+                    df["volume"] = df["volume"].fillna(0)
+                    if not df.empty:
+                        return df
     except Exception as e:
-        print(f"Помилка завантаження {ticker}: {e}")
-        return pd.DataFrame()
+        print(f"⚠️ Прямий запит для {ticker} не вдався: {e}. Перемикаємось на резервний yfinance...")
+
+    try:
+        yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
+        mapped_interval = yf_interval_map.get(interval, "15m")
+        
+        df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, progress=False)
+        if not df_yf.empty:
+            if isinstance(df_yf.columns, pd.MultiIndex):
+                df_yf.columns = df_yf.columns.get_level_values(0)
+            
+            df_yf = df_yf.rename(columns={
+                "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"
+            })
+            df_yf = df_yf[["open", "high", "low", "close", "volume"]].copy()
+            df_yf.dropna(subset=["open", "high", "low", "close"], inplace=True)
+            df_yf["volume"] = df_yf["volume"].fillna(0)
+            return df_yf
+    except Exception as e:
+        print(f"❌ Помилка резервного джерела yfinance для {ticker}: {e}")
+
+    return pd.DataFrame()
 
 def get_current_session_info():
     now_utc = datetime.utcnow()
@@ -163,27 +180,10 @@ def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
     update.message.reply_text(msg)
 
-def handle_text_menu(update, context):
-    chat_id = update.message.chat_id
-    text = update.message.text
-    
-    if text == "💵 Пари":
-        pairs = list(PAIRS_MAP.items())
-        keyboard = []
-        for i in range(0, len(pairs), 2):
-            row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
-            if i + 1 < len(pairs): row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
-            keyboard.append(row)
-        update.message.reply_text("📌 Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    elif text == "📊 Аналіз усіх пар":
-        if is_news_blackout_window():
-            update.message.reply_text("⚠️ Увага: Зараз період підвищеної новинної волатильності. Сканування тимчасово призупинено.")
-            return
-
-        update.message.reply_text("🔄 Глибоке сканування за оновленою стратегією (Сесії + Дивергенції + Pivot)...")
+def run_full_scan_background(chat_id):
+    """Фонова функція для сканування всіх пар, щоб уникнути таймауту вебреквесту"""
+    try:
         session_str, session_code, hour = get_current_session_info()
-        
         sent_signals_count = 0
         filtered_count = 0
         current_time = time.time()
@@ -224,6 +224,34 @@ def handle_text_menu(update, context):
                     filtered_count += 1
                     continue
                 
+                ai_confidence = 5
+                ai_reason = "Аудит пропущено"
+                try:
+                    macro_chart = create_chart_image(df_macro, name, tf_label="1h")
+                    mid_chart = create_chart_image(df_mid, name, tf_label="15m")
+                    micro_chart = create_chart_image(df_fast, name, tf_label="5m")
+
+                    ai_payload = {
+                        'signal': signal_type,
+                        'adx': adx,
+                        'global_trend': global_trend,
+                        'mid_trend': mid_trend,
+                        'local_trend': analyzer.get_trend(df_fast, span_val=10),
+                        'reason': sig_data.get('reason'),
+                        'rsi': rsi,
+                        'atr': sig_data.get('atr')
+                    }
+
+                    ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
+                    if ai_audit.get("decision") != "YES":
+                        filtered_count += 1
+                        continue
+                        
+                    ai_confidence = ai_audit.get("confidence", 7)
+                    ai_reason = ai_audit.get("reason", "Схвалено ШІ")
+                except Exception as e:
+                    print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
+
                 sent_signals_count += 1
                 last_sent_signals[ticker] = time.time()  
                 
@@ -240,8 +268,9 @@ def handle_text_menu(update, context):
                     f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
                     f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                     f"🌐 Сесія: {session_str}\n"
-                    f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
-                    f"💡 Точна причина: {sig_data.get('reason')}"
+                    f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
+                    f"💡 Технічна причина: {sig_data.get('reason')}\n"
+                    f"🤖 Візуальний вердикт ШІ: {ai_reason}"
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
@@ -257,7 +286,32 @@ def handle_text_menu(update, context):
             except Exception as e:
                 print(f"Помилка {ticker}: {e}")
                 
-        bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено!\n📤 Надіслано сигналів: {sent_signals_count}\n🛡 Відсіяно фільтрами: {filtered_count}")
+        bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено!\n📤 Надіслано сигналів: {sent_signals_count}\n🛡 Відсіяно фільтрами (ML + ШІ): {filtered_count}")
+    except Exception as e:
+        print(f"Помилка у фоновому скануванні: {e}")
+
+def handle_text_menu(update, context):
+    chat_id = update.message.chat_id
+    text = update.message.text
+    
+    if text == "💵 Пари":
+        pairs = list(PAIRS_MAP.items())
+        keyboard = []
+        for i in range(0, len(pairs), 2):
+            row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
+            if i + 1 < len(pairs): 
+                row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
+            keyboard.append(row)
+        update.message.reply_text("📌 Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(keyboard))
+        
+    elif text == "📊 Аналіз усіх пар":
+        if is_news_blackout_window():
+            update.message.reply_text("⚠️ Увага: Зараз період підвищеної новинної волатильності. Сканування тимчасово призупинено.")
+            return
+
+        update.message.reply_text("🔄 Глибоке сканування запущено у фоновому режимі...")
+        # Запускаємо в окремому потоці, щоб вебхук миттєво відповів Telegram і не викликав зациклення
+        threading.Thread(target=run_full_scan_background, args=(chat_id,)).start()
         
     elif text == "📈 Статистика":
         update.message.reply_text("🔄 Розрахунок правдивої статистики...")
@@ -293,7 +347,7 @@ def button_callback(update, context):
         name = next((k for k, v in PAIRS_MAP.items() if v == ticker), ticker)
         session_str, session_code, hour = get_current_session_info()
         
-        query.edit_message_text(text=f"🔄 Аналіз **{name}** за оновленою стратегією...", parse_mode="Markdown")
+        query.edit_message_text(text=f"🔄 Глибокий аналіз **{name}** (ML + ШІ-аудит)...", parse_mode="Markdown")
         try:
             df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
@@ -327,8 +381,36 @@ def button_callback(update, context):
                 rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
             )
             if win_probability < 0.54:
-                query.edit_message_text(text=f"🛡 ШІ відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% є нижчою за поріг безпеки).", parse_mode="Markdown")
+                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової).", parse_mode="Markdown")
                 return
+
+            ai_confidence = 5
+            ai_reason = "Аудит пропущено"
+            try:
+                macro_chart = create_chart_image(df_macro, name, tf_label="1h")
+                mid_chart = create_chart_image(df_mid, name, tf_label="15m")
+                micro_chart = create_chart_image(df_fast, name, tf_label="5m")
+
+                ai_payload = {
+                    'signal': signal_type,
+                    'adx': adx,
+                    'global_trend': global_trend,
+                    'mid_trend': mid_trend,
+                    'local_trend': analyzer.get_trend(df_fast, span_val=10),
+                    'reason': sig_data.get('reason'),
+                    'rsi': rsi,
+                    'atr': sig_data.get('atr')
+                }
+
+                ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
+                if ai_audit.get("decision") != "YES":
+                    query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по **{name}**:\n_{ai_audit.get('reason')}_", parse_mode="Markdown")
+                    return
+                    
+                ai_confidence = ai_audit.get("confidence", 7)
+                ai_reason = ai_audit.get("reason", "Схвалено ШІ")
+            except Exception as e:
+                print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
 
             atr = sig_data.get('atr')
             expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
@@ -342,8 +424,9 @@ def button_callback(update, context):
                 f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
                 f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                 f"🌐 Сесія: {session_str}\n"
-                f"🧠 ШІ-успіх: {round(win_probability * 100, 1)}%\n"
-                f"💡 Точна причина: {sig_data.get('reason')}"
+                f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
+                f"💡 Технічна причина: {sig_data.get('reason')}\n"
+                f"🤖 Візуальний вердикт ШІ: {ai_reason}"
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
             
