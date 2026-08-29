@@ -6,7 +6,6 @@ class AdaptiveTechnicalAnalysis:
         if df.empty or len(df) < 14:
             return df
         
-        # RSI 14
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -14,7 +13,6 @@ class AdaptiveTechnicalAnalysis:
         df['rsi'] = 100 - (100 / (1 + rs))
         df['rsi'] = df['rsi'].fillna(50)
 
-        # Bollinger Bands
         sma = df['close'].rolling(window=20).mean()
         std = df['close'].rolling(window=20).std()
         df['bb_upper'] = sma + (std * 2)
@@ -22,7 +20,6 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
 
-        # ADX та ATR
         high = df['high']
         low = df['low']
         close = df['close']
@@ -105,7 +102,6 @@ class AdaptiveTechnicalAnalysis:
         signal = 'HOLD'
         reason_parts = []
 
-        # РЕЖИМ 1: ФЛЕТ / КАНАЛ (ADX < 20) — робота від меж BB та RSI
         if adx < 20:
             if close_price <= bb_lower * 1.005 or rsi < 42:
                 signal = 'CALL'
@@ -117,8 +113,6 @@ class AdaptiveTechnicalAnalysis:
                 reason_parts.append("Флет/Канал (відскок)")
                 if close_price >= bb_upper * 0.995: reason_parts.append("Верхня межа BB")
                 if rsi > 58: reason_parts.append(f"RSI ({rsi:.1f})")
-
-        # РЕЖИМ 2: ТРЕНД (ADX >= 20) — трендова торгівля через RSI або дивергенцію
         else:
             if global_trend == 'BULLISH' and mid_trend in ['BULLISH', 'NEUTRAL']:
                 if rsi < 48 or div == 'BULLISH_DIV':
