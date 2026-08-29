@@ -110,22 +110,15 @@ def evaluate_single_signal(sig_id, fetch_data_func):
         
     multiplier = 1000 if "JPY" in ticker.upper() else 100000
     
-    if current_price == entry_price:
-        result = 'DRAW'
-        pips = 0
-    elif signal == 'CALL':
-        if current_price > entry_price:
-            result = 'WIN'
-        else:
-            result = 'LOSS'
-        pips = int(round((current_price - entry_price) * multiplier))
+    if signal == 'CALL':
+        diff_pips = current_price - entry_price
+        result = 'WIN' if current_price > entry_price else 'LOSS'
     else: 
-        if current_price < entry_price:
-            result = 'WIN'
-        else:
-            result = 'LOSS'
-        pips = int(round((entry_price - current_price) * multiplier))
+        diff_pips = entry_price - current_price
+        result = 'WIN' if current_price < entry_price else 'LOSS'
         
+    pips = int(round(diff_pips * multiplier))
+    
     cursor.execute("UPDATE signals SET status = 'COMPLETED', result = ?, pips = ? WHERE id = ?", (result, pips, sig_id))
     conn.commit()
     conn.close()
