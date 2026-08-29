@@ -1,32 +1,88 @@
+import os
+import json
+from PIL import Image
 import google.generativeai as genai
 
-def generate_ai_audit(prompt_text: str) -> str:
-    """
-    Виконує запит до Gemini з підтримкою кількох запасних моделей (fallback).
-    """
-    # Список моделей у порядку пріоритету: від нової до резервних
-    models_to_try = [
-        "gemini-3.6-flash",
-        "gemini-2.5-flash",
-        "gemini-1.5-flash"
-    ]
-    
-    for model_name in models_to_try:
+class AITradingAdvisor:
+    def __init__(self):
+        self.models_to_try = [
+            "gemini-3.6-flash",
+            "gemini-2.5-flash",
+            "gemini-1.5-flash"
+        ]
+
+    def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
+        prompt = f"""
+        Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки (1h, 15m, 5m) для активу {name}.
+        Параметри сигналу:
+        - Сигнал: {payload.get('signal')}
+        - RSI: {payload.get('rsi')}
+        - ADX: {payload.get('adx')}
+        - Глобальний тренд (1h): {payload.get('global_trend')}
+        - Середній тренд (15m): {payload.get('mid_trend')}
+        - Локальний тренд (5m): {payload.get('local_trend')}
+        - Технічна причина: {payload.get('reason')}
+        - ATR: {payload.get('atr')}
+
+        Твоє завдання — оцінити доцільність входу в угоду за цим сигналом.
+        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи markdown-обгородок (чистий JSON):
+        {{
+            "decision": "YES" або "NO",
+            "confidence": число від 1 до 10,
+            "reason": "Коротке та чітке обґрунтування українською мовою"
+        }}
+        """
+
+        content_parts = [prompt]
+        for chart in [macro_chart, mid_chart, micro_chart]:
+            if chart:
+                try:
+                    chart.seek(0)
+                    pil_img = Image.open(chart)
+                    content_parts.append(pil_img)
+                except Exception as e:
+                    print(f"⚠️ Помилка конвертації графіку в PIL.Image: {e}")
+
+        response_text = None
+        for model_name in self.models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(content_parts)
+                if response and response.text:
+                    response_text = response.text
+                    break
+            except Exception as e:
+                print(f"⚠️ Модель {model_name} недоступна: {e}")
+                continue
+
+        if not response_text:
+            print("❌ Помилка AI Audit: Усі моделі Gemini наразі недоступні.")
+            return {
+                "decision": "NO",
+                "confidence": 1,
+                "reason": "Усі моделі Gemini наразі недоступні."
+            }
+
         try:
-            # Ініціалізація моделі
-            model = genai.GenerativeModel(model_name)
-            
-            # Генерація відповіді
-            response = model.generate_content(prompt_text)
-            
-            if response and response.text:
-                return response.text
-                
+            clean_text = response_text.strip()
+            if clean_text.startswith("```json"):
+                clean_text = clean_text[7:]
+            if clean_text.startswith("```"):
+                clean_text = clean_text[3:]
+            if clean_text.endswith("```"):
+                clean_text = clean_text[:-3]
+            clean_text = clean_text.strip()
+
+            result = json.loads(clean_text)
+            return {
+                "decision": result.get("decision", "NO"),
+                "confidence": int(result.get("confidence", 5)),
+                "reason": result.get("reason", "ШІ не надав детального пояснення")
+            }
         except Exception as e:
-            # Логуємо помилку для конкретної моделі і переходимо до наступної
-            print(f"⚠️ Модель {model_name} недоступна: {e}")
-            continue
-            
-    # Якщо жодна модель не спрацювала
-    print("❌ Помилка AI Audit: Усі моделі Gemini наразі недоступні.")
-    return None
+            print(f"⚠️ Помилка парсингу відповіді ШІ: {e}. Сирий текст: {response_text}")
+            return {
+                "decision": "NO",
+                "confidence": 1,
+                "reason": "Помилка обробки відповіді ШІ"
+            }
