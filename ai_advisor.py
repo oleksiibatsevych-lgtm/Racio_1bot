@@ -5,11 +5,9 @@ from PIL import Image
 
 class AITradingAdvisor:
     def __init__(self):
-        # Оновлений список актуальних моделей для уникнення помилок 404
+        # Використовуємо gemini-3.6-flash як основну модель згідно з вимогами API
         self.models_to_try = [
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro"
+            "gemini-3.6-flash"
         ]
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
