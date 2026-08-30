@@ -29,7 +29,6 @@ ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
 
-# Ініціалізація бази даних для логів відсіяних пар (працює між воркерами Gunicorn)
 def init_logs_db():
     try:
         conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
@@ -73,7 +72,7 @@ def get_filtered_logs(chat_id):
     try:
         conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
         cursor = conn.cursor()
-        cutoff = time.time() - 3600  # Логи за останню годину
+        cutoff = time.time() - 3600
         cursor.execute("SELECT log_text FROM filtered_logs WHERE chat_id = ? AND timestamp > ? ORDER BY timestamp DESC", (chat_id, cutoff))
         rows = cursor.fetchall()
         conn.close()
@@ -165,10 +164,16 @@ def calculate_dynamic_expiration(df_fast, atr, adx=20):
             return 10
         price = float(df_fast['close'].iloc[-1])
         atr_pct = (atr / price) * 100
-        if adx > 30: return 5
-        elif adx > 22: return 10
-        elif adx < 16: return 20
-        else: return 15 if atr_pct < 0.05 else (10 if atr_pct < 0.12 else 5)
+        if adx > 30: 
+            exp = 5
+        elif adx > 22: 
+            exp = 10
+        elif adx < 16: 
+            exp = 20
+        else: 
+            exp = 15 if atr_pct < 0.05 else (10 if atr_pct < 0.12 else 5)
+        # Суворий діапазон від 5 до 20 хвилин
+        return max(5, min(20, exp))
     except:
         return 10
 
@@ -242,8 +247,7 @@ def train_ml_command(update, context):
     update.message.reply_text(msg)
 
 def run_full_scan_background(chat_id):
-    """Фонова функція для сканування всіх пар із збереженням логів у базу даних"""
-    clear_filtered_logs(chat_id)  # Очищуємо старі логи для цього чату
+    clear_filtered_logs(chat_id)
     try:
         session_str, session_code, hour = get_current_session_info()
         sent_signals_count = 0
@@ -291,7 +295,6 @@ def run_full_scan_background(chat_id):
                 # 2. Перевірка ШІ-аудиту
                 ai_confidence = 5
                 ai_reason = "Аудит пропущено"
-                ai_suggested_expiration = None
                 ai_audit_failed = False
                 try:
                     macro_chart = create_chart_image(df_macro, name, tf_label="1h")
@@ -318,7 +321,6 @@ def run_full_scan_background(chat_id):
                     else:
                         ai_confidence = ai_audit.get("confidence", 7)
                         ai_reason = ai_audit.get("reason", "Схвалено ШІ")
-                        ai_suggested_expiration = ai_audit.get("suggested_expiration")
                 except Exception as e:
                     print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
 
@@ -329,12 +331,7 @@ def run_full_scan_background(chat_id):
                 last_sent_signals[ticker] = time.time()  
                 
                 atr = sig_data.get('atr')
-                math_expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
-                
-                if ai_suggested_expiration and isinstance(ai_suggested_expiration, int) and 3 <= ai_suggested_expiration <= 30:
-                    expiration = ai_suggested_expiration
-                else:
-                    expiration = math_expiration
+                expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -485,7 +482,6 @@ def button_callback(update, context):
 
             ai_confidence = 5
             ai_reason = "Аудит пропущено"
-            ai_suggested_expiration = None
             try:
                 macro_chart = create_chart_image(df_macro, name, tf_label="1h")
                 mid_chart = create_chart_image(df_mid, name, tf_label="15m")
@@ -509,17 +505,11 @@ def button_callback(update, context):
                     
                 ai_confidence = ai_audit.get("confidence", 7)
                 ai_reason = ai_audit.get("reason", "Схвалено ШІ")
-                ai_suggested_expiration = ai_audit.get("suggested_expiration")
             except Exception as e:
                 print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
 
             atr = sig_data.get('atr')
-            math_expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
-            
-            if ai_suggested_expiration and isinstance(ai_suggested_expiration, int) and 3 <= ai_suggested_expiration <= 30:
-                expiration = ai_suggested_expiration
-            else:
-                expiration = math_expiration
+            expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
 
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
