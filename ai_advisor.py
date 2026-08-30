@@ -12,7 +12,8 @@ class AITradingAdvisor:
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
         """
-        Проводить візуальний та технічний аудит сигналу за допомогою Gemini Vision з підтримкою fallback.
+        Проводить візуальний та технічний аудит сигналу за допомогою Gemini Vision з підтримкою fallback,
+        а також адаптивно підбирає оптимальний час експірації.
         """
         prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки (1h, 15m, 5m) для активу {name}.
@@ -26,12 +27,14 @@ class AITradingAdvisor:
         - Технічна причина: {payload.get('reason')}
         - ATR: {payload.get('atr')}
 
-        Твоє завдання — оцінити доцільність входу в угоду за цим сигналом.
+        Твоє завдання — оцінити доцільність входу в угоду за цим сигналом, а також визначити оптимальний час експірації у хвилинах (наприклад, 5, 10, 15, 20 тощо). Враховуй волатильність і відстань до рівнів на графіках, щоб уникнути передчасного зрізання або запізнілого відпрацювання.
+        
         Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи markdown-обгородок (чистий JSON):
         {{
             "decision": "YES" або "NO",
             "confidence": число від 1 до 10,
-            "reason": "Коротке та чітке обґрунтування українською мовою"
+            "suggested_expiration": число хвилин (наприклад, 5, 10, 15),
+            "reason": "Коротке та чітке обґрунтування українською мовою, зокрема чому обрано саме такий час експірації"
         }}
         """
 
@@ -61,6 +64,7 @@ class AITradingAdvisor:
             return {
                 "decision": "NO",
                 "confidence": 1,
+                "suggested_expiration": 10,
                 "reason": "Усі моделі Gemini наразі недоступні."
             }
 
@@ -78,6 +82,7 @@ class AITradingAdvisor:
             return {
                 "decision": result.get("decision", "NO"),
                 "confidence": int(result.get("confidence", 5)),
+                "suggested_expiration": int(result.get("suggested_expiration", 10)),
                 "reason": result.get("reason", "ШІ не надав детального пояснення")
             }
         except Exception as e:
@@ -85,5 +90,6 @@ class AITradingAdvisor:
             return {
                 "decision": "NO",
                 "confidence": 1,
+                "suggested_expiration": 10,
                 "reason": "Помилка обробки відповіді ШІ"
             }
