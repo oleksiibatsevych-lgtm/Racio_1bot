@@ -27,6 +27,7 @@ ml_filter = TradingMLFilter()
 ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
+recent_filtered_logs = []  # Логи відсіяних пар для поточного сеансу
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
@@ -188,7 +189,9 @@ def train_ml_command(update, context):
     update.message.reply_text(msg)
 
 def run_full_scan_background(chat_id):
-    """Фонова функція для сканування всіх пар з паузою для захисту від Rate Limit"""
+    """Фонова функція для сканування всіх пар з паузою для захисту від Rate Limit та збереженням логів відсіяних"""
+    global recent_filtered_logs
+    recent_filtered_logs = []  # Очищуємо лог перед новим скануванням
     try:
         session_str, session_code, hour = get_current_session_info()
         sent_signals_count = 0
@@ -224,15 +227,19 @@ def run_full_scan_background(chat_id):
                 current_price = float(df_fast['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
+                # 1. Перевірка ML-фільтра
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
                 if win_probability < 0.54:
                     filtered_count += 1
+                    recent_filtered_logs.append(f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
                     continue
                 
+                # 2. Перевірка ШІ-аудиту
                 ai_confidence = 5
                 ai_reason = "Аудит пропущено"
+                ai_audit_failed = False
                 try:
                     macro_chart = create_chart_image(df_macro, name, tf_label="1h")
                     mid_chart = create_chart_image(df_mid, name, tf_label="15m")
@@ -252,12 +259,17 @@ def run_full_scan_background(chat_id):
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                     if ai_audit.get("decision") != "YES":
                         filtered_count += 1
-                        continue
-                        
-                    ai_confidence = ai_audit.get("confidence", 7)
-                    ai_reason = ai_audit.get("reason", "Схвалено ШІ")
+                        rejection_reason = ai_audit.get("reason", "ШІ не схвалив")
+                        recent_filtered_logs.append(f"🤖 {name}: ШІ відхилив — _{rejection_reason}_")
+                        ai_audit_failed = True
+                    else:
+                        ai_confidence = ai_audit.get("confidence", 7)
+                        ai_reason = ai_audit.get("reason", "Схвалено ШІ")
                 except Exception as e:
                     print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
+
+                if ai_audit_failed:
+                    continue
 
                 sent_signals_count += 1
                 last_sent_signals[ticker] = time.time()  
@@ -290,12 +302,16 @@ def run_full_scan_background(chat_id):
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
-                # 🛡 Контрольна пауза 5 секунд між запитами до ШІ для уникнення Rate Limit
                 time.sleep(5)
             except Exception as e:
                 print(f"Помилка {ticker}: {e}")
                 
-        bot.send_message(chat_id=chat_id, text=f"✅ Сканування завершено!\n📤 Надіслано сигналів: {sent_signals_count}\n🛡 Відсіяно фільтрами (ML + ШІ): {filtered_count}")
+        finish_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Переглянути чому відсіяно", callback_data="show_filtered_log")]])
+        bot.send_message(
+            chat_id=chat_id, 
+            text=f"✅ Сканування завершено!\n📤 Надіслано сигналів: {sent_signals_count}\n🛡 Відсіяно фільтрами (ML + ШІ): {filtered_count}",
+            reply_markup=finish_keyboard
+        )
     except Exception as e:
         print(f"Помилка у фоновому скануванні: {e}")
 
@@ -344,6 +360,18 @@ def button_callback(update, context):
     try: query.answer()
     except: pass
     
+    if query.data == "show_filtered_log":
+        if not recent_filtered_logs:
+            query.answer("Немає записів про відсіяні пари у цьому сеансі.", show_alert=True)
+            return
+        
+        log_text = "🛡 **Причини відхилення сигналів:**\n\n" + "\n".join(recent_filtered_logs[:15])
+        if len(log_text) > 4000:
+            log_text = log_text[:4000] + "...\n(список скорочено)"
+            
+        query.edit_message_text(text=log_text, parse_mode="Markdown")
+        return
+
     if query.data == "get_ai_report":
         query.edit_message_text(text=ml_filter.generate_strategy_report(), parse_mode="Markdown")
         return
@@ -438,23 +466,9 @@ def button_callback(update, context):
                 f"💡 Технічна причина: {sig_data.get('reason')}\n"
                 f"🤖 Візуальний вердикт ШІ: {ai_reason}"
             )
-            sent_msg = bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-            
-            timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            sig_id = database.save_signal(
-                ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
-                rsi=rsi, adx=adx, bb_width=bb_width,
-                session_code=session_code, hour=hour, divergence=divergence_str,
-                dist_pivot=dist_pivot, message_text=text
-            )
-            schedule_signal_timer(sig_id, timestamp_str, expiration)
             query.edit_message_text(text=text, parse_mode="Markdown")
         except Exception as e:
-            print(f"Помилка аналізу пари {ticker}: {e}")
-            try:
-                query.edit_message_text(text=f"❌ Помилка аналізу {name}")
-            except:
-                pass
+            query.edit_message_text(text=f"❌ Помилка аналізу пари: {e}")
 
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("train", train_ml_command))
