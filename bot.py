@@ -2,6 +2,7 @@ import os
 import io
 import time
 import threading
+import sqlite3
 import requests
 import yfinance as yf
 import pandas as pd
@@ -27,7 +28,59 @@ ml_filter = TradingMLFilter()
 ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
-recent_filtered_logs = []  # Логи відсіяних пар для поточного сеансу
+
+# Ініціалізація бази даних для логів відсіяних пар (працює між воркерами Gunicorn)
+def init_logs_db():
+    try:
+        conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS filtered_logs (
+                chat_id INTEGER,
+                log_text TEXT,
+                timestamp REAL
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Помилка ініціалізації БД логів: {e}")
+
+init_logs_db()
+
+def clear_filtered_logs(chat_id):
+    try:
+        conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM filtered_logs WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Помилка очищення логів: {e}")
+
+def save_filtered_log(chat_id, log_text):
+    try:
+        conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO filtered_logs (chat_id, log_text, timestamp) VALUES (?, ?, ?)", 
+                       (chat_id, log_text, time.time()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Помилка збереження логу: {e}")
+
+def get_filtered_logs(chat_id):
+    try:
+        conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cutoff = time.time() - 3600  # Логи за останню годину
+        cursor.execute("SELECT log_text FROM filtered_logs WHERE chat_id = ? AND timestamp > ? ORDER BY timestamp DESC", (chat_id, cutoff))
+        rows = cursor.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+    except Exception as e:
+        print(f"Помилка читання логів: {e}")
+        return []
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
@@ -189,9 +242,8 @@ def train_ml_command(update, context):
     update.message.reply_text(msg)
 
 def run_full_scan_background(chat_id):
-    """Фонова функція для сканування всіх пар з паузою для захисту від Rate Limit та збереженням логів відсіяних"""
-    global recent_filtered_logs
-    recent_filtered_logs = []  # Очищуємо лог перед новим скануванням
+    """Фонова функція для сканування всіх пар із збереженням логів у базу даних"""
+    clear_filtered_logs(chat_id)  # Очищуємо старі логи для цього чату
     try:
         session_str, session_code, hour = get_current_session_info()
         sent_signals_count = 0
@@ -233,7 +285,7 @@ def run_full_scan_background(chat_id):
                 )
                 if win_probability < 0.54:
                     filtered_count += 1
-                    recent_filtered_logs.append(f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
+                    save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
                     continue
                 
                 # 2. Перевірка ШІ-аудиту
@@ -261,7 +313,7 @@ def run_full_scan_background(chat_id):
                     if ai_audit.get("decision") != "YES":
                         filtered_count += 1
                         rejection_reason = ai_audit.get("reason", "ШІ не схвалив")
-                        recent_filtered_logs.append(f"🤖 {name}: ШІ відхилив — _{rejection_reason}_")
+                        save_filtered_log(chat_id, f"🤖 {name}: ШІ відхилив — _{rejection_reason}_")
                         ai_audit_failed = True
                     else:
                         ai_confidence = ai_audit.get("confidence", 7)
@@ -279,7 +331,6 @@ def run_full_scan_background(chat_id):
                 atr = sig_data.get('atr')
                 math_expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
                 
-                # Застосовуємо час експірації від ШІ, якщо він коректний (від 3 до 30 хв), інакше — математичний
                 if ai_suggested_expiration and isinstance(ai_suggested_expiration, int) and 3 <= ai_suggested_expiration <= 30:
                     expiration = ai_suggested_expiration
                 else:
@@ -365,15 +416,17 @@ def handle_text_menu(update, context):
 
 def button_callback(update, context):
     query = update.callback_query
+    chat_id = query.message.chat_id
     try: query.answer()
     except: pass
     
     if query.data == "show_filtered_log":
-        if not recent_filtered_logs:
+        logs = get_filtered_logs(chat_id)
+        if not logs:
             query.answer("Немає записів про відсіяні пари у цьому сеансі.", show_alert=True)
             return
         
-        log_text = "🛡 **Причини відхилення сигналів:**\n\n" + "\n".join(recent_filtered_logs[:15])
+        log_text = "🛡 **Причини відхилення сигналів:**\n\n" + "\n".join(logs[:15])
         if len(log_text) > 4000:
             log_text = log_text[:4000] + "...\n(список скорочено)"
             
