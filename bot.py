@@ -16,7 +16,7 @@ from indicators import AdaptiveTechnicalAnalysis
 import database
 from ml_model import TradingMLFilter
 from ai_advisor import AITradingAdvisor
-from charts import create_combined_charts_image
+from charts import create_chart_image
 
 app = Flask(__name__)
 
@@ -83,15 +83,45 @@ def get_filtered_logs(chat_id):
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
+        
+        response = requests.get(url, headers=headers, params=params, timeout=(3, 5))
+        if response.status_code == 200:
+            content_type = response.headers.get("Content-Type", "")
+            if "application/json" not in content_type:
+                raise ValueError(f"Отримано HTML замість JSON (Content-Type: {content_type})")
+            
+            data = response.json()
+            result = data.get("chart", {}).get("result")
+            if result:
+                res = result[0]
+                timestamps = res.get("timestamp", [])
+                quotes = res.get("indicators", {}).get("quote", [{}])[0]
+                if timestamps and quotes:
+                    df = pd.DataFrame({
+                        "open": quotes.get("open", []),
+                        "high": quotes.get("high", []),
+                        "low": quotes.get("low", []),
+                        "close": quotes.get("close", []),
+                        "volume": quotes.get("volume", [0] * len(timestamps))
+                    }, index=pd.to_datetime(timestamps, unit="s"))
+                    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+                    df["volume"] = df["volume"].fillna(0)
+                    if not df.empty:
+                        return df
+    except Exception as e:
+        print(f"⚠️ Прямий запит для {ticker} заблоковано: {e}")
+
+    try:
         yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
         mapped_interval = yf_interval_map.get(interval, "15m")
         
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
-        
-        df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, progress=False, session=session)
+        df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, progress=False)
         if not df_yf.empty:
             if isinstance(df_yf.columns, pd.MultiIndex):
                 df_yf.columns = df_yf.columns.get_level_values(0)
@@ -104,7 +134,7 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
             df_yf["volume"] = df_yf["volume"].fillna(0)
             return df_yf
     except Exception as e:
-        print(f"❌ Помилка завантаження yfinance для {ticker}: {e}")
+        print(f"❌ Помилка резервного джерела yfinance для {ticker}: {e}")
 
     return pd.DataFrame()
 
@@ -233,16 +263,13 @@ def run_full_scan_background(chat_id):
         for name, ticker in PAIRS_MAP.items():
             try:
                 if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
-                    time.sleep(4)
                     continue
 
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
                 df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
                 
-                if df_macro.empty or df_mid.empty or df_fast.empty:
-                    time.sleep(4)
-                    continue
+                if df_macro.empty or df_mid.empty or df_fast.empty: continue
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
@@ -252,9 +279,7 @@ def run_full_scan_background(chat_id):
                 sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
                 
                 signal_type = sig_data.get('signal')
-                if signal_type not in ['CALL', 'PUT']:
-                    time.sleep(4)
-                    continue
+                if signal_type not in ['CALL', 'PUT']: continue
                 
                 rsi = sig_data.get('rsi', 50)
                 adx = sig_data.get('adx', 20)
@@ -270,14 +295,15 @@ def run_full_scan_background(chat_id):
                 if win_probability < 0.54:
                     filtered_count += 1
                     save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
-                    time.sleep(4)
                     continue
                 
                 ai_confidence = 5
                 ai_reason = "Аудит пропущено"
                 ai_audit_failed = False
                 try:
-                    combined_chart = create_combined_charts_image(df_macro, df_mid, df_fast, name)
+                    macro_chart = create_chart_image(df_macro, name, tf_label="1h")
+                    mid_chart = create_chart_image(df_mid, name, tf_label="15m")
+                    micro_chart = create_chart_image(df_fast, name, tf_label="5m")
 
                     ai_payload = {
                         'signal': signal_type,
@@ -290,7 +316,7 @@ def run_full_scan_background(chat_id):
                         'atr': sig_data.get('atr')
                     }
 
-                    ai_audit = ai_advisor.evaluate_signal(name, ai_payload, combined_chart)
+                    ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                     if ai_audit.get("decision") != "YES":
                         filtered_count += 1
                         rejection_reason = ai_audit.get("reason", "ШІ не схвалив")
@@ -303,7 +329,6 @@ def run_full_scan_background(chat_id):
                     print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
 
                 if ai_audit_failed:
-                    time.sleep(4)
                     continue
 
                 sent_signals_count += 1
@@ -337,10 +362,9 @@ def run_full_scan_background(chat_id):
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
-                time.sleep(4)
+                time.sleep(5)
             except Exception as e:
                 print(f"Помилка {ticker}: {e}")
-                time.sleep(4)
                 
         finish_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Переглянути чому відсіяно", callback_data="show_filtered_log")]])
         bot.send_message(
@@ -463,7 +487,9 @@ def button_callback(update, context):
             ai_confidence = 5
             ai_reason = "Аудит пропущено"
             try:
-                combined_chart = create_combined_charts_image(df_macro, df_mid, df_fast, name)
+                macro_chart = create_chart_image(df_macro, name, tf_label="1h")
+                mid_chart = create_chart_image(df_mid, name, tf_label="15m")
+                micro_chart = create_chart_image(df_fast, name, tf_label="5m")
 
                 ai_payload = {
                     'signal': signal_type,
@@ -476,7 +502,7 @@ def button_callback(update, context):
                     'atr': sig_data.get('atr')
                 }
 
-                ai_audit = ai_advisor.evaluate_signal(name, ai_payload, combined_chart)
+                ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                 if ai_audit.get("decision") != "YES":
                     query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по **{name}**:\n_{ai_audit.get('reason')}_", parse_mode="Markdown")
                     return
