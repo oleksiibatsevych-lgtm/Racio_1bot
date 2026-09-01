@@ -10,10 +10,6 @@ class AITradingAdvisor:
         ]
 
     def evaluate_signal(self, name, payload, combined_chart):
-        """
-        Проводить візуальний та технічний аудит сигналу за допомогою Gemini Vision, використовуючи 
-        зведене зображення графіків та лаконічний системний промпт[span_3](start_span)[span_3](end_span).
-        """
         prompt = f"""
         Ти професійний трейдер. Оціни торговий сигнал для {name} за даними та зведеним графіком (1h/15m/5m):
         - Сигнал: {payload.get('signal')} | RSI: {payload.get('rsi')} | ADX: {payload.get('adx')}
