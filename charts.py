@@ -1,4 +1,5 @@
 import io
+from PIL import Image
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -6,7 +7,7 @@ import pandas as pd
 
 def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.BytesIO:
     plot_df = df.tail(60).copy().reset_index(drop=True)
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(10, 4))
 
     if 'local_support' in df.columns and 'local_resistance' in df.columns:
         last_sup = df['local_support'].iloc[-1]
@@ -35,10 +36,10 @@ def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.B
     ax.axhline(y=last_sup, color="#00897b", linestyle="--", alpha=0.8, linewidth=1)
     ax.axhline(y=last_res, color="#c62828", linestyle="--", alpha=0.8, linewidth=1)
 
-    ax.set_title(f"Asset: {asset_name} [{tf_label}]", fontsize=10, color="white", weight="bold")
+    ax.set_title(f"Asset: {asset_name} [{tf_label}]", fontsize=9, color="white", weight="bold")
     ax.grid(True, color="#2a2e39", alpha=0.5)
     ax.set_facecolor("#131722")
-    ax.tick_params(colors="white")
+    ax.tick_params(colors="white", labelsize=8)
     for spine in ax.spines.values():
         spine.set_edgecolor("#2a2e39")
 
@@ -46,7 +47,30 @@ def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.B
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
+    plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor(), edgecolor="none")
     buf.seek(0)
     plt.close(fig)
     return buf
+
+def create_combined_charts_image(df_macro, df_mid, df_fast, asset_name) -> io.BytesIO:
+    """Об'єднує три таймфрейми (1h, 15m, 5m) в одне вертикальне зображення за допомогою Pillow."""
+    buf_macro = create_chart_image(df_macro, asset_name, tf_label="1h")
+    buf_mid = create_chart_image(df_mid, asset_name, tf_label="15m")
+    buf_micro = create_chart_image(df_fast, asset_name, tf_label="5m")
+
+    img_macro = Image.open(buf_macro)
+    img_mid = Image.open(buf_mid)
+    img_micro = Image.open(buf_micro)
+
+    w = max(img_macro.width, img_mid.width, img_micro.width)
+    h = img_macro.height + img_mid.height + img_micro.height
+
+    combined = Image.new("RGB", (w, h), color="#131722")
+    combined.paste(img_macro, (0, 0))
+    combined.paste(img_mid, (0, img_macro.height))
+    combined.paste(img_micro, (0, img_macro.height + img_mid.height))
+
+    out_buf = io.BytesIO()
+    combined.save(out_buf, format="PNG", optimize=True)
+    out_buf.seek(0)
+    return out_buf
