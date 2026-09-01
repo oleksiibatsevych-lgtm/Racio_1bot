@@ -6,8 +6,8 @@ from PIL import Image
 class AITradingAdvisor:
     def __init__(self):
         self.models_to_try = [
-            "gemini-1.5-flash",
-            "gemini-2.5-flash"
+            "gemini-3.6-flash",
+            "gemini-2.0-flash"
         ]
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
