@@ -16,7 +16,7 @@ from indicators import AdaptiveTechnicalAnalysis
 import database
 from ml_model import TradingMLFilter
 from ai_advisor import AITradingAdvisor
-from charts import create_chart_image
+from charts import create_combined_charts_image
 
 app = Flask(__name__)
 
@@ -83,7 +83,7 @@ def get_filtered_logs(chat_id):
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         
@@ -172,7 +172,6 @@ def calculate_dynamic_expiration(df_fast, atr, adx=20):
             exp = 20
         else: 
             exp = 15 if atr_pct < 0.05 else (10 if atr_pct < 0.12 else 5)
-        # Суворий діапазон від 5 до 20 хвилин
         return max(5, min(20, exp))
     except:
         return 10
@@ -257,13 +256,16 @@ def run_full_scan_background(chat_id):
         for name, ticker in PAIRS_MAP.items():
             try:
                 if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
+                    time.sleep(4) # Throttling для пропущених за тайм-аутом
                     continue
 
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
                 df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
                 
-                if df_macro.empty or df_mid.empty or df_fast.empty: continue
+                if df_macro.empty or df_mid.empty or df_fast.empty:
+                    time.sleep(4)
+                    continue
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
@@ -273,7 +275,9 @@ def run_full_scan_background(chat_id):
                 sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
                 
                 signal_type = sig_data.get('signal')
-                if signal_type not in ['CALL', 'PUT']: continue
+                if signal_type not in ['CALL', 'PUT']:
+                    time.sleep(4)
+                    continue
                 
                 rsi = sig_data.get('rsi', 50)
                 adx = sig_data.get('adx', 20)
@@ -283,23 +287,23 @@ def run_full_scan_background(chat_id):
                 current_price = float(df_fast['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
-                # 1. Перевірка ML-фільтра
+                # Жорсткий попередній фільтр (Pre-filtering): Відсікаємо ДО побудови графіків та запитів до ШІ
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
                 if win_probability < 0.54:
                     filtered_count += 1
                     save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
+                    time.sleep(4)
                     continue
                 
-                # 2. Перевірка ШІ-аудиту
+                # ШІ-аудит запускається ТІЛЬКИ для якісних сигналів з імовірністю > 54%
                 ai_confidence = 5
                 ai_reason = "Аудит пропущено"
                 ai_audit_failed = False
                 try:
-                    macro_chart = create_chart_image(df_macro, name, tf_label="1h")
-                    mid_chart = create_chart_image(df_mid, name, tf_label="15m")
-                    micro_chart = create_chart_image(df_fast, name, tf_label="5m")
+                    # Об'єднуємо графіки в один коллас за допомогою Pillow замість трьох окремих файлів
+                    combined_chart = create_combined_charts_image(df_macro, df_mid, df_fast, name)
 
                     ai_payload = {
                         'signal': signal_type,
@@ -312,7 +316,7 @@ def run_full_scan_background(chat_id):
                         'atr': sig_data.get('atr')
                     }
 
-                    ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
+                    ai_audit = ai_advisor.evaluate_signal(name, ai_payload, combined_chart)
                     if ai_audit.get("decision") != "YES":
                         filtered_count += 1
                         rejection_reason = ai_audit.get("reason", "ШІ не схвалив")
@@ -325,6 +329,7 @@ def run_full_scan_background(chat_id):
                     print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
 
                 if ai_audit_failed:
+                    time.sleep(4)
                     continue
 
                 sent_signals_count += 1
@@ -358,9 +363,11 @@ def run_full_scan_background(chat_id):
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
-                time.sleep(5)
+                # Примусова затримка time.sleep(4) між обробкою валютних пар для захисту від лімітів RPM
+                time.sleep(4)
             except Exception as e:
                 print(f"Помилка {ticker}: {e}")
+                time.sleep(4)
                 
         finish_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Переглянути чому відсіяно", callback_data="show_filtered_log")]])
         bot.send_message(
@@ -462,7 +469,7 @@ def button_callback(update, context):
             
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
-                query.edit_message_text(text=f"ℹ️ По **{name}** наразі сигнал **HOLD** (умови не сформовані).", parse_mode="Markdown")
+                query.edit_message_text(text=f"ℹ️ По **{name}** наразі сигнал **HOLD** (умови не сформовані).", parse_Mode="Markdown")
                 return
 
             rsi = sig_data.get('rsi', 50)
@@ -483,9 +490,7 @@ def button_callback(update, context):
             ai_confidence = 5
             ai_reason = "Аудит пропущено"
             try:
-                macro_chart = create_chart_image(df_macro, name, tf_label="1h")
-                mid_chart = create_chart_image(df_mid, name, tf_label="15m")
-                micro_chart = create_chart_image(df_fast, name, tf_label="5m")
+                combined_chart = create_combined_charts_image(df_macro, df_mid, df_fast, name)
 
                 ai_payload = {
                     'signal': signal_type,
@@ -498,7 +503,7 @@ def button_callback(update, context):
                     'atr': sig_data.get('atr')
                 }
 
-                ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
+                ai_audit = ai_advisor.evaluate_signal(name, ai_payload, combined_chart)
                 if ai_audit.get("decision") != "YES":
                     query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по **{name}**:\n_{ai_audit.get('reason')}_", parse_mode="Markdown")
                     return
