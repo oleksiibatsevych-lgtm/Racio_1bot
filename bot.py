@@ -3,6 +3,7 @@ import io
 import time
 import threading
 import sqlite3
+import requests
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
@@ -85,7 +86,12 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
         yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
         mapped_interval = yf_interval_map.get(interval, "15m")
         
-        df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, progress=False)
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        
+        df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, progress=False, session=session)
         if not df_yf.empty:
             if isinstance(df_yf.columns, pd.MultiIndex):
                 df_yf.columns = df_yf.columns.get_level_values(0)
