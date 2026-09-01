@@ -3,7 +3,6 @@ import io
 import time
 import threading
 import sqlite3
-import requests
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
@@ -83,34 +82,6 @@ def get_filtered_logs(chat_id):
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
-        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
-        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        
-        response = requests.get(url, headers=headers, params=params, timeout=(3, 5))
-        if response.status_code == 200:
-            data = response.json()
-            result = data.get("chart", {}).get("result")
-            if result:
-                res = result[0]
-                timestamps = res.get("timestamp", [])
-                quotes = res.get("indicators", {}).get("quote", [{}])[0]
-                if timestamps and quotes:
-                    df = pd.DataFrame({
-                        "open": quotes.get("open", []),
-                        "high": quotes.get("high", []),
-                        "low": quotes.get("low", []),
-                        "close": quotes.get("close", []),
-                        "volume": quotes.get("volume", [0] * len(timestamps))
-                    }, index=pd.to_datetime(timestamps, unit="s"))
-                    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
-                    df["volume"] = df["volume"].fillna(0)
-                    if not df.empty:
-                        return df
-    except Exception as e:
-        print(f"⚠️ Прямий запит для {ticker} не вдався: {e}. Перемикаємось на резервний yfinance...")
-
-    try:
         yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
         mapped_interval = yf_interval_map.get(interval, "15m")
         
@@ -127,7 +98,7 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
             df_yf["volume"] = df_yf["volume"].fillna(0)
             return df_yf
     except Exception as e:
-        print(f"❌ Помилка резервного джерела yfinance для {ticker}: {e}")
+        print(f"❌ Помилка завантаження yfinance для {ticker}: {e}")
 
     return pd.DataFrame()
 
@@ -256,7 +227,7 @@ def run_full_scan_background(chat_id):
         for name, ticker in PAIRS_MAP.items():
             try:
                 if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
-                    time.sleep(4) # Throttling для пропущених за тайм-аутом
+                    time.sleep(4)
                     continue
 
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
@@ -287,7 +258,6 @@ def run_full_scan_background(chat_id):
                 current_price = float(df_fast['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
-                # Жорсткий попередній фільтр (Pre-filtering): Відсікаємо ДО побудови графіків та запитів до ШІ
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
@@ -297,12 +267,10 @@ def run_full_scan_background(chat_id):
                     time.sleep(4)
                     continue
                 
-                # ШІ-аудит запускається ТІЛЬКИ для якісних сигналів з імовірністю > 54%
                 ai_confidence = 5
                 ai_reason = "Аудит пропущено"
                 ai_audit_failed = False
                 try:
-                    # Об'єднуємо графіки в один коллас за допомогою Pillow замість трьох окремих файлів
                     combined_chart = create_combined_charts_image(df_macro, df_mid, df_fast, name)
 
                     ai_payload = {
@@ -363,7 +331,6 @@ def run_full_scan_background(chat_id):
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
-                # Примусова затримка time.sleep(4) між обробкою валютних пар для захисту від лімітів RPM
                 time.sleep(4)
             except Exception as e:
                 print(f"Помилка {ticker}: {e}")
@@ -469,7 +436,7 @@ def button_callback(update, context):
             
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
-                query.edit_message_text(text=f"ℹ️ По **{name}** наразі сигнал **HOLD** (умови не сформовані).", parse_Mode="Markdown")
+                query.edit_message_text(text=f"ℹ️ По **{name}** наразі сигнал **HOLD** (умови не сформовані).", parse_mode="Markdown")
                 return
 
             rsi = sig_data.get('rsi', 50)
