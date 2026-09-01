@@ -82,19 +82,39 @@ def get_filtered_logs(chat_id):
         return []
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
-    yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
-    mapped_interval = yf_interval_map.get(interval, "15m")
-    
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Referer": "https://finance.yahoo.com"
-    })
-    
     try:
-        df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, session=session, progress=False)
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        
+        response = requests.get(url, headers=headers, params=params, timeout=(3, 5))
+        if response.status_code == 200:
+            data = response.json()
+            result = data.get("chart", {}).get("result")
+            if result:
+                res = result[0]
+                timestamps = res.get("timestamp", [])
+                quotes = res.get("indicators", {}).get("quote", [{}])[0]
+                if timestamps and quotes:
+                    df = pd.DataFrame({
+                        "open": quotes.get("open", []),
+                        "high": quotes.get("high", []),
+                        "low": quotes.get("low", []),
+                        "close": quotes.get("close", []),
+                        "volume": quotes.get("volume", [0] * len(timestamps))
+                    }, index=pd.to_datetime(timestamps, unit="s"))
+                    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+                    df["volume"] = df["volume"].fillna(0)
+                    if not df.empty:
+                        return df
+    except Exception as e:
+        pass
+
+    try:
+        yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
+        mapped_interval = yf_interval_map.get(interval, "15m")
+        
+        df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, progress=False)
         if not df_yf.empty:
             if isinstance(df_yf.columns, pd.MultiIndex):
                 df_yf.columns = df_yf.columns.get_level_values(0)
@@ -105,10 +125,9 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
             df_yf = df_yf[["open", "high", "low", "close", "volume"]].copy()
             df_yf.dropna(subset=["open", "high", "low", "close"], inplace=True)
             df_yf["volume"] = df_yf["volume"].fillna(0)
-            if not df_yf.empty:
-                return df_yf
+            return df_yf
     except Exception as e:
-        print(f"❌ Помилка завантаження через yfinance для {ticker}: {e}")
+        pass
 
     return pd.DataFrame()
 
