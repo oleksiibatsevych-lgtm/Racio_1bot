@@ -53,7 +53,6 @@ def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.B
     return buf
 
 def create_combined_charts_image(df_macro, df_mid, df_fast, asset_name) -> io.BytesIO:
-    """Об'єднує три таймфрейми (1h, 15m, 5m) в одне вертикальне зображення за допомогою Pillow."""
     buf_macro = create_chart_image(df_macro, asset_name, tf_label="1h")
     buf_mid = create_chart_image(df_mid, asset_name, tf_label="15m")
     buf_micro = create_chart_image(df_fast, asset_name, tf_label="5m")
