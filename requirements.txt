@@ -12,3 +12,4 @@ pandas-ta
 scikit-learn
 joblib
 google-generativeai
+cachetools==5.3.3
