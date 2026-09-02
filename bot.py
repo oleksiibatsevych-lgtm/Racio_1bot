@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
+from cachetools import TTLCache
 
 from config import TELEGRAM_TOKEN, PAIRS_MAP
 from indicators import AdaptiveTechnicalAnalysis
@@ -28,6 +29,9 @@ ml_filter = TradingMLFilter()
 ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
+
+# Кеш запитів котирувань на 3 хвилини (180 секунд), до 150 записів
+quote_cache = TTLCache(maxsize=150, ttl=180)
 
 def init_logs_db():
     try:
@@ -81,7 +85,7 @@ def get_filtered_logs(chat_id):
         print(f"Помилка читання логів: {e}")
         return []
 
-def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
+def fetch_yahoo_data_raw(ticker, interval="15m", range_period="10d"):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
@@ -130,6 +134,16 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
         pass
 
     return pd.DataFrame()
+
+def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
+    cache_key = (ticker, interval, range_period)
+    if cache_key in quote_cache:
+        return quote_cache[cache_key].copy()
+    
+    df = fetch_yahoo_data_raw(ticker, interval, range_period)
+    if not df.empty:
+        quote_cache[cache_key] = df.copy()
+    return df
 
 def get_current_session_info():
     now_utc = datetime.utcnow()
@@ -239,7 +253,7 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    update.message.reply_text("Бот Racio_1 готовий до роботи (RSI + BB + Дивергенції + ШІ-аудит)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("Бот Racio_1 готовий до роботи (Кешування + RSI + BB + Дивергенції + ШІ-аудит)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
@@ -285,9 +299,10 @@ def run_full_scan_background(chat_id):
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
-                if win_probability < 0.54:
+                # Оновлений поріг до 0.58 (58%) для досягнення беззбитковості
+                if win_probability < 0.58:
                     filtered_count += 1
-                    save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
+                    save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 58%)")
                     continue
                 
                 ai_confidence = 5
@@ -355,7 +370,7 @@ def run_full_scan_background(chat_id):
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
-                time.sleep(5)
+                time.sleep(3)
             except Exception as e:
                 print(f"Помилка {ticker}: {e}")
                 
@@ -473,8 +488,8 @@ def button_callback(update, context):
             win_probability = ml_filter.predict_signal_probability(
                 rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
             )
-            if win_probability < 0.54:
-                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової).", parse_mode="Markdown")
+            if win_probability < 0.58:
+                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової 58%).", parse_mode="Markdown")
                 return
 
             ai_confidence = 5
