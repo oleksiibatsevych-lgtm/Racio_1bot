@@ -83,9 +83,12 @@ def get_filtered_logs(chat_id):
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
-        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
         
         response = requests.get(url, headers=headers, params=params, timeout=(3, 5))
         if response.status_code == 200:
@@ -172,7 +175,6 @@ def calculate_dynamic_expiration(df_fast, atr, adx=20):
             exp = 20
         else: 
             exp = 15 if atr_pct < 0.05 else (10 if atr_pct < 0.12 else 5)
-        # Суворий діапазон від 5 до 20 хвилин
         return max(5, min(20, exp))
     except:
         return 10
@@ -283,7 +285,6 @@ def run_full_scan_background(chat_id):
                 current_price = float(df_fast['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
-                # 1. Перевірка ML-фільтра
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
@@ -292,7 +293,6 @@ def run_full_scan_background(chat_id):
                     save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
                     continue
                 
-                # 2. Перевірка ШІ-аудиту
                 ai_confidence = 5
                 ai_reason = "Аудит пропущено"
                 ai_audit_failed = False
