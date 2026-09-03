@@ -284,7 +284,7 @@ def run_full_scan_background(chat_id):
                 pivots = analyzer.calculate_pivots(df_macro)
                 
                 df_indicators = analyzer.calculate_indicators(df_fast)
-                sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend, ticker)
+                sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend)
                 
                 signal_type = sig_data.get('signal')
                 if signal_type not in ['CALL', 'PUT']:
@@ -334,7 +334,6 @@ def run_full_scan_background(chat_id):
                     rejection_reason = ai_audit.get("reason", "")
                     decision = ai_audit.get("decision", "NO")
 
-                    # Список ключових слів, що вказують на зайнятість моделей, ліміти або помилки ШІ
                     busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
                     is_ai_busy = any(kw in rejection_reason.lower() for kw in busy_keywords)
 
@@ -342,7 +341,6 @@ def run_full_scan_background(chat_id):
                         ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
                         ai_confidence = 7
                     elif decision != "YES" or ai_confidence < 7:
-                        # Це реальне відхилення ШІ через ринкові умови
                         filtered_count += 1
                         log_msg = f"🤖 {name}: ШІ відхилив — _{rejection_reason}_ (Впевненість: {ai_confidence}/10)"
                         logger.info(log_msg)
@@ -491,7 +489,7 @@ def button_callback(update, context):
             pivots = analyzer.calculate_pivots(df_macro)
             
             df_indicators = analyzer.calculate_indicators(df_fast)
-            sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend, ticker)
+            sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend)
             
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
