@@ -32,10 +32,10 @@ class TradingMLFilter:
 
     def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0):
         if self.model is None:
-            base = 0.60
-            if rsi < 35 or rsi > 65: base += 0.05
+            base = 0.58
+            if rsi < 35 or rsi > 65: base += 0.06
             if adx > 25: base += 0.05
-            if divergence != "NONE": base += 0.07
+            if divergence != "NONE": base += 0.08
             return min(round(base, 2), 0.95)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot)
