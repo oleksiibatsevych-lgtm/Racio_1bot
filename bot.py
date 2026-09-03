@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
-from cachetools import TTLCache
 
 from config import TELEGRAM_TOKEN, PAIRS_MAP
 from indicators import AdaptiveTechnicalAnalysis
@@ -29,9 +28,6 @@ ml_filter = TradingMLFilter()
 ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
-
-# Кеш запитів котирувань на 3 хвилини (180 секунд), до 150 записів
-quote_cache = TTLCache(maxsize=150, ttl=180)
 
 def init_logs_db():
     try:
@@ -85,7 +81,7 @@ def get_filtered_logs(chat_id):
         print(f"Помилка читання логів: {e}")
         return []
 
-def fetch_yahoo_data_raw(ticker, interval="15m", range_period="10d"):
+def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
@@ -134,16 +130,6 @@ def fetch_yahoo_data_raw(ticker, interval="15m", range_period="10d"):
         pass
 
     return pd.DataFrame()
-
-def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
-    cache_key = (ticker, interval, range_period)
-    if cache_key in quote_cache:
-        return quote_cache[cache_key].copy()
-    
-    df = fetch_yahoo_data_raw(ticker, interval, range_period)
-    if not df.empty:
-        quote_cache[cache_key] = df.copy()
-    return df
 
 def get_current_session_info():
     now_utc = datetime.utcnow()
@@ -253,7 +239,7 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    update.message.reply_text("Бот Racio_1 готовий до роботи (Кешування + RSI + BB + Дивергенції + ШІ-аудит)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("Бот Racio_1 готовий до роботи (RSI + BB + Дивергенції + ШІ-аудит)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
@@ -280,10 +266,11 @@ def run_full_scan_background(chat_id):
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
+                local_trend = analyzer.get_trend(df_fast, span_val=10)
                 pivots = analyzer.calculate_pivots(df_macro)
                 
                 df_indicators = analyzer.calculate_indicators(df_fast)
-                sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
+                sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend, ticker)
                 
                 signal_type = sig_data.get('signal')
                 if signal_type not in ['CALL', 'PUT']: continue
@@ -299,10 +286,9 @@ def run_full_scan_background(chat_id):
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
-                # Оновлений поріг до 0.58 (58%) для досягнення беззбитковості
-                if win_probability < 0.58:
+                if win_probability < 0.54:
                     filtered_count += 1
-                    save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 58%)")
+                    save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
                     continue
                 
                 ai_confidence = 5
@@ -318,20 +304,22 @@ def run_full_scan_background(chat_id):
                         'adx': adx,
                         'global_trend': global_trend,
                         'mid_trend': mid_trend,
-                        'local_trend': analyzer.get_trend(df_fast, span_val=10),
+                        'local_trend': local_trend,
                         'reason': sig_data.get('reason'),
                         'rsi': rsi,
                         'atr': sig_data.get('atr')
                     }
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
-                    if ai_audit.get("decision") != "YES":
+                    ai_confidence = int(ai_audit.get("confidence", 5))
+                    
+                    # Суворий поріг впевненості ШІ >= 7
+                    if ai_audit.get("decision") != "YES" or ai_confidence < 7:
                         filtered_count += 1
-                        rejection_reason = ai_audit.get("reason", "ШІ не схвалив")
-                        save_filtered_log(chat_id, f"🤖 {name}: ШІ відхилив — _{rejection_reason}_")
+                        rejection_reason = ai_audit.get("reason", "ШІ не схвалив або впевненість < 7")
+                        save_filtered_log(chat_id, f"🤖 {name}: ШІ відхилив — _{rejection_reason}_ (Впевненість: {ai_confidence}/10)")
                         ai_audit_failed = True
                     else:
-                        ai_confidence = ai_audit.get("confidence", 7)
                         ai_reason = ai_audit.get("reason", "Схвалено ШІ")
                 except Exception as e:
                     print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
@@ -352,7 +340,7 @@ def run_full_scan_background(chat_id):
                     f"📊 {name} ({ticker})\n"
                     f"{icon} {action_text} | ⏱ {expiration} хв\n"
                     f"🎯 Ціна входу: {current_price:.5f}\n"
-                    f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
+                    f"📈 Тренд (гл/сер/лок): {global_trend} / {mid_trend} / {local_trend}\n"
                     f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                     f"🌐 Сесія: {session_str}\n"
                     f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
@@ -370,7 +358,7 @@ def run_full_scan_background(chat_id):
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
-                time.sleep(3)
+                time.sleep(5)
             except Exception as e:
                 print(f"Помилка {ticker}: {e}")
                 
@@ -467,14 +455,15 @@ def button_callback(update, context):
 
             global_trend = analyzer.get_trend(df_macro, span_val=200)
             mid_trend = analyzer.get_trend(df_mid, span_val=50)
+            local_trend = analyzer.get_trend(df_fast, span_val=10)
             pivots = analyzer.calculate_pivots(df_macro)
             
             df_indicators = analyzer.calculate_indicators(df_fast)
-            sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, ticker)
+            sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend, ticker)
             
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
-                query.edit_message_text(text=f"ℹ️ По **{name}** наразі сигнал **HOLD** (умови не сформовані).", parse_mode="Markdown")
+                query.edit_message_text(text=f"ℹ️ По **{name}** наразі сигнал **HOLD** (умови не сформовані або відфільтровані ATR).", parse_mode="Markdown")
                 return
 
             rsi = sig_data.get('rsi', 50)
@@ -488,8 +477,8 @@ def button_callback(update, context):
             win_probability = ml_filter.predict_signal_probability(
                 rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
             )
-            if win_probability < 0.58:
-                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової 58%).", parse_mode="Markdown")
+            if win_probability < 0.54:
+                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової).", parse_mode="Markdown")
                 return
 
             ai_confidence = 5
@@ -504,18 +493,19 @@ def button_callback(update, context):
                     'adx': adx,
                     'global_trend': global_trend,
                     'mid_trend': mid_trend,
-                    'local_trend': analyzer.get_trend(df_fast, span_val=10),
+                    'local_trend': local_trend,
                     'reason': sig_data.get('reason'),
                     'rsi': rsi,
                     'atr': sig_data.get('atr')
                 }
 
                 ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
-                if ai_audit.get("decision") != "YES":
-                    query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по **{name}**:\n_{ai_audit.get('reason')}_", parse_mode="Markdown")
+                ai_confidence = int(ai_audit.get("confidence", 5))
+
+                if ai_audit.get("decision") != "YES" or ai_confidence < 7:
+                    query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по **{name}** (впевненість {ai_confidence}/10):\n_{ai_audit.get('reason')}_", parse_mode="Markdown")
                     return
                     
-                ai_confidence = ai_audit.get("confidence", 7)
                 ai_reason = ai_audit.get("reason", "Схвалено ШІ")
             except Exception as e:
                 print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
@@ -530,7 +520,7 @@ def button_callback(update, context):
                 f"📊 {name} ({ticker})\n"
                 f"{icon} {action_text} | ⏱ {expiration} хв\n"
                 f"🎯 Ціна входу: {current_price:.5f}\n"
-                f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
+                f"📈 Тренд (гл/сер/лок): {global_trend} / {mid_trend} / {local_trend}\n"
                 f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                 f"🌐 Сесія: {session_str}\n"
                 f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
