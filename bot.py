@@ -36,14 +36,6 @@ ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
 
-def escape_markdown(text):
-    if not text:
-        return ""
-    chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for c in chars:
-        text = text.replace(c, f"\\{c}")
-    return text
-
 def init_logs_db():
     try:
         conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
@@ -338,7 +330,7 @@ def run_full_scan_background(chat_id):
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                     ai_confidence = int(ai_audit.get("confidence", 5))
-                    rejection_reason = escape_markdown(ai_audit.get("reason", ""))
+                    rejection_reason = str(ai_audit.get("reason", ""))
                     decision = ai_audit.get("decision", "NO")
 
                     busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
@@ -349,7 +341,7 @@ def run_full_scan_background(chat_id):
                         ai_confidence = 7
                     elif decision != "YES" or ai_confidence < 7:
                         filtered_count += 1
-                        log_msg = f"🤖 {name}: ШІ відхилив — _{rejection_reason}_ (Впевненість: {ai_confidence}/10)"
+                        log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
                         logger.info(log_msg)
                         save_filtered_log(chat_id, log_msg)
                         ai_audit_failed = True
@@ -380,10 +372,11 @@ def run_full_scan_background(chat_id):
                     f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                     f"🌐 Сесія: {session_str}\n"
                     f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
-                    f"💡 Технічна причина: {escape_markdown(str(sig_data.get('reason')))}\n"
+                    f"💡 Технічна причина: {str(sig_data.get('reason'))}\n"
                     f"🤖 Візуальний вердикт ШІ: {ai_reason}"
                 )
-                sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
+                # БЕЗ parse_mode="Markdown" щоб уникнути помилок синтаксису в динамічних текстах
+                sent_msg = bot.send_message(chat_id=chat_id, text=msg_text)
                 
                 timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 sig_id = database.save_signal(
@@ -435,15 +428,15 @@ def handle_text_menu(update, context):
             stats = database.get_overall_stats()
             ml_filter.train_model()
             stats_text = (
-                f"📈 **Правдива статистика трейдингу:**\n"
+                f"📈 Правдива статистика трейдингу:\n"
                 f"• Успішних угод (WIN): {stats.get('wins', 0)}\n"
                 f"• Нейтральних угод (BE): {stats.get('neutral', 0)}\n"
                 f"• Збиткових угод (LOSS): {stats.get('losses', 0)}\n"
                 f"• Усього перевірених угод: {stats.get('total', 0)}\n"
-                f"• Реальний вінрейт: **{stats.get('winrate', 0)}%**\n\n"
-                f"🤖 *Модель успішно перенавчена.*"
+                f"• Реальний вінрейт: {stats.get('winrate', 0)}%\n\n"
+                f"🤖 Модель успішно перенавчена."
             )
-            update.message.reply_text(stats_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Звіт ШІ", callback_data="get_ai_report")]]))
+            update.message.reply_text(stats_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Звіт ШІ", callback_data="get_ai_report")]]))
         except Exception as e:
             logger.exception(f"Помилка статистики: {e}")
             update.message.reply_text(f"Помилка статистики: {e}")
@@ -460,15 +453,15 @@ def button_callback(update, context):
             query.answer("Немає записів про відсіяні пари у цьому сеансі.", show_alert=True)
             return
         
-        log_text = "🛡 **Причини відхилення сигналів:**\n\n" + "\n".join(logs[:15])
+        log_text = "🛡 Причини відхилення сигналів:\n\n" + "\n".join(logs[:15])
         if len(log_text) > 4000:
             log_text = log_text[:4000] + "...\n(спискок скорочено)"
             
-        query.edit_message_text(text=log_text, parse_mode="Markdown")
+        query.edit_message_text(text=log_text)
         return
 
     if query.data == "get_ai_report":
-        query.edit_message_text(text=ml_filter.generate_strategy_report(), parse_mode="Markdown")
+        query.edit_message_text(text=ml_filter.generate_strategy_report())
         return
 
     if query.data.startswith("scan_"):
@@ -480,7 +473,7 @@ def button_callback(update, context):
         name = next((k for k, v in PAIRS_MAP.items() if v == ticker), ticker)
         session_str, session_code, hour = get_current_session_info()
         
-        query.edit_message_text(text=f"🔄 Глибокий аналіз **{name}** (ML + ШІ-аудит)...", parse_mode="Markdown")
+        query.edit_message_text(text=f"🔄 Глибокий аналіз {name} (ML + ШІ-аудит)...")
         try:
             df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
@@ -500,7 +493,7 @@ def button_callback(update, context):
             
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
-                query.edit_message_text(text=f"ℹ️ По **{name}** наразі сигнал **HOLD** (умови не сформовані або відфільтровані ATR).", parse_mode="Markdown")
+                query.edit_message_text(text=f"ℹ️ По {name} наразі сигнал HOLD (умови не сформовані або відфільтровані ATR).")
                 return
 
             rsi = sig_data.get('rsi', 50)
@@ -515,7 +508,7 @@ def button_callback(update, context):
                 rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
             )
             if win_probability < 0.54:
-                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової).", parse_mode="Markdown")
+                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по {name} (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової).")
                 return
 
             ai_confidence = 7
@@ -539,7 +532,7 @@ def button_callback(update, context):
 
                 ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                 ai_confidence = int(ai_audit.get("confidence", 5))
-                rejection_reason = escape_markdown(ai_audit.get("reason", ""))
+                rejection_reason = str(ai_audit.get("reason", ""))
                 decision = ai_audit.get("decision", "NO")
 
                 busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
@@ -549,7 +542,7 @@ def button_callback(update, context):
                     ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
                     ai_confidence = 7
                 elif decision != "YES" or ai_confidence < 7:
-                    query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по **{name}** (впевненість {ai_confidence}/10):\n_{rejection_reason}_", parse_mode="Markdown")
+                    query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по {name} (впевненість {ai_confidence}/10):\n{rejection_reason}")
                     return
                 else:
                     ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
@@ -572,10 +565,10 @@ def button_callback(update, context):
                 f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                 f"🌐 Сесія: {session_str}\n"
                 f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
-                f"💡 Технічна причина: {escape_markdown(str(sig_data.get('reason')))}\n"
+                f"💡 Технічна причина: {str(sig_data.get('reason'))}\n"
                 f"🤖 Візуальний вердикт ШІ: {ai_reason}"
             )
-            query.edit_message_text(text=text, parse_mode="Markdown")
+            query.edit_message_text(text=text)
         except Exception as e:
             logger.exception(f"Помилка аналізу пари {ticker}: {e}")
             query.edit_message_text(text=f"❌ Помилка аналізу пари: {e}")
