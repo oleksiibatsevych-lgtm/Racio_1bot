@@ -349,7 +349,7 @@ def run_full_scan_background(chat_id):
                     else:
                         ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
                 except Exception as e:
-                    logger.exception(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
+                    logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name}: {e}")
                     ai_reason = "ШІ недоступний (пройдено за індикаторами)"
                     ai_confidence = 7
 
@@ -547,7 +547,7 @@ def button_callback(update, context):
                 else:
                     ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
             except Exception as e:
-                logger.exception(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
+                logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name}: {e}")
                 ai_reason = "ШІ недоступний (пройдено за індикаторами)"
                 ai_confidence = 7
 
