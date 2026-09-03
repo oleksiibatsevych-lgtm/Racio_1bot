@@ -51,25 +51,3 @@ def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.B
     buf.seek(0)
     plt.close(fig)
     return buf
-
-def create_combined_charts_image(df_macro, df_mid, df_fast, asset_name) -> io.BytesIO:
-    buf_macro = create_chart_image(df_macro, asset_name, tf_label="1h")
-    buf_mid = create_chart_image(df_mid, asset_name, tf_label="15m")
-    buf_micro = create_chart_image(df_fast, asset_name, tf_label="5m")
-
-    img_macro = Image.open(buf_macro)
-    img_mid = Image.open(buf_mid)
-    img_micro = Image.open(buf_micro)
-
-    w = max(img_macro.width, img_mid.width, img_micro.width)
-    h = img_macro.height + img_mid.height + img_micro.height
-
-    combined = Image.new("RGB", (w, h), color="#131722")
-    combined.paste(img_macro, (0, 0))
-    combined.paste(img_mid, (0, img_macro.height))
-    combined.paste(img_micro, (0, img_macro.height + img_mid.height))
-
-    out_buf = io.BytesIO()
-    combined.save(out_buf, format="PNG", optimize=True)
-    out_buf.seek(0)
-    return out_buf
