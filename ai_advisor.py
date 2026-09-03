@@ -5,15 +5,16 @@ from PIL import Image
 
 class AITradingAdvisor:
     def __init__(self):
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
+        # Використовуємо gemini-3.6-flash як основну модель згідно з вимогами API
         self.models_to_try = [
-            "gemini-3.6-flash",
-            "gemini-2.0-flash"
+            "gemini-3.6-flash"
         ]
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
+        """
+        Проводить візуальний та технічний аудит сигналу за допомогою Gemini Vision з підтримкою fallback,
+        а також адаптивно підбирає оптимальний час експірації.
+        """
         prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки (1h, 15m, 5m) для активу {name}.
         Параметри сигналу:
@@ -26,14 +27,14 @@ class AITradingAdvisor:
         - Технічна причина: {payload.get('reason')}
         - ATR: {payload.get('atr')}
 
-        Твоє завдання — оцінити доцільність входу в угоду за цим сигналом, а також визначити оптимальний час експірації у хвилинах.
+        Твоє завдання — оцінити доцільність входу в угоду за цим сигналом, а також визначити оптимальний час експірації у хвилинах (наприклад, 5, 10, 15, 20 тощо). Враховуй волатильність і відстань до рівнів на графіках, щоб уникнути передчасного зрізання або запізнілого відпрацювання.
         
         Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи markdown-обгородок (чистий JSON):
         {{
             "decision": "YES" або "NO",
             "confidence": число від 1 до 10,
             "suggested_expiration": число хвилин (наприклад, 5, 10, 15),
-            "reason": "Коротке та чітке обґрунтування українською мовою"
+            "reason": "Коротке та чітке обґрунтування українською мовою, зокрема чому обрано саме такий час експірації"
         }}
         """
 
@@ -59,11 +60,12 @@ class AITradingAdvisor:
                 continue
 
         if not response_text:
+            print("❌ Помилка AI Audit: Усі моделі Gemini наразі недоступні.")
             return {
-                "decision": "YES",
-                "confidence": 7,
+                "decision": "NO",
+                "confidence": 1,
                 "suggested_expiration": 10,
-                "reason": "Схвалено за замовчуванням (аудит пропущено)"
+                "reason": "Усі моделі Gemini наразі недоступні."
             }
 
         try:
@@ -78,15 +80,16 @@ class AITradingAdvisor:
 
             result = json.loads(clean_text)
             return {
-                "decision": result.get("decision", "YES"),
-                "confidence": int(result.get("confidence", 7)),
+                "decision": result.get("decision", "NO"),
+                "confidence": int(result.get("confidence", 5)),
                 "suggested_expiration": int(result.get("suggested_expiration", 10)),
-                "reason": result.get("reason", "Схвалено ШІ")
+                "reason": result.get("reason", "ШІ не надав детального пояснення")
             }
         except Exception as e:
+            print(f"⚠️ Помилка парсингу відповіді ШІ: {e}. Сирий текст: {response_text}")
             return {
-                "decision": "YES",
-                "confidence": 7,
+                "decision": "NO",
+                "confidence": 1,
                 "suggested_expiration": 10,
-                "reason": "Схвалено за замовчуванням"
+                "reason": "Помилка обробки відповіді ШІ"
             }
