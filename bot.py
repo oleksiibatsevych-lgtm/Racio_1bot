@@ -4,6 +4,7 @@ import time
 import threading
 import sqlite3
 import requests
+import logging
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
@@ -17,6 +18,13 @@ import database
 from ml_model import TradingMLFilter
 from ai_advisor import AITradingAdvisor
 from charts import create_chart_image
+
+# Налаштування детального логування
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -43,7 +51,7 @@ def init_logs_db():
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Помилка ініціалізації БД логів: {e}")
+        logger.exception(f"Помилка ініціалізації БД логів: {e}")
 
 init_logs_db()
 
@@ -55,7 +63,7 @@ def clear_filtered_logs(chat_id):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Помилка очищення логів: {e}")
+        logger.exception(f"Помилка очищення логів: {e}")
 
 def save_filtered_log(chat_id, log_text):
     try:
@@ -66,7 +74,7 @@ def save_filtered_log(chat_id, log_text):
         conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Помилка збереження логу: {e}")
+        logger.exception(f"Помилка збереження логу: {e}")
 
 def get_filtered_logs(chat_id):
     try:
@@ -78,7 +86,7 @@ def get_filtered_logs(chat_id):
         conn.close()
         return [row[0] for row in rows]
     except Exception as e:
-        print(f"Помилка читання логів: {e}")
+        logger.exception(f"Помилка читання логів: {e}")
         return []
 
 def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
@@ -108,7 +116,7 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
                     if not df.empty:
                         return df
     except Exception as e:
-        pass
+        logger.warning(f"Yahoo API query failed for {ticker}: {e}")
 
     try:
         yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
@@ -127,7 +135,7 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
             df_yf["volume"] = df_yf["volume"].fillna(0)
             return df_yf
     except Exception as e:
-        pass
+        logger.warning(f"yfinance fallback failed for {ticker}: {e}")
 
     return pd.DataFrame()
 
@@ -195,7 +203,7 @@ def process_signal_expiration(sig_id):
             if "🏁 Результат" not in orig_txt:
                 bot.edit_message_text(chat_id=res_data["chat_id"], message_id=res_data["message_id"], text=f"{orig_txt}\n{res_icon}")
     except Exception as e:
-        print(f"Помилка таймера експірації {sig_id}: {e}")
+        logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
 
 def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
     try:
@@ -206,7 +214,7 @@ def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
         timer.daemon = True
         timer.start()
     except Exception as e:
-        print(f"Помилка планування таймера {sig_id}: {e}")
+        logger.exception(f"Помилка планування таймера {sig_id}: {e}")
 
 def restore_pending_timers():
     pending = database.get_pending_signals()
@@ -220,7 +228,7 @@ def restore_pending_timers():
             timer.start()
         except:
             pass
-    print(f"⏳ Відновлено активних таймерів: {len(pending)}")
+    logger.info(f"⏳ Відновлено активних таймерів: {len(pending)}")
 
 restore_pending_timers()
 
@@ -253,16 +261,22 @@ def run_full_scan_background(chat_id):
         filtered_count = 0
         current_time = time.time()
         
+        logger.info(f"Початок фонового сканування для chat_id={chat_id}. Всього пар: {len(PAIRS_MAP)}")
+
         for name, ticker in PAIRS_MAP.items():
             try:
+                logger.info(f"Перевірка пари: {name} ({ticker})")
                 if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
+                    logger.info(f"Пара {ticker} пропущена через кулдаун (менше 5 хв)")
                     continue
 
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
                 df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
                 
-                if df_macro.empty or df_mid.empty or df_fast.empty: continue
+                if df_macro.empty or df_mid.empty or df_fast.empty:
+                    logger.warning(f"Не вдалося завантажити дані для {ticker}: macro={df_macro.empty}, mid={df_mid.empty}, fast={df_fast.empty}")
+                    continue
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
@@ -273,7 +287,9 @@ def run_full_scan_background(chat_id):
                 sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend, ticker)
                 
                 signal_type = sig_data.get('signal')
-                if signal_type not in ['CALL', 'PUT']: continue
+                if signal_type not in ['CALL', 'PUT']:
+                    logger.info(f"Пара {name}: сигнал не сформовано (signal={signal_type}, reason={sig_data.get('reason')})")
+                    continue
                 
                 rsi = sig_data.get('rsi', 50)
                 adx = sig_data.get('adx', 20)
@@ -288,7 +304,9 @@ def run_full_scan_background(chat_id):
                 )
                 if win_probability < 0.54:
                     filtered_count += 1
-                    save_filtered_log(chat_id, f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)")
+                    log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)"
+                    logger.info(log_msg)
+                    save_filtered_log(chat_id, log_msg)
                     continue
                 
                 ai_confidence = 5
@@ -313,16 +331,17 @@ def run_full_scan_background(chat_id):
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                     ai_confidence = int(ai_audit.get("confidence", 5))
                     
-                    # Суворий поріг впевненості ШІ >= 7
                     if ai_audit.get("decision") != "YES" or ai_confidence < 7:
                         filtered_count += 1
                         rejection_reason = ai_audit.get("reason", "ШІ не схвалив або впевненість < 7")
-                        save_filtered_log(chat_id, f"🤖 {name}: ШІ відхилив — _{rejection_reason}_ (Впевненість: {ai_confidence}/10)")
+                        log_msg = f"🤖 {name}: ШІ відхилив — _{rejection_reason}_ (Впевненість: {ai_confidence}/10)"
+                        logger.info(log_msg)
+                        save_filtered_log(chat_id, log_msg)
                         ai_audit_failed = True
                     else:
                         ai_reason = ai_audit.get("reason", "Схвалено ШІ")
                 except Exception as e:
-                    print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
+                    logger.exception(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
 
                 if ai_audit_failed:
                     continue
@@ -360,7 +379,7 @@ def run_full_scan_background(chat_id):
                 
                 time.sleep(5)
             except Exception as e:
-                print(f"Помилка {ticker}: {e}")
+                logger.exception(f"Помилка обробки пари {ticker}: {e}")
                 
         finish_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Переглянути чому відсіяно", callback_data="show_filtered_log")]])
         bot.send_message(
@@ -369,7 +388,7 @@ def run_full_scan_background(chat_id):
             reply_markup=finish_keyboard
         )
     except Exception as e:
-        print(f"Помилка у фоновому скануванні: {e}")
+        logger.exception(f"Помилка у фоновому скануванні: {e}")
 
 def handle_text_menu(update, context):
     chat_id = update.message.chat_id
@@ -409,6 +428,7 @@ def handle_text_menu(update, context):
             )
             update.message.reply_text(stats_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Звіт ШІ", callback_data="get_ai_report")]]))
         except Exception as e:
+            logger.exception(f"Помилка статистики: {e}")
             update.message.reply_text(f"Помилка статистики: {e}")
 
 def button_callback(update, context):
@@ -425,7 +445,7 @@ def button_callback(update, context):
         
         log_text = "🛡 **Причини відхилення сигналів:**\n\n" + "\n".join(logs[:15])
         if len(log_text) > 4000:
-            log_text = log_text[:4000] + "...\n(список скорочено)"
+            log_text = log_text[:4000] + "...\n(спискок скорочено)"
             
         query.edit_message_text(text=log_text, parse_mode="Markdown")
         return
@@ -508,7 +528,7 @@ def button_callback(update, context):
                     
                 ai_reason = ai_audit.get("reason", "Схвалено ШІ")
             except Exception as e:
-                print(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
+                logger.exception(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
 
             atr = sig_data.get('atr')
             expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
@@ -529,6 +549,7 @@ def button_callback(update, context):
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
         except Exception as e:
+            logger.exception(f"Помилка аналізу пари {ticker}: {e}")
             query.edit_message_text(text=f"❌ Помилка аналізу пари: {e}")
 
 dispatcher.add_handler(CommandHandler("start", start))
