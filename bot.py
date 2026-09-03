@@ -19,7 +19,6 @@ from ml_model import TradingMLFilter
 from ai_advisor import AITradingAdvisor
 from charts import create_chart_image
 
-# Налаштування детального логування
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -36,6 +35,14 @@ ml_filter = TradingMLFilter()
 ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
+
+def escape_markdown(text):
+    if not text:
+        return ""
+    chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for c in chars:
+        text = text.replace(c, f"\\{c}")
+    return text
 
 def init_logs_db():
     try:
@@ -331,7 +338,7 @@ def run_full_scan_background(chat_id):
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                     ai_confidence = int(ai_audit.get("confidence", 5))
-                    rejection_reason = ai_audit.get("reason", "")
+                    rejection_reason = escape_markdown(ai_audit.get("reason", ""))
                     decision = ai_audit.get("decision", "NO")
 
                     busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
@@ -373,7 +380,7 @@ def run_full_scan_background(chat_id):
                     f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                     f"🌐 Сесія: {session_str}\n"
                     f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
-                    f"💡 Технічна причина: {sig_data.get('reason')}\n"
+                    f"💡 Технічна причина: {escape_markdown(str(sig_data.get('reason')))}\n"
                     f"🤖 Візуальний вердикт ШІ: {ai_reason}"
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
@@ -532,7 +539,7 @@ def button_callback(update, context):
 
                 ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                 ai_confidence = int(ai_audit.get("confidence", 5))
-                rejection_reason = ai_audit.get("reason", "")
+                rejection_reason = escape_markdown(ai_audit.get("reason", ""))
                 decision = ai_audit.get("decision", "NO")
 
                 busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
@@ -565,7 +572,7 @@ def button_callback(update, context):
                 f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                 f"🌐 Сесія: {session_str}\n"
                 f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
-                f"💡 Технічна причина: {sig_data.get('reason')}\n"
+                f"💡 Технічна причина: {escape_markdown(str(sig_data.get('reason')))}\n"
                 f"🤖 Візуальний вердикт ШІ: {ai_reason}"
             )
             query.edit_message_text(text=text, parse_mode="Markdown")
