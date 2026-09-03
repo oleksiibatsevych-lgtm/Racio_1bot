@@ -5,10 +5,12 @@ from PIL import Image
 
 class AITradingAdvisor:
     def __init__(self):
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            genai.configure(api_key=api_key)
         self.models_to_try = [
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash"
+            "gemini-3.6-flash",
+            "gemini-2.0-flash"
         ]
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
@@ -26,11 +28,13 @@ class AITradingAdvisor:
 
         Твоє завдання — оцінити доцільність входу в угоду за цим сигналом, а також визначити оптимальний час експірації у хвилинах.
         
-        Відповідь надай ВИКЛЮЧНО у форматі JSON з такими полями:
-        - "decision": "YES" або "NO"
-        - "confidence": ціле число від 1 до 10
-        - "suggested_expiration": ціле число хвилин (наприклад, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25)
-        - "reason": "Коротке та чітке обґрунтування українською мовою"
+        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи markdown-обгородок (чистий JSON):
+        {{
+            "decision": "YES" або "NO",
+            "confidence": число від 1 до 10,
+            "suggested_expiration": число хвилин (наприклад, 5, 10, 15),
+            "reason": "Коротке та чітке обґрунтування українською мовою"
+        }}
         """
 
         content_parts = [prompt]
@@ -43,12 +47,10 @@ class AITradingAdvisor:
                     print(f"⚠️ Помилка відкриття графіка для ШІ: {e}")
 
         response_text = None
-        generation_config = {"response_mime_type": "application/json"}
-
         for model_name in self.models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
-                response = model.generate_content(content_parts, generation_config=generation_config)
+                response = model.generate_content(content_parts)
                 if response and response.text:
                     response_text = response.text
                     break
@@ -65,7 +67,16 @@ class AITradingAdvisor:
             }
 
         try:
-            result = json.loads(response_text.strip())
+            clean_text = response_text.strip()
+            if clean_text.startswith("```json"):
+                clean_text = clean_text[7:]
+            if clean_text.startswith("```"):
+                clean_text = clean_text[3:]
+            if clean_text.endswith("```"):
+                clean_text = clean_text[:-3]
+            clean_text = clean_text.strip()
+
+            result = json.loads(clean_text)
             return {
                 "decision": result.get("decision", "YES"),
                 "confidence": int(result.get("confidence", 7)),
@@ -73,7 +84,6 @@ class AITradingAdvisor:
                 "reason": result.get("reason", "Схвалено ШІ")
             }
         except Exception as e:
-            print(f"⚠️ Помилка парсингу JSON від ШІ: {e}")
             return {
                 "decision": "YES",
                 "confidence": 7,
