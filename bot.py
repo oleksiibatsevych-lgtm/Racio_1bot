@@ -309,9 +309,10 @@ def run_full_scan_background(chat_id):
                     save_filtered_log(chat_id, log_msg)
                     continue
                 
-                ai_confidence = 5
-                ai_reason = "Аудит пропущено"
+                ai_confidence = 7
+                ai_reason = "ШІ зайнятий / пройдено за індикаторами"
                 ai_audit_failed = False
+                
                 try:
                     macro_chart = create_chart_image(df_macro, name, tf_label="1h")
                     mid_chart = create_chart_image(df_mid, name, tf_label="15m")
@@ -330,21 +331,25 @@ def run_full_scan_background(chat_id):
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                     ai_confidence = int(ai_audit.get("confidence", 5))
-                    
                     rejection_reason = ai_audit.get("reason", "")
-                    if ai_audit.get("decision") != "YES" or ai_confidence < 7:
-                        # Якщо моделі зайняті / ліміт вичерпано / помилка квоти — пропускаємо за індикаторами
-                        if any(kw in rejection_reason.lower() for kw in ["недоступні", "зайняті", "quota", "429", "resource", "exhausted"]):
-                            ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
-                            ai_confidence = 7
-                        else:
-                            filtered_count += 1
-                            log_msg = f"🤖 {name}: ШІ відхилив — _{rejection_reason}_ (Впевненість: {ai_confidence}/10)"
-                            logger.info(log_msg)
-                            save_filtered_log(chat_id, log_msg)
-                            ai_audit_failed = True
+                    decision = ai_audit.get("decision", "NO")
+
+                    # Список ключових слів, що вказують на зайнятість моделей, ліміти або помилки ШІ
+                    busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
+                    is_ai_busy = any(kw in rejection_reason.lower() for kw in busy_keywords)
+
+                    if is_ai_busy:
+                        ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
+                        ai_confidence = 7
+                    elif decision != "YES" or ai_confidence < 7:
+                        # Це реальне відхилення ШІ через ринкові умови
+                        filtered_count += 1
+                        log_msg = f"🤖 {name}: ШІ відхилив — _{rejection_reason}_ (Впевненість: {ai_confidence}/10)"
+                        logger.info(log_msg)
+                        save_filtered_log(chat_id, log_msg)
+                        ai_audit_failed = True
                     else:
-                        ai_reason = ai_audit.get("reason", "Схвалено ШІ")
+                        ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
                 except Exception as e:
                     logger.exception(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
                     ai_reason = "ШІ недоступний (пройдено за індикаторами)"
@@ -508,8 +513,9 @@ def button_callback(update, context):
                 query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по **{name}** (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової).", parse_mode="Markdown")
                 return
 
-            ai_confidence = 5
-            ai_reason = "Аудит пропущено"
+            ai_confidence = 7
+            ai_reason = "ШІ зайнятий / пройдено за індикаторами"
+            
             try:
                 macro_chart = create_chart_image(df_macro, name, tf_label="1h")
                 mid_chart = create_chart_image(df_mid, name, tf_label="15m")
@@ -528,17 +534,20 @@ def button_callback(update, context):
 
                 ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
                 ai_confidence = int(ai_audit.get("confidence", 5))
-
                 rejection_reason = ai_audit.get("reason", "")
-                if ai_audit.get("decision") != "YES" or ai_confidence < 7:
-                    if any(kw in rejection_reason.lower() for kw in ["недоступні", "зайняті", "quota", "429", "resource", "exhausted"]):
-                        ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
-                        ai_confidence = 7
-                    else:
-                        query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по **{name}** (впевненість {ai_confidence}/10):\n_{rejection_reason}_", parse_mode="Markdown")
-                        return
+                decision = ai_audit.get("decision", "NO")
+
+                busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
+                is_ai_busy = any(kw in rejection_reason.lower() for kw in busy_keywords)
+
+                if is_ai_busy:
+                    ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
+                    ai_confidence = 7
+                elif decision != "YES" or ai_confidence < 7:
+                    query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по **{name}** (впевненість {ai_confidence}/10):\n_{rejection_reason}_", parse_mode="Markdown")
+                    return
                 else:
-                    ai_reason = ai_audit.get("reason", "Схвалено ШІ")
+                    ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
             except Exception as e:
                 logger.exception(f"⚠️ Помилка ШІ-аудиту для {name}: {e}")
                 ai_reason = "ШІ недоступний (пройдено за індикаторами)"
