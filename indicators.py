@@ -86,7 +86,7 @@ class AdaptiveTechnicalAnalysis:
 
         return "NONE"
 
-    def generate_signal(self, df, global_trend, mid_trend, ticker):
+    def generate_signal(self, df, global_trend, mid_trend, local_trend, ticker):
         if df.empty or len(df) < 15:
             return {'signal': 'HOLD', 'reason': 'Мало даних'}
 
@@ -99,32 +99,39 @@ class AdaptiveTechnicalAnalysis:
         close_price = float(last_row['close'])
         div = self.detect_divergence(df)
 
+        # Фільтр мінімального ATR (відсікаємо малу волатильність)
+        atr_pct = atr / close_price if close_price > 0 else 0
+        if atr_pct < 0.0003:
+            return {'signal': 'HOLD', 'reason': 'Занадто низький ATR'}
+
         signal = 'HOLD'
         reason_parts = []
 
         if adx < 20:
-            if close_price <= bb_lower * 1.005 or rsi < 42:
+            # Флет із суворими зонами RSI < 35 та > 65
+            if close_price <= bb_lower * 1.005 or rsi < 35:
                 signal = 'CALL'
                 reason_parts.append("Флет/Канал (відскок)")
                 if close_price <= bb_lower * 1.005: reason_parts.append("Нижня межа BB")
-                if rsi < 42: reason_parts.append(f"RSI ({rsi:.1f})")
-            elif close_price >= bb_upper * 0.995 or rsi > 58:
+                if rsi < 35: reason_parts.append(f"RSI ({rsi:.1f})")
+            elif close_price >= bb_upper * 0.995 or rsi > 65:
                 signal = 'PUT'
                 reason_parts.append("Флет/Канал (відскок)")
                 if close_price >= bb_upper * 0.995: reason_parts.append("Верхня межа BB")
-                if rsi > 58: reason_parts.append(f"RSI ({rsi:.1f})")
+                if rsi > 65: reason_parts.append(f"RSI ({rsi:.1f})")
         else:
-            if global_trend == 'BULLISH' and mid_trend in ['BULLISH', 'NEUTRAL']:
-                if rsi < 48 or div == 'BULLISH_DIV':
+            # Тренд з повним узгодженням усіх трьох таймфреймів (1h, 15m, 5m)
+            if global_trend == 'BULLISH' and mid_trend == 'BULLISH' and local_trend == 'BULLISH':
+                if rsi < 45 or div == 'BULLISH_DIV':
                     signal = 'CALL'
-                    reason_parts.append("Тренд вгору")
-                    if rsi < 48: reason_parts.append(f"RSI відкат ({rsi:.1f})")
+                    reason_parts.append("Тренд вгору (усі ТФ узгоджені)")
+                    if rsi < 45: reason_parts.append(f"RSI відкат ({rsi:.1f})")
                     if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
-            elif global_trend == 'BEARISH' and mid_trend in ['BEARISH', 'NEUTRAL']:
-                if rsi > 52 or div == 'BEARISH_DIV':
+            elif global_trend == 'BEARISH' and mid_trend == 'BEARISH' and local_trend == 'BEARISH':
+                if rsi > 55 or div == 'BEARISH_DIV':
                     signal = 'PUT'
-                    reason_parts.append("Тренд вниз")
-                    if rsi > 52: reason_parts.append(f"RSI відкат ({rsi:.1f})")
+                    reason_parts.append("Тренд вниз (усі ТФ узгоджені)")
+                    if rsi > 55: reason_parts.append(f"RSI відкат ({rsi:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
 
         reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
