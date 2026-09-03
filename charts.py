@@ -1,5 +1,4 @@
 import io
-from PIL import Image
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -7,7 +6,7 @@ import pandas as pd
 
 def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.BytesIO:
     plot_df = df.tail(60).copy().reset_index(drop=True)
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(10, 5))
 
     if 'local_support' in df.columns and 'local_resistance' in df.columns:
         last_sup = df['local_support'].iloc[-1]
@@ -36,10 +35,10 @@ def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.B
     ax.axhline(y=last_sup, color="#00897b", linestyle="--", alpha=0.8, linewidth=1)
     ax.axhline(y=last_res, color="#c62828", linestyle="--", alpha=0.8, linewidth=1)
 
-    ax.set_title(f"Asset: {asset_name} [{tf_label}]", fontsize=9, color="white", weight="bold")
+    ax.set_title(f"Asset: {asset_name} [{tf_label}]", fontsize=10, color="white", weight="bold")
     ax.grid(True, color="#2a2e39", alpha=0.5)
     ax.set_facecolor("#131722")
-    ax.tick_params(colors="white", labelsize=8)
+    ax.tick_params(colors="white")
     for spine in ax.spines.values():
         spine.set_edgecolor("#2a2e39")
 
@@ -47,7 +46,7 @@ def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.B
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor(), edgecolor="none")
+    plt.savefig(buf, format="png", dpi=150, facecolor=fig.get_facecolor(), edgecolor="none")
     buf.seek(0)
     plt.close(fig)
     return buf
