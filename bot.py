@@ -88,9 +88,9 @@ def get_filtered_logs(chat_id):
         logger.exception(f"Помилка читання логів: {e}")
         return []
 
-def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
+def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         
@@ -118,8 +118,8 @@ def fetch_yahoo_data(ticker, interval="15m", range_period="10d"):
         logger.warning(f"Yahoo API query failed for {ticker}: {e}")
 
     try:
-        yf_interval_map = {"5m": "5m", "15m": "15m", "1h": "60m"}
-        mapped_interval = yf_interval_map.get(interval, "15m")
+        yf_interval_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "60m"}
+        mapped_interval = yf_interval_map.get(interval, "1m")
         
         df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, progress=False)
         if not df_yf.empty:
@@ -164,24 +164,6 @@ def is_news_blackout_window():
     if now_utc.minute < 10 and now_utc.hour in [12, 13, 14, 15, 18]:
         return True
     return False
-
-def calculate_dynamic_expiration(df_fast, atr, adx=20):
-    try:
-        if atr is None or pd.isna(atr) or atr == 0:
-            return 10
-        price = float(df_fast['close'].iloc[-1])
-        atr_pct = (atr / price) * 100
-        if adx > 30: 
-            exp = 5
-        elif adx > 22: 
-            exp = 10
-        elif adx < 16: 
-            exp = 20
-        else: 
-            exp = 15 if atr_pct < 0.05 else (10 if atr_pct < 0.12 else 5)
-        return max(5, min(20, exp))
-    except:
-        return 10
 
 def process_signal_expiration(sig_id):
     try:
@@ -246,7 +228,7 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    update.message.reply_text("Бот Racio_1 готовий до роботи (RSI + BB + Дивергенції + ШІ-аудит)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("Бот Racio_1 готовий до роботи (Мультитаймфрейм 1h+15m+5m+1m + ШІ-аудит)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
@@ -266,36 +248,38 @@ def run_full_scan_background(chat_id):
             try:
                 logger.info(f"Перевірка пари: {name} ({ticker})")
                 if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
-                    logger.info(f"Пара {ticker} пропущена через кулдаун (менше 5 хв)")
+                    logger.info(f"Пара {ticker} пропущена через кулдаун")
                     continue
 
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
                 df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
+                df_micro = fetch_yahoo_data(ticker, interval="1m", range_period="7d")
                 
-                if df_macro.empty or df_mid.empty or df_fast.empty:
-                    logger.warning(f"Не вдалося завантажити дані для {ticker}: macro={df_macro.empty}, mid={df_mid.empty}, fast={df_fast.empty}")
+                if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
+                    logger.warning(f"Не вдалося завантажити всі ТФ для {ticker}")
                     continue
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
-                local_trend = analyzer.get_trend(df_fast, span_val=10)
                 pivots = analyzer.calculate_pivots(df_macro)
                 
-                df_indicators = analyzer.calculate_indicators(df_fast)
-                sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend)
+                df_indicators_5m = analyzer.calculate_indicators(df_fast)
+                df_indicators_1m = analyzer.calculate_indicators(df_micro)
+                
+                sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend)
                 
                 signal_type = sig_data.get('signal')
                 if signal_type not in ['CALL', 'PUT']:
-                    logger.info(f"Пара {name}: сигнал не сформовано (signal={signal_type}, reason={sig_data.get('reason')})")
+                    logger.info(f"Пара {name}: сигнал HOLD")
                     continue
                 
                 rsi = sig_data.get('rsi', 50)
                 adx = sig_data.get('adx', 20)
-                bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
+                bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
                 divergence_str = str(sig_data.get('divergence', 'NONE'))
                 
-                current_price = float(df_fast['close'].iloc[-1])
+                current_price = float(df_indicators_5m['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
                 win_probability = ml_filter.predict_signal_probability(
@@ -303,7 +287,7 @@ def run_full_scan_background(chat_id):
                 )
                 if win_probability < 0.54:
                     filtered_count += 1
-                    log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 54%)"
+                    log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
                     logger.info(log_msg)
                     save_filtered_log(chat_id, log_msg)
                     continue
@@ -315,17 +299,17 @@ def run_full_scan_background(chat_id):
                 try:
                     macro_chart = create_chart_image(df_macro, name, tf_label="1h")
                     mid_chart = create_chart_image(df_mid, name, tf_label="15m")
-                    micro_chart = create_chart_image(df_fast, name, tf_label="5m")
+                    micro_chart = create_chart_image(df_indicators_5m, name, tf_label="5m")
 
                     ai_payload = {
                         'signal': signal_type,
                         'adx': adx,
                         'global_trend': global_trend,
                         'mid_trend': mid_trend,
-                        'local_trend': local_trend,
                         'reason': sig_data.get('reason'),
                         'rsi': rsi,
-                        'atr': sig_data.get('atr')
+                        'atr': sig_data.get('atr'),
+                        'suggested_exp': sig_data.get('suggested_exp', 5)
                     }
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -358,8 +342,7 @@ def run_full_scan_background(chat_id):
                 sent_signals_count += 1
                 last_sent_signals[ticker] = time.time()  
                 
-                atr = sig_data.get('atr')
-                expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
+                expiration = int(ai_audit.get("suggested_expiration", sig_data.get('suggested_exp', 5))) if 'ai_audit' in locals() and not ai_audit_failed else sig_data.get('suggested_exp', 5)
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -368,14 +351,13 @@ def run_full_scan_background(chat_id):
                     f"📊 {name} ({ticker})\n"
                     f"{icon} {action_text} | ⏱ {expiration} хв\n"
                     f"🎯 Ціна входу: {current_price:.5f}\n"
-                    f"📈 Тренд (гл/сер/лок): {global_trend} / {mid_trend} / {local_trend}\n"
+                    f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
                     f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                     f"🌐 Сесія: {session_str}\n"
                     f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
                     f"💡 Технічна причина: {str(sig_data.get('reason'))}\n"
                     f"🤖 Візуальний вердикт ШІ: {ai_reason}"
                 )
-                # БЕЗ parse_mode="Markdown" щоб уникнути помилок синтаксису в динамічних текстах
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text)
                 
                 timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -478,37 +460,39 @@ def button_callback(update, context):
             df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
             df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
             df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
+            df_micro = fetch_yahoo_data(ticker, interval="1m", range_period="7d")
             
-            if df_macro.empty or df_mid.empty or df_fast.empty:
+            if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
                 query.edit_message_text(text=f"❌ Помилка завантаження даних для {ticker}")
                 return
 
             global_trend = analyzer.get_trend(df_macro, span_val=200)
             mid_trend = analyzer.get_trend(df_mid, span_val=50)
-            local_trend = analyzer.get_trend(df_fast, span_val=10)
             pivots = analyzer.calculate_pivots(df_macro)
             
-            df_indicators = analyzer.calculate_indicators(df_fast)
-            sig_data = analyzer.generate_signal(df_indicators, global_trend, mid_trend, local_trend)
+            df_indicators_5m = analyzer.calculate_indicators(df_fast)
+            df_indicators_1m = analyzer.calculate_indicators(df_micro)
+            
+            sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend)
             
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
-                query.edit_message_text(text=f"ℹ️ По {name} наразі сигнал HOLD (умови не сформовані або відфільтровані ATR).")
+                query.edit_message_text(text=f"ℹ️ По {name} наразі сигнал HOLD (умови не сформовані).")
                 return
 
             rsi = sig_data.get('rsi', 50)
             adx = sig_data.get('adx', 20)
-            bb_width = float(df_indicators['bb_width'].iloc[-1]) if 'bb_width' in df_indicators.columns else 0.001
+            bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
             divergence_str = str(sig_data.get('divergence', 'NONE'))
             
-            current_price = float(df_fast['close'].iloc[-1])
+            current_price = float(df_indicators_5m['close'].iloc[-1])
             dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
             
             win_probability = ml_filter.predict_signal_probability(
                 rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
             )
             if win_probability < 0.54:
-                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по {name} (Ймовірність: {round(win_probability * 100, 1)}% нижче порогової).")
+                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по {name} (Ймовірність нижче порогової).")
                 return
 
             ai_confidence = 7
@@ -517,17 +501,17 @@ def button_callback(update, context):
             try:
                 macro_chart = create_chart_image(df_macro, name, tf_label="1h")
                 mid_chart = create_chart_image(df_mid, name, tf_label="15m")
-                micro_chart = create_chart_image(df_fast, name, tf_label="5m")
+                micro_chart = create_chart_image(df_indicators_5m, name, tf_label="5m")
 
                 ai_payload = {
                     'signal': signal_type,
                     'adx': adx,
                     'global_trend': global_trend,
                     'mid_trend': mid_trend,
-                    'local_trend': local_trend,
                     'reason': sig_data.get('reason'),
                     'rsi': rsi,
-                    'atr': sig_data.get('atr')
+                    'atr': sig_data.get('atr'),
+                    'suggested_exp': sig_data.get('suggested_exp', 5)
                 }
 
                 ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -551,8 +535,7 @@ def button_callback(update, context):
                 ai_reason = "ШІ недоступний (пройдено за індикаторами)"
                 ai_confidence = 7
 
-            atr = sig_data.get('atr')
-            expiration = calculate_dynamic_expiration(df_fast, atr, adx=adx)
+            expiration = int(ai_audit.get("suggested_expiration", sig_data.get('suggested_exp', 5))) if 'ai_audit' in locals() else sig_data.get('suggested_exp', 5)
 
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -561,7 +544,7 @@ def button_callback(update, context):
                 f"📊 {name} ({ticker})\n"
                 f"{icon} {action_text} | ⏱ {expiration} хв\n"
                 f"🎯 Ціна входу: {current_price:.5f}\n"
-                f"📈 Тренд (гл/сер/лок): {global_trend} / {mid_trend} / {local_trend}\n"
+                f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
                 f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
                 f"🌐 Сесія: {session_str}\n"
                 f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
