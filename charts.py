@@ -5,15 +5,15 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.BytesIO:
-    plot_df = df.tail(60).copy().reset_index(drop=True)
+    plot_df = df.tail(100).copy().reset_index(drop=True)
     fig, ax = plt.subplots(figsize=(10, 5))
 
     if 'local_support' in df.columns and 'local_resistance' in df.columns:
         last_sup = df['local_support'].iloc[-1]
         last_res = df['local_resistance'].iloc[-1]
     else:
-        last_sup = df['low'].rolling(window=15).min().iloc[-1]
-        last_res = df['high'].rolling(window=15).max().iloc[-1]
+        last_sup = df['low'].rolling(window=50).min().iloc[-1]
+        last_res = df['high'].rolling(window=50).max().iloc[-1]
 
     for i in range(len(plot_df)):
         op = plot_df['open'].iloc[i]
