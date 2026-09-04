@@ -40,6 +40,7 @@ class AdaptiveTechnicalAnalysis:
         dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
         df['adx'] = dx.rolling(window=14).mean().fillna(20)
 
+        df['ema_10'] = df['close'].ewm(span=10, adjust=False).mean()
         return df
 
     def get_trend(self, df, span_val=50):
@@ -68,71 +69,91 @@ class AdaptiveTechnicalAnalysis:
         return {"P": p, "R1": r1, "S1": s1, "R2": r2, "S2": s2}
 
     def detect_divergence(self, df):
-        if df.empty or 'rsi' not in df.columns or len(df) < 15:
+        if df.empty or 'rsi' not in df.columns or len(df) < 35:
             return "NONE"
         
-        recent_prices = df['close'].iloc[-10:].values
-        recent_rsi = df['rsi'].iloc[-10:].values
+        recent_prices = df['close'].iloc[-30:].values
+        recent_rsi = df['rsi'].iloc[-30:].values
         
-        price_lower_low = recent_prices[-1] < recent_prices[-5] and recent_prices[-5] < recent_prices[0]
-        rsi_higher_low = recent_rsi[-1] > recent_rsi[-5] and recent_rsi[-5] > recent_rsi[0]
+        price_lower_low = recent_prices[-1] < recent_prices[-15] and recent_prices[-15] < recent_prices[0]
+        rsi_higher_low = recent_rsi[-1] > recent_rsi[-15] and recent_rsi[-15] > recent_rsi[0]
         if price_lower_low and rsi_higher_low:
             return "BULLISH_DIV"
 
-        price_higher_high = recent_prices[-1] > recent_prices[-5] and recent_prices[-5] > recent_prices[0]
-        rsi_lower_high = recent_rsi[-1] < recent_rsi[-5] and recent_rsi[-5] > recent_rsi[0]
+        price_higher_high = recent_prices[-1] > recent_prices[-15] and recent_prices[-15] > recent_prices[0]
+        rsi_lower_high = recent_rsi[-1] < recent_rsi[-15] and recent_rsi[-15] > recent_rsi[0]
         if price_higher_high and rsi_lower_high:
             return "BEARISH_DIV"
 
         return "NONE"
 
-    def generate_signal(self, df, global_trend, mid_trend, ticker):
-        if df.empty or len(df) < 15:
-            return {'signal': 'HOLD', 'reason': 'Мало даних'}
+    def generate_signal(self, df_1m, df_5m, global_trend, mid_trend):
+        if df_5m.empty or len(df_5m) < 15 or df_1m.empty or len(df_1m) < 10:
+            return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 10}
 
-        last_row = df.iloc[-1]
-        rsi = float(last_row.get('rsi', 50))
-        adx = float(last_row.get('adx', 20))
-        atr = float(last_row.get('atr', 0.001))
-        bb_upper = float(last_row.get('bb_upper', 0))
-        bb_lower = float(last_row.get('bb_lower', 0))
-        close_price = float(last_row['close'])
-        div = self.detect_divergence(df)
+        last_5m = df_5m.iloc[-1]
+        last_1m = df_1m.iloc[-1]
+        
+        rsi_5m = float(last_5m.get('rsi', 50))
+        rsi_1m = float(last_1m.get('rsi', 50))
+        adx = float(last_5m.get('adx', 20))
+        atr = float(last_5m.get('atr', 0.001))
+        bb_upper = float(last_5m.get('bb_upper', 0))
+        bb_lower = float(last_5m.get('bb_lower', 0))
+        close_5m = float(last_5m['close'])
+        close_1m = float(last_1m['close'])
+        div = self.detect_divergence(df_5m)
 
         signal = 'HOLD'
         reason_parts = []
+        expiration = 10
 
-        if adx < 20:
-            if close_price <= bb_lower * 1.005 or rsi < 42:
+        if adx < 22:
+            if close_1m <= bb_lower or rsi_1m < 32:
                 signal = 'CALL'
-                reason_parts.append("Флет/Канал (відскок)")
-                if close_price <= bb_lower * 1.005: reason_parts.append("Нижня межа BB")
-                if rsi < 42: reason_parts.append(f"RSI ({rsi:.1f})")
-            elif close_price >= bb_upper * 0.995 or rsi > 58:
+                expiration = 3
+                reason_parts.append("Флет M1/M5 (відскок знизу)")
+                if close_1m <= bb_lower: reason_parts.append("Пробій нижньої BB")
+                if rsi_1m < 32: reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
+            elif close_1m >= bb_upper or rsi_1m > 68:
                 signal = 'PUT'
-                reason_parts.append("Флет/Канал (відскок)")
-                if close_price >= bb_upper * 0.995: reason_parts.append("Верхня межа BB")
-                if rsi > 58: reason_parts.append(f"RSI ({rsi:.1f})")
+                expiration = 3
+                reason_parts.append("Флет M1/M5 (відскок зверху)")
+                if close_1m >= bb_upper: reason_parts.append("Пробій верхньої BB")
+                if rsi_1m > 68: reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
         else:
-            if global_trend == 'BULLISH' and mid_trend in ['BULLISH', 'NEUTRAL']:
-                if rsi < 48 or div == 'BULLISH_DIV':
+            effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
+            if effective_trend == 'BULLISH':
+                if rsi_5m < 50 or div == 'BULLISH_DIV':
                     signal = 'CALL'
-                    reason_parts.append("Тренд вгору")
-                    if rsi < 48: reason_parts.append(f"RSI відкат ({rsi:.1f})")
+                    expiration = 5
+                    reason_parts.append("Тренд вгору (1h/15m)")
+                    if rsi_5m < 50: reason_parts.append(f"RSI відкат ({rsi_5m:.1f})")
                     if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
-            elif global_trend == 'BEARISH' and mid_trend in ['BEARISH', 'NEUTRAL']:
-                if rsi > 52 or div == 'BEARISH_DIV':
+            elif effective_trend == 'BEARISH':
+                if rsi_5m > 50 or div == 'BEARISH_DIV':
                     signal = 'PUT'
-                    reason_parts.append("Тренд вниз")
-                    if rsi > 52: reason_parts.append(f"RSI відкат ({rsi:.1f})")
+                    expiration = 5
+                    reason_parts.append("Тренд вниз (1h/15m)")
+                    if rsi_5m > 50: reason_parts.append(f"RSI відкат ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
+
+        if signal != 'HOLD':
+            ema_1m = float(df_1m['ema_10'].iloc[-1]) if 'ema_10' in df_1m.columns else close_1m
+            if signal == 'CALL' and close_1m < ema_1m * 0.995 and adx >= 22:
+                signal = 'HOLD'
+            elif signal == 'PUT' and close_1m > ema_1m * 1.005 and adx >= 22:
+                signal = 'HOLD'
+            else:
+                reason_parts.append("1m фільтр пройдено")
 
         reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
         return {
             'signal': signal,
-            'rsi': round(rsi, 1),
+            'rsi': round(rsi_5m, 1),
             'adx': round(adx, 1),
             'atr': atr,
             'divergence': div,
+            'suggested_exp': expiration,
             'reason': reason
         }
