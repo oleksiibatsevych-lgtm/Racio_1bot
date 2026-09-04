@@ -91,7 +91,7 @@ def evaluate_single_signal(sig_id, fetch_data_func):
     
     df = pd.DataFrame()
     for _ in range(3):
-        df = fetch_data_func(ticker, interval="5m", range_period="2d")
+        df = fetch_data_func(ticker, interval="1m", range_period="2d")
         if not df.empty:
             break
         time.sleep(2)
