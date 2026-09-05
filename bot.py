@@ -138,8 +138,8 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
 
     return pd.DataFrame()
 
-def calculate_smart_expiration(sig_data, df_indicators_5m, global_trend):
-    """Адаптивний вибір часу експірації (3, 5, 10, 15 хв) для Флету та Тренду"""
+def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
+    """Балансований розрахунок експірації (3, 5, 10, 15 хв) для трендів і флету"""
     try:
         adx = float(sig_data.get('adx', 20))
         atr = float(sig_data.get('atr', 0))
@@ -149,26 +149,23 @@ def calculate_smart_expiration(sig_data, df_indicators_5m, global_trend):
         close = float(df_indicators_5m['close'].iloc[-1])
         volatility_ratio = (atr / close) * 1000 if close > 0 else 1.0
 
-        # Режим ФЛЕТУ (низький ADX або відсутність глобального тренду)
-        if adx < 22 or global_trend == "NEUTRAL":
-            if volatility_ratio < 1.0:
-                return 15  # Повільний широкий флет
-            elif volatility_ratio < 2.5:
-                return 10  # Стандартний флет (від рівнів до рівнів)
-            else:
-                return 5   # Швидкі коливання у вузькому флеті
+        is_trend = adx >= 22 and global_trend != "NEUTRAL"
 
-        # Режим ТРЕНДУ (високий ADX та чіткий глобальний тренд)
-        elif adx >= 22:
-            if adx > 35:
-                return 15  # Потужний довгий тренд
-            elif adx >= 28:
-                return 10  # Впевнений середній тренд
-            elif volatility_ratio > 3.5:
-                return 3   # Імпульсний пробій / швидкий відкат
+        if is_trend:
+            # ТРЕНДОВІ УГОДИ
+            if adx > 32 or volatility_ratio < 1.5:
+                return 15  # Довгий стійкий тренд
+            elif adx >= 25:
+                return 10  # Середній стабільний тренд
             else:
-                return 5   # Звичайний трендовий рух
-
+                return 3   # Швидкий трендовий імпульс / пробій
+        else:
+            # ФЛЕТОВІ УГОДИ (або слабкий ринок)
+            if volatility_ratio < 1.2:
+                return 10  # Широкий повільний флет
+            else:
+                return 5   # Стандартний флет / відскок від меж
+                
     except Exception as e:
         logger.warning(f"Помилка розрахунку експірації: {e}")
     
@@ -264,7 +261,7 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    update.message.reply_text("Бот Racio_1 готовий до роботи (Мультитаймфрейм + Флет/Тренд експірація)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("Бот Racio_1 готовий до роботи (Тренд + Флет баланс)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
@@ -345,7 +342,7 @@ def run_full_scan_background(chat_id):
                         'reason': sig_data.get('reason'),
                         'rsi': rsi,
                         'atr': sig_data.get('atr'),
-                        'suggested_exp': calculate_smart_expiration(sig_data, df_indicators_5m, global_trend)
+                        'suggested_exp': calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
                     }
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -379,7 +376,7 @@ def run_full_scan_background(chat_id):
                 last_sent_signals[ticker] = time.time()  
                 
                 ai_sug_exp = ai_audit.get("suggested_expiration") if 'ai_audit' in locals() and not ai_audit_failed else None
-                expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_smart_expiration(sig_data, df_indicators_5m, global_trend)
+                expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -548,7 +545,7 @@ def button_callback(update, context):
                     'reason': sig_data.get('reason'),
                     'rsi': rsi,
                     'atr': sig_data.get('atr'),
-                    'suggested_exp': calculate_smart_expiration(sig_data, df_indicators_5m, global_trend)
+                    'suggested_exp': calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
                 }
 
                 ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -573,7 +570,7 @@ def button_callback(update, context):
                 ai_confidence = 7
 
             ai_sug_exp = ai_audit.get("suggested_expiration") if 'ai_audit' in locals() else None
-            expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_smart_expiration(sig_data, df_indicators_5m, global_trend)
+            expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
 
             icon = "🟢" if signal_type == "CALL" else "🔴"
             action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
