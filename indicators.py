@@ -87,6 +87,44 @@ class AdaptiveTechnicalAnalysis:
 
         return "NONE"
 
+    def detect_channel_pattern(self, df, window=30):
+        """Визначає тип каналу за допомогою лінійної регресії екстремумів"""
+        if len(df) < window:
+            return "UNKNOWN", 0.0
+            
+        recent = df.tail(window).copy()
+        highs = recent['high'].values
+        lows = recent['low'].values
+        x = np.arange(len(recent))
+        
+        slope_high, _ = np.polyfit(x, highs, 1)
+        slope_low, _ = np.polyfit(x, lows, 1)
+        
+        avg_price = recent['close'].mean()
+        norm_high = (slope_high * window) / avg_price * 100
+        norm_low = (slope_low * window) / avg_price * 100
+        
+        if abs(norm_high) < 0.2 and abs(norm_low) < 0.2:
+            return "HORIZONTAL_FLAT", 0.0
+        elif norm_high > 0.15 and norm_low > 0.15:
+            return "ASCENDING_CHANNEL", (norm_high + norm_low) / 2
+        elif norm_high < -0.15 and norm_low < -0.15:
+            return "DESCENDING_CHANNEL", (norm_high + norm_low) / 2
+        else:
+            return "EXPANDING_OR_WEDGE", (norm_high + norm_low) / 2
+
+    def is_candle_too_wide(self, df, threshold_multiplier=2.3):
+        """Перевіряє, чи остання свічка занадто велика (імпульсна)"""
+        if len(df) < 14:
+            return False
+        last_candle = df.iloc[-1]
+        total_range = last_candle['high'] - last_keyword = last_candle['low'] # safe fallback
+        total_range = last_candle['high'] - last_candle['low']
+        recent_ranges = (df['high'] - df['low']).tail(14).mean()
+        if total_range > (recent_ranges * threshold_multiplier):
+            return True
+        return False
+
     def generate_signal(self, df_1m, df_5m, global_trend, mid_trend):
         if df_5m.empty or len(df_5m) < 15 or df_1m.empty or len(df_1m) < 10:
             return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 10}
@@ -137,6 +175,39 @@ class AdaptiveTechnicalAnalysis:
                     reason_parts.append("Тренд вниз (1h/15m)")
                     if rsi_5m > 50: reason_parts.append(f"RSI відкат ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
+
+        # Нові фільтри каналів та імпульсних свічок
+        if signal != 'HOLD':
+            channel_type, _ = self.detect_channel_pattern(df_5m, window=30)
+            is_wide = self.is_candle_too_wide(df_5m, threshold_multiplier=2.3)
+
+            if is_wide:
+                if channel_type == "HORIZONTAL_FLAT":
+                    signal = 'HOLD'
+                    reason_parts = ["Пропущено: Імпульсний пробій у горизонтальному флеті"]
+                elif channel_type == "ASCENDING_CHANNEL" and signal == 'PUT':
+                    signal = 'HOLD'
+                    reason_parts = ["Пропущено: Широка свічка проти тренду (висхідний імпульс)"]
+                elif channel_type == "DESCENDING_CHANNEL" and signal == 'CALL':
+                    signal = 'HOLD'
+                    reason_parts = ["Пропущено: Широка свічка проти тренду (низхідний імпульс)"]
+                else:
+                    reason_parts.append("Імпульсний пробій за трендом")
+            else:
+                if channel_type == "ASCENDING_CHANNEL":
+                    if signal == 'PUT':
+                        signal = 'HOLD'
+                        reason_parts = ["Пропущено: Продаж (PUT) проти тренду у висхідному каналі"]
+                    else:
+                        reason_parts.append("Тренд у висхідному каналі (CALL)")
+                elif channel_type == "DESCENDING_CHANNEL":
+                    if signal == 'CALL':
+                        signal = 'HOLD'
+                        reason_parts = ["Пропущено: Купівля (CALL) проти тренду у низхідному каналі"]
+                    else:
+                        reason_parts.append("Тренд у низхідному каналі (PUT)")
+                elif channel_type == "HORIZONTAL_FLAT":
+                    reason_parts.append("Горизонтальний флет (відскок)")
 
         if signal != 'HOLD':
             ema_1m = float(df_1m['ema_10'].iloc[-1]) if 'ema_10' in df_1m.columns else close_1m
