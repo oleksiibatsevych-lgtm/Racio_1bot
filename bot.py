@@ -139,7 +139,7 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
     return pd.DataFrame()
 
 def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
-    """Балансований розрахунок експірації (3, 5, 10, 15 хв) для трендів і флету"""
+    """Балансовий розрахунок експірації (3, 5, 10, 15 хв) для трендів і флету"""
     try:
         adx = float(sig_data.get('adx', 20))
         atr = float(sig_data.get('atr', 0))
@@ -152,20 +152,17 @@ def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
         is_trend = adx >= 22 and global_trend != "NEUTRAL"
 
         if is_trend:
-            # ТРЕНДОВІ УГОДИ
             if adx > 32 or volatility_ratio < 1.5:
-                return 15  # Довгий стійкий тренд
+                return 15
             elif adx >= 25:
-                return 10  # Середній стабільний тренд
+                return 10
             else:
-                return 3   # Швидкий трендовий імпульс / пробій
+                return 3
         else:
-            # ФЛЕТОВІ УГОДИ (або слабкий ринок)
             if volatility_ratio < 1.2:
-                return 10  # Широкий повільний флет
+                return 10
             else:
-                return 5   # Стандартний флет / відскок від меж
-                
+                return 5
     except Exception as e:
         logger.warning(f"Помилка розрахунку експірації: {e}")
     
@@ -261,7 +258,7 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    update.message.reply_text("Бот Racio_1 готовий до роботи (Тренд + Флет баланс)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("Бот Racio_1 готовий до роботи (Канали + Фільтр свічок)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
