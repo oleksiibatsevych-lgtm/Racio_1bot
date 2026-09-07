@@ -88,7 +88,6 @@ class AdaptiveTechnicalAnalysis:
         return "NONE"
 
     def detect_channel_pattern(self, df, window=30):
-        """Визначає тип каналу за допомогою лінійної регресії екстремумів"""
         if len(df) < window:
             return "UNKNOWN", 0.0
             
@@ -114,11 +113,9 @@ class AdaptiveTechnicalAnalysis:
             return "EXPANDING_OR_WEDGE", (norm_high + norm_low) / 2
 
     def is_candle_too_wide(self, df, threshold_multiplier=2.3):
-        """Перевіряє, чи остання свічка занадто велика (імпульсна)"""
         if len(df) < 14:
             return False
         last_candle = df.iloc[-1]
-        total_range = last_candle['high'] - last_keyword = last_candle['low'] # safe fallback
         total_range = last_candle['high'] - last_candle['low']
         recent_ranges = (df['high'] - df['low']).tail(14).mean()
         if total_range > (recent_ranges * threshold_multiplier):
@@ -176,7 +173,6 @@ class AdaptiveTechnicalAnalysis:
                     if rsi_5m > 50: reason_parts.append(f"RSI відкат ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
 
-        # Нові фільтри каналів та імпульсних свічок
         if signal != 'HOLD':
             channel_type, _ = self.detect_channel_pattern(df_5m, window=30)
             is_wide = self.is_candle_too_wide(df_5m, threshold_multiplier=2.3)
