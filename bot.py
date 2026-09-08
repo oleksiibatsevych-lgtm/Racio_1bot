@@ -90,7 +90,7 @@ def get_filtered_logs(chat_id):
 
 def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
     try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         
@@ -139,7 +139,6 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
     return pd.DataFrame()
 
 def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
-    """Балансовий розрахунок експірації (3, 5, 10, 15 хв) для трендів і флету"""
     try:
         adx = float(sig_data.get('adx', 20))
         atr = float(sig_data.get('atr', 0))
@@ -297,7 +296,8 @@ def run_full_scan_background(chat_id):
                 df_indicators_5m = analyzer.calculate_indicators(df_fast)
                 df_indicators_1m = analyzer.calculate_indicators(df_micro)
                 
-                sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend)
+                # Передаємо df_macro для коректної перевірки рівнів Pivot та опору при генерації PUT/CALL
+                sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
                 
                 signal_type = sig_data.get('signal')
                 if signal_type not in ['CALL', 'PUT']:
@@ -504,7 +504,8 @@ def button_callback(update, context):
             df_indicators_5m = analyzer.calculate_indicators(df_fast)
             df_indicators_1m = analyzer.calculate_indicators(df_micro)
             
-            sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend)
+            # Передаємо df_macro для коректної перевірки рівнів Pivot та опору
+            sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
             
             signal_type = sig_data.get('signal')
             if signal_type not in ['CALL', 'PUT']:
