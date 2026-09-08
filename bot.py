@@ -316,6 +316,17 @@ def process_single_pair(chat_id, name, ticker):
         win_probability = ml_filter.predict_signal_probability(
             rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
         )
+        
+        # Адаптація на основі попередніх результатів конкретної пари у поточній сесії
+        _, _, pair_session_wr = database.get_pair_session_winrate(ticker, session_code)
+        if pair_session_wr is not None:
+            if pair_session_wr < 0.45:
+                win_probability *= 0.80
+                logger.info(f"⚠️ Знижено пріоритет {ticker} у сесії {session_code}: історичний WR {round(pair_session_wr*100, 1)}%")
+            elif pair_session_wr > 0.65:
+                win_probability = min(1.0, win_probability * 1.15)
+                logger.info(f"🔥 Підвищено пріоритет {ticker} у сесії {session_code}: історичний WR {round(pair_session_wr*100, 1)}%")
+
         if win_probability < 0.54:
             log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
             save_filtered_log(chat_id, log_msg)
@@ -449,6 +460,17 @@ def run_full_scan_background(chat_id):
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
+
+                # Адаптація на основі попередніх результатів конкретної пари у поточній сесії
+                _, _, pair_session_wr = database.get_pair_session_winrate(ticker, session_code)
+                if pair_session_wr is not None:
+                    if pair_session_wr < 0.45:
+                        win_probability *= 0.80
+                        logger.info(f"⚠️ Знижено пріоритет {ticker} у сесії {session_code}: історичний WR {round(pair_session_wr*100, 1)}%")
+                    elif pair_session_wr > 0.65:
+                        win_probability = min(1.0, win_probability * 1.15)
+                        logger.info(f"🔥 Підвищено пріоритет {ticker} у сесії {session_code}: історичний WR {round(pair_session_wr*100, 1)}%")
+
                 if win_probability < 0.54:
                     filtered_count += 1
                     log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
@@ -570,20 +592,31 @@ def handle_text_menu(update, context):
         threading.Thread(target=run_full_scan_background, args=(chat_id,)).start()
         
     elif text == "📈 Статистика":
-        update.message.reply_text("🔄 Розрахунок правдивої статистики...")
+        update.message.reply_text("🔄 Розрахунок правдивої статистики по парах та сесіях...")
         try:
             stats = database.get_overall_stats()
             ml_filter.train_model()
+            
+            rows = database.get_detailed_pair_stats()
+            session_names = {0: "🌏 Азія", 1: "🇬🇧 Лондон", 2: "🇺🇸 Нью-Йорк", 3: "🔥 Перетин"}
+            detailed_lines = ["\n📌 **Ефективність пар за сесіями:**"]
+            for r in rows:
+                tck, s_code, tot, wns = r[0], r[1], r[2], r[3] if r[3] else 0
+                wr = round((wns / tot) * 100, 1) if tot > 0 else 0
+                s_name = session_names.get(s_code, "Інша")
+                detailed_lines.append(f"• {tck} ({s_name}): {tot} угод, WR: {wr}%")
+
             stats_text = (
-                f"📈 Правдива статистика трейдингу:\n"
+                f"📈 **Правдива статистика трейдингу:**\n"
                 f"• Успішних угод (WIN): {stats.get('wins', 0)}\n"
                 f"• Нейтральних угод (BE): {stats.get('neutral', 0)}\n"
                 f"• Збиткових угод (LOSS): {stats.get('losses', 0)}\n"
                 f"• Усього перевірених угод: {stats.get('total', 0)}\n"
                 f"• Реальний вінрейт: {stats.get('winrate', 0.0)}%\n"
-                f"🧠 ML-фільтр перенавчено на актуальній базі!"
+                + ("\n".join(detailed_lines[:15]) if len(rows) > 0 else "\n• Недостатньо даних по сесіях") +
+                f"\n\n🧠 ML-фільтр перенавчено та адаптовано під сесії!"
             )
-            update.message.reply_text(stats_text)
+            update.message.reply_text(stats_text, parse_mode="Markdown")
         except Exception as e:
             logger.exception(f"Помилка отримання статистики: {e}")
             update.message.reply_text("❌ Помилка при отриманні статистики.")
@@ -613,7 +646,6 @@ def button_callback(update, context):
         query.message.reply_text(f"🔄 Запуск аналізу для {pair_name} ({ticker})...")
         threading.Thread(target=process_single_pair, args=(chat_id, pair_name, ticker)).start()
 
-# Реєстрація обробників у диспетчері
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("train", train_ml_command))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
