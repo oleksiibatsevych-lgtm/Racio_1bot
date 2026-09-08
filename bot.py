@@ -89,12 +89,20 @@ def get_filtered_logs(chat_id):
         return []
 
 def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    })
+    
     try:
-        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
-        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        session.get("https://finance.yahoo.com", timeout=5)
         
-        response = requests.get(url, headers=headers, params=params, timeout=(3, 5))
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
+        
+        response = session.get(url, params=params, timeout=5)
         if response.status_code == 200:
             data = response.json()
             result = data.get("chart", {}).get("result")
@@ -118,10 +126,8 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
         logger.warning(f"Yahoo API query failed for {ticker}: {e}")
 
     try:
-        yf_interval_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "60m"}
-        mapped_interval = yf_interval_map.get(interval, "1m")
-        
-        df_yf = yf.download(ticker, period=range_period, interval=mapped_interval, progress=False)
+        yf.pdr_override()
+        df_yf = yf.download(ticker, period=range_period, interval=interval, progress=False, session=session)
         if not df_yf.empty:
             if isinstance(df_yf.columns, pd.MultiIndex):
                 df_yf.columns = df_yf.columns.get_level_values(0)
@@ -296,7 +302,6 @@ def run_full_scan_background(chat_id):
                 df_indicators_5m = analyzer.calculate_indicators(df_fast)
                 df_indicators_1m = analyzer.calculate_indicators(df_micro)
                 
-                # Передаємо df_macro для коректної перевірки рівнів Pivot та опору при генерації PUT/CALL
                 sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
                 
                 signal_type = sig_data.get('signal')
@@ -504,7 +509,6 @@ def button_callback(update, context):
             df_indicators_5m = analyzer.calculate_indicators(df_fast)
             df_indicators_1m = analyzer.calculate_indicators(df_micro)
             
-            # Передаємо df_macro для коректної перевірки рівнів Pivot та опору
             sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
             
             signal_type = sig_data.get('signal')
