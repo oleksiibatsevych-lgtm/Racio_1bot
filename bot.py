@@ -97,9 +97,9 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
     })
     
     try:
-        session.get("[https://finance.yahoo.com](https://finance.yahoo.com)", timeout=5)
+        session.get("https://finance.yahoo.com", timeout=5)
         
-        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
         
         response = session.get(url, params=params, timeout=5)
@@ -272,6 +272,131 @@ def start(update, context):
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
     update.message.reply_text(msg)
+
+def process_single_pair(chat_id, name, ticker):
+    try:
+        session_str, session_code, hour = get_current_session_info()
+        current_time = time.time()
+        
+        if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
+            bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні. Зачекайте трохи.")
+            return
+
+        df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
+        df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
+        df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
+        df_micro = fetch_yahoo_data(ticker, interval="1m", range_period="7d")
+        
+        if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
+            bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити дані для {name}")
+            return
+
+        global_trend = analyzer.get_trend(df_macro, span_val=200)
+        mid_trend = analyzer.get_trend(df_mid, span_val=50)
+        pivots = analyzer.calculate_pivots(df_macro)
+        
+        df_indicators_5m = analyzer.calculate_indicators(df_fast)
+        df_indicators_1m = analyzer.calculate_indicators(df_micro)
+        
+        sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
+        
+        signal_type = sig_data.get('signal')
+        if signal_type not in ['CALL', 'PUT']:
+            bot.send_message(chat_id=chat_id, text=f"ℹ️ {name}: Поточний сигнал HOLD (немає чіткої точки входу).")
+            return
+        
+        rsi = sig_data.get('rsi', 50)
+        adx = sig_data.get('adx', 20)
+        bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
+        divergence_str = str(sig_data.get('divergence', 'NONE'))
+        
+        current_price = float(df_indicators_5m['close'].iloc[-1])
+        dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
+        
+        win_probability = ml_filter.predict_signal_probability(
+            rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
+        )
+        if win_probability < 0.54:
+            log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
+            save_filtered_log(chat_id, log_msg)
+            bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно фільтром.")
+            return
+        
+        ai_confidence = 7
+        ai_reason = "ШІ зайнятий / пройдено за індикаторами"
+        ai_audit_failed = False
+        
+        try:
+            macro_chart = create_chart_image(df_macro, name, tf_label="1h")
+            mid_chart = create_chart_image(df_mid, name, tf_label="15m")
+            micro_chart = create_chart_image(df_indicators_5m, name, tf_label="5m")
+
+            ai_payload = {
+                'signal': signal_type,
+                'adx': adx,
+                'global_trend': global_trend,
+                'mid_trend': mid_trend,
+                'reason': sig_data.get('reason'),
+                'rsi': rsi,
+                'atr': sig_data.get('atr'),
+                'suggested_exp': calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
+            }
+
+            ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
+            ai_confidence = int(ai_audit.get("confidence", 5))
+            rejection_reason = str(ai_audit.get("reason", ""))
+            decision = ai_audit.get("decision", "NO")
+
+            busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
+            is_ai_busy = any(kw in rejection_reason.lower() for kw in busy_keywords)
+
+            if is_ai_busy:
+                ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
+                ai_confidence = 7
+            elif decision != "YES" or ai_confidence < 7:
+                log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
+                save_filtered_log(chat_id, log_msg)
+                bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відхилено ШІ-радником.")
+                return
+            else:
+                ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
+        except Exception as e:
+            logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name}: {e}")
+            ai_reason = "ШІ недоступний (пройдено за індикаторами)"
+            ai_confidence = 7
+
+        last_sent_signals[ticker] = time.time()  
+        
+        ai_sug_exp = ai_audit.get("suggested_expiration") if 'ai_audit' in locals() and not ai_audit_failed else None
+        expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
+        
+        icon = "🟢" if signal_type == "CALL" else "🔴"
+        action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
+        
+        msg_text = (
+            f"📊 {name} ({ticker})\n"
+            f"{icon} {action_text} | ⏱ {expiration} хв\n"
+            f"🎯 Ціна входу: {current_price:.5f}\n"
+            f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
+            f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
+            f"🌐 Сесія: {session_str}\n"
+            f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
+            f"💡 Технічна причина: {str(sig_data.get('reason'))}\n"
+            f"🤖 Візуальний вердикт ШІ: {ai_reason}"
+        )
+        sent_msg = bot.send_message(chat_id=chat_id, text=msg_text)
+        
+        timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        sig_id = database.save_signal(
+            ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
+            rsi=rsi, adx=adx, bb_width=bb_width,
+            session_code=session_code, hour=hour, divergence=divergence_str,
+            dist_pivot=dist_pivot, message_text=msg_text
+        )
+        schedule_signal_timer(sig_id, timestamp_str, expiration)
+    except Exception as e:
+        logger.exception(f"Помилка обробки пари {ticker}: {e}")
+        bot.send_message(chat_id=chat_id, text=f"❌ Сталася помилка при аналізі {ticker}.")
 
 def run_full_scan_background(chat_id):
     clear_filtered_logs(chat_id)
@@ -455,153 +580,44 @@ def handle_text_menu(update, context):
                 f"• Нейтральних угод (BE): {stats.get('neutral', 0)}\n"
                 f"• Збиткових угод (LOSS): {stats.get('losses', 0)}\n"
                 f"• Усього перевірених угод: {stats.get('total', 0)}\n"
-                f"• Реальний вінрейт: {stats.get('winrate', 0)}%\n\n"
-                f"🤖 Модель успішно перенавчена."
+                f"• Реальний вінрейт: {stats.get('winrate', 0.0)}%\n"
+                f"🧠 ML-фільтр перенавчено на актуальній базі!"
             )
-            update.message.reply_text(stats_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Звіт ШІ", callback_data="get_ai_report")]]))
+            update.message.reply_text(stats_text)
         except Exception as e:
-            logger.exception(f"Помилка статистики: {e}")
-            update.message.reply_text(f"Помилка статистики: {e}")
+            logger.exception(f"Помилка отримання статистики: {e}")
+            update.message.reply_text("❌ Помилка при отриманні статистики.")
 
 def button_callback(update, context):
     query = update.callback_query
+    query.answer()
+    data = query.data
     chat_id = query.message.chat_id
-    try: query.answer()
-    except: pass
-    
-    if query.data == "show_filtered_log":
+
+    if data == "show_filtered_log":
         logs = get_filtered_logs(chat_id)
-        if not logs:
-            query.answer("Немає записів про відсіяні пари у цьому сеансі.", show_alert=True)
-            return
-        
-        log_text = "🛡 Причини відхилення сигналів:\n\n" + "\n".join(logs[:15])
-        if len(log_text) > 4000:
-            log_text = log_text[:4000] + "...\n(спискок скорочено)"
-            
-        query.edit_message_text(text=log_text)
-        return
+        if logs:
+            text = "🛡 Останні відсіяні сигнали:\n\n" + "\n".join(logs[:15])
+        else:
+            text = "ℹ️ Немає відсіяних сигналів за останню годину."
+        if len(text) > 4096:
+            text = text[:4096]
+        query.message.reply_text(text)
+    elif data.startswith("scan_"):
+        ticker = data.replace("scan_", "")
+        pair_name = ticker
+        for name, t in PAIRS_MAP.items():
+            if t == ticker:
+                pair_name = name
+                break
+        query.message.reply_text(f"🔄 Запуск аналізу для {pair_name} ({ticker})...")
+        threading.Thread(target=process_single_pair, args=(chat_id, pair_name, ticker)).start()
 
-    if query.data == "get_ai_report":
-        query.edit_message_text(text=ml_filter.generate_strategy_report())
-        return
-
-    if query.data.startswith("scan_"):
-        if is_news_blackout_window():
-            query.edit_message_text(text="⚠️ Новинне вікно високого ризику. Сканування заблоковано.")
-            return
-
-        ticker = query.data.replace("scan_", "")
-        name = next((k for k, v in PAIRS_MAP.items() if v == ticker), ticker)
-        session_str, session_code, hour = get_current_session_info()
-        
-        query.edit_message_text(text=f"🔄 Глибокий аналіз {name} (ML + ШІ-аудит)...")
-        try:
-            df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
-            df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
-            df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
-            df_micro = fetch_yahoo_data(ticker, interval="1m", range_period="7d")
-            
-            if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
-                query.edit_message_text(text=f"❌ Помилка завантаження даних для {ticker}")
-                return
-
-            global_trend = analyzer.get_trend(df_macro, span_val=200)
-            mid_trend = analyzer.get_trend(df_mid, span_val=50)
-            pivots = analyzer.calculate_pivots(df_macro)
-            
-            df_indicators_5m = analyzer.calculate_indicators(df_fast)
-            df_indicators_1m = analyzer.calculate_indicators(df_micro)
-            
-            sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
-            
-            signal_type = sig_data.get('signal')
-            if signal_type not in ['CALL', 'PUT']:
-                query.edit_message_text(text=f"ℹ️ По {name} наразі сигнал HOLD (умови не сформовані).")
-                return
-
-            rsi = sig_data.get('rsi', 50)
-            adx = sig_data.get('adx', 20)
-            bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
-            divergence_str = str(sig_data.get('divergence', 'NONE'))
-            
-            current_price = float(df_indicators_5m['close'].iloc[-1])
-            dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
-            
-            win_probability = ml_filter.predict_signal_probability(
-                rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
-            )
-            if win_probability < 0.54:
-                query.edit_message_text(text=f"🛡 ШІ (ML) відхилив сигнал по {name} (Ймовірність нижче порогової).")
-                return
-
-            ai_confidence = 7
-            ai_reason = "ШІ зайнятий / пройдено за індикаторами"
-            
-            try:
-                macro_chart = create_chart_image(df_macro, name, tf_label="1h")
-                mid_chart = create_chart_image(df_mid, name, tf_label="15m")
-                micro_chart = create_chart_image(df_indicators_5m, name, tf_label="5m")
-
-                ai_payload = {
-                    'signal': signal_type,
-                    'adx': adx,
-                    'global_trend': global_trend,
-                    'mid_trend': mid_trend,
-                    'reason': sig_data.get('reason'),
-                    'rsi': rsi,
-                    'atr': sig_data.get('atr'),
-                    'suggested_exp': calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
-                }
-
-                ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
-                ai_confidence = int(ai_audit.get("confidence", 5))
-                rejection_reason = str(ai_audit.get("reason", ""))
-                decision = ai_audit.get("decision", "NO")
-
-                busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
-                is_ai_busy = any(kw in rejection_reason.lower() for kw in busy_keywords)
-
-                if is_ai_busy:
-                    ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
-                    ai_confidence = 7
-                elif decision != "YES" or ai_confidence < 7:
-                    query.edit_message_text(text=f"🛡 Візуальний ШІ-аудит відхилив сигнал по {name} (впевненість {ai_confidence}/10):\n{rejection_reason}")
-                    return
-                else:
-                    ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
-            except Exception as e:
-                logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name}: {e}")
-                ai_reason = "ШІ недоступний (пройдено за індикаторами)"
-                ai_confidence = 7
-
-            ai_sug_exp = ai_audit.get("suggested_expiration") if 'ai_audit' in locals() else None
-            expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
-
-            icon = "🟢" if signal_type == "CALL" else "🔴"
-            action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
-
-            text = (
-                f"📊 {name} ({ticker})\n"
-                f"{icon} {action_text} | ⏱ {expiration} хв\n"
-                f"🎯 Ціна входу: {current_price:.5f}\n"
-                f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
-                f"🌐 Сесія: {session_str}\n"
-                f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
-                f"💡 Технічна причина: {str(sig_data.get('reason'))}\n"
-                f"🤖 Візуальний вердикт ШІ: {ai_reason}"
-            )
-            query.edit_message_text(text=text)
-        except Exception as e:
-            logger.exception(f"Помилка аналізу пари {ticker}: {e}")
-            query.edit_message_text(text=f"❌ Помилка аналізу пари: {e}")
-
+# Реєстрація обробників у диспетчері
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("train", train_ml_command))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
 dispatcher.add_handler(CallbackQueryHandler(button_callback))
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
