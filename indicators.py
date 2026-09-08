@@ -23,10 +23,12 @@ class AdaptiveTechnicalAnalysis:
         high = df['high']
         low = df['low']
         close = df['close']
-        plus_dm = high.diff()
-        minus_dm = low.diff()
-        plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
-        minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+        
+        up_move = high - high.shift(1)
+        down_move = low.shift(1) - low
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
         
         tr1 = high - low
         tr2 = abs(high - close.shift(1))
@@ -35,8 +37,8 @@ class AdaptiveTechnicalAnalysis:
         atr = tr.rolling(window=14).mean()
         df['atr'] = atr.fillna(0.0010)
 
-        plus_di = 100 * pd.Series(plus_dm).rolling(window=14).mean() / (atr + 1e-9)
-        minus_di = 100 * pd.Series(minus_dm).rolling(window=14).mean() / (atr + 1e-9)
+        plus_di = 100 * pd.Series(plus_dm, index=df.index).rolling(window=14).mean() / (atr + 1e-9)
+        minus_di = 100 * pd.Series(minus_dm, index=df.index).rolling(window=14).mean() / (atr + 1e-9)
         dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
         df['adx'] = dx.rolling(window=14).mean().fillna(20)
 
@@ -149,7 +151,6 @@ class AdaptiveTechnicalAnalysis:
 
         effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
 
-        # 1. Логіка для флету (ADX < 21)
         if adx < 21:
             if close_1m <= bb_lower or rsi_1m < 35:
                 signal = 'CALL'
@@ -161,8 +162,6 @@ class AdaptiveTechnicalAnalysis:
                 expiration = 3
                 reason_parts.append("Флет: відскок зверху")
                 if rsi_1m > 65: reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
-        
-        # 2. Логіка для тренду (ADX >= 21) з урахуванням опору/підтримки та рівнів Pivot для уникнення пропуску PUT/CALL
         else:
             if effective_trend == 'BULLISH':
                 if (bb_lower > 0 and close_5m <= bb_lower * 1.003) or (s1 > 0 and close_5m <= s1 * 1.002) or rsi_5m < 55 or div == 'BULLISH_DIV':
@@ -174,7 +173,6 @@ class AdaptiveTechnicalAnalysis:
                     if rsi_5m < 55: reason_parts.append(f"Відкат RSI ({rsi_5m:.1f})")
                     if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
             elif effective_trend == 'BEARISH':
-                # Якщо тренд ведмежий і ціна торкається опору (BB Upper або Pivot R1) або RSI > 45 / є дивергенція — чітко генеруємо PUT
                 if (bb_upper > 0 and close_5m >= bb_upper * 0.997) or (r1 > 0 and close_5m >= r1 * 0.998) or rsi_5m > 45 or div == 'BEARISH_DIV':
                     signal = 'PUT'
                     expiration = 5
@@ -184,7 +182,6 @@ class AdaptiveTechnicalAnalysis:
                     if rsi_5m > 45: reason_parts.append(f"Відкат RSI ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
 
-        # 3. Гнучка робота з імпульсами та каналами
         if signal != 'HOLD':
             channel_type, _ = self.detect_channel_pattern(df_5m, window=30)
             is_wide = self.is_candle_too_wide(df_5m, threshold_multiplier=2.3)
@@ -198,7 +195,6 @@ class AdaptiveTechnicalAnalysis:
                     reason_parts = ["Пропущено: Широка свічка проти тренду"]
             else:
                 if channel_type == "ASCENDING_CHANNEL" and signal == 'PUT':
-                    # Якщо торкаємося верхньої межі висхідного каналу у ведмежому тренді — дозволяємо PUT
                     if effective_trend != 'BEARISH':
                         signal = 'HOLD'
                         reason_parts = ["Пропущено: Продаж проти висхідного каналу"]
