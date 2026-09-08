@@ -122,7 +122,7 @@ class AdaptiveTechnicalAnalysis:
             return True
         return False
 
-    def generate_signal(self, df_1m, df_5m, global_trend, mid_trend):
+    def generate_signal(self, df_1m, df_5m, global_trend, mid_trend, df_macro=None):
         if df_5m.empty or len(df_5m) < 15 or df_1m.empty or len(df_1m) < 10:
             return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 10}
 
@@ -139,13 +139,17 @@ class AdaptiveTechnicalAnalysis:
         close_1m = float(last_1m['close'])
         div = self.detect_divergence(df_5m)
 
+        pivots = self.calculate_pivots(df_macro) if df_macro is not None and not df_macro.empty else {}
+        r1 = pivots.get('R1', 0)
+        s1 = pivots.get('S1', 0)
+
         signal = 'HOLD'
         reason_parts = []
         expiration = 5
 
         effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
 
-        # 1. Логіка для флету (ADX < 21) — м'якіші межі RSI
+        # 1. Логіка для флету (ADX < 21)
         if adx < 21:
             if close_1m <= bb_lower or rsi_1m < 35:
                 signal = 'CALL'
@@ -158,24 +162,29 @@ class AdaptiveTechnicalAnalysis:
                 reason_parts.append("Флет: відскок зверху")
                 if rsi_1m > 65: reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
         
-        # 2. Логіка для тренду (ADX >= 21) — оптимізовані пороги 45/55
+        # 2. Логіка для тренду (ADX >= 21) з урахуванням опору/підтримки та рівнів Pivot для уникнення пропуску PUT/CALL
         else:
             if effective_trend == 'BULLISH':
-                if rsi_5m < 55 or div == 'BULLISH_DIV':
+                if (bb_lower > 0 and close_5m <= bb_lower * 1.003) or (s1 > 0 and close_5m <= s1 * 1.002) or rsi_5m < 55 or div == 'BULLISH_DIV':
                     signal = 'CALL'
                     expiration = 5
                     reason_parts.append(f"Тренд вгору (ADX: {adx:.1f})")
+                    if bb_lower > 0 and close_5m <= bb_lower * 1.003: reason_parts.append("Відбій від Bollinger Lower")
+                    if s1 > 0 and close_5m <= s1 * 1.002: reason_parts.append("Відбій від Pivot S1")
                     if rsi_5m < 55: reason_parts.append(f"Відкат RSI ({rsi_5m:.1f})")
                     if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
             elif effective_trend == 'BEARISH':
-                if rsi_5m > 45 or div == 'BEARISH_DIV':
+                # Якщо тренд ведмежий і ціна торкається опору (BB Upper або Pivot R1) або RSI > 45 / є дивергенція — чітко генеруємо PUT
+                if (bb_upper > 0 and close_5m >= bb_upper * 0.997) or (r1 > 0 and close_5m >= r1 * 0.998) or rsi_5m > 45 or div == 'BEARISH_DIV':
                     signal = 'PUT'
                     expiration = 5
                     reason_parts.append(f"Тренд вниз (ADX: {adx:.1f})")
+                    if bb_upper > 0 and close_5m >= bb_upper * 0.997: reason_parts.append("Відбій від Bollinger Upper (Опір)")
+                    if r1 > 0 and close_5m >= r1 * 0.998: reason_parts.append("Відбій від Pivot R1 (Опір)")
                     if rsi_5m > 45: reason_parts.append(f"Відкат RSI ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
 
-        # 3. Гнучка робота з імпульсами та канатами
+        # 3. Гнучка робота з імпульсами та каналами
         if signal != 'HOLD':
             channel_type, _ = self.detect_channel_pattern(df_5m, window=30)
             is_wide = self.is_candle_too_wide(df_5m, threshold_multiplier=2.3)
@@ -189,11 +198,14 @@ class AdaptiveTechnicalAnalysis:
                     reason_parts = ["Пропущено: Широка свічка проти тренду"]
             else:
                 if channel_type == "ASCENDING_CHANNEL" and signal == 'PUT':
-                    signal = 'HOLD'
-                    reason_parts = ["Пропущено: Продаж проти висхідного каналу"]
+                    # Якщо торкаємося верхньої межі висхідного каналу у ведмежому тренді — дозволяємо PUT
+                    if effective_trend != 'BEARISH':
+                        signal = 'HOLD'
+                        reason_parts = ["Пропущено: Продаж проти висхідного каналу"]
                 elif channel_type == "DESCENDING_CHANNEL" and signal == 'CALL':
-                    signal = 'HOLD'
-                    reason_parts = ["Пропущено: Купівля проти низхідного каналу"]
+                    if effective_trend != 'BULLISH':
+                        signal = 'HOLD'
+                        reason_parts = ["Пропущено: Купівля проти низхідного каналу"]
 
         reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
         return {
