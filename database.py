@@ -161,3 +161,30 @@ def get_overall_stats():
         "losses": losses, 
         "winrate": winrate
     }
+
+def get_pair_session_winrate(ticker, session_code):
+    init_db()
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) FROM signals WHERE ticker = ? AND session_code = ? AND result IN ('WIN', 'LOSS')",
+        (ticker, session_code)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row and row[0] and row[0] >= 3:
+        total = row[0]
+        wins = row[1] if row[1] else 0
+        return total, wins, (wins / total)
+    return 0, 0, None
+
+def get_detailed_pair_stats():
+    init_db()
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    cursor = conn.cursor()
+    cursor.execute("SELECT ticker, session_code, COUNT(*), SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) FROM signals WHERE result IN ('WIN', 'LOSS') GROUP BY ticker, session_code")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
