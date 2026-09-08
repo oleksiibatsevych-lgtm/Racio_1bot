@@ -97,9 +97,9 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
     })
     
     try:
-        session.get("https://finance.yahoo.com", timeout=5)
+        session.get("[https://finance.yahoo.com](https://finance.yahoo.com)", timeout=5)
         
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
         
         response = session.get(url, params=params, timeout=5)
@@ -121,6 +121,8 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
                     df.dropna(subset=["open", "high", "low", "close"], inplace=True)
                     df["volume"] = df["volume"].fillna(0)
                     if not df.empty:
+                        if df.index.tz is not None:
+                            df.index = df.index.tz_localize(None)
                         return df
     except Exception as e:
         logger.warning(f"Yahoo API query failed for {ticker}: {e}")
@@ -138,6 +140,8 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
             df_yf = df_yf[["open", "high", "low", "close", "volume"]].copy()
             df_yf.dropna(subset=["open", "high", "low", "close"], inplace=True)
             df_yf["volume"] = df_yf["volume"].fillna(0)
+            if df_yf.index.tz is not None:
+                df_yf.index = df_yf.index.tz_localize(None)
             return df_yf
     except Exception as e:
         logger.warning(f"yfinance fallback failed for {ticker}: {e}")
