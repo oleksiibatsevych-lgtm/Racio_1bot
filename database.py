@@ -102,6 +102,9 @@ def evaluate_single_signal(sig_id, fetch_data_func):
         conn.close()
         return None
         
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+
     future_df = df[df.index >= expiry_time]
     if not future_df.empty:
         current_price = float(future_df['close'].iloc[0])
