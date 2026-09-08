@@ -5,8 +5,13 @@ from PIL import Image
 
 class AITradingAdvisor:
     def __init__(self):
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if api_key:
+            genai.configure(api_key=api_key)
         self.models_to_try = [
-            "gemini-3.6-flash"
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash"
         ]
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
