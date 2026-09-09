@@ -26,19 +26,30 @@ class TradingMLFilter:
         except:
             pass
 
-    def extract_features(self, rsi, adx, bb_width, session_code=1, hour=12, divergence=0, dist_pivot=0.0):
+    def extract_features(self, rsi, adx, bb_width, session_code=1, hour=12, divergence=0, dist_pivot=0.0, dist_weekly_ext=0.0):
         div_encoded = 1 if divergence != "NONE" else 0
-        return [[float(rsi), float(adx), float(bb_width), int(session_code), int(hour), int(div_encoded), float(dist_pivot)]]
+        return [[
+            float(rsi), 
+            float(adx), 
+            float(bb_width), 
+            int(session_code), 
+            int(hour), 
+            int(div_encoded), 
+            float(dist_pivot),
+            float(dist_weekly_ext)
+        ]]
 
-    def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0):
+    def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0, dist_weekly_ext=0.0):
         if self.model is None:
             base = 0.58
             if rsi < 35 or rsi > 65: base += 0.06
             if adx > 25: base += 0.05
             if divergence != "NONE": base += 0.08
+            if dist_weekly_ext < 0.02:
+                base -= 0.04
             return min(round(base, 2), 0.95)
         try:
-            X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot)
+            X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext)
             proba = self.model.predict_proba(X)[0][1]
             return float(proba)
         except:
@@ -47,7 +58,7 @@ class TradingMLFilter:
     def train_model(self):
         try:
             conn = sqlite3.connect("trading_stats.db")
-            query = "SELECT rsi, adx, bb_width, COALESCE(session_code, 1) as session_code, COALESCE(hour, 12) as hour, COALESCE(divergence, 'NONE') as divergence, COALESCE(dist_pivot, 0.0) as dist_pivot, COALESCE(result, 'UNKNOWN') as res FROM signals WHERE status = 'COMPLETED'"
+            query = "SELECT rsi, adx, bb_width, COALESCE(session_code, 1) as session_code, COALESCE(hour, 12) as hour, COALESCE(divergence, 'NONE') as divergence, COALESCE(dist_pivot, 0.0) as dist_pivot, COALESCE(dist_weekly_ext, 0.0) as dist_weekly_ext, COALESCE(result, 'UNKNOWN') as res FROM signals WHERE status = 'COMPLETED'"
             df = pd.read_sql(query, conn)
             conn.close()
 
@@ -64,7 +75,8 @@ class TradingMLFilter:
                 df['session_code'].fillna(1),
                 df['hour'].fillna(12),
                 df['div_encoded'],
-                df['dist_pivot'].fillna(0.0)
+                df['dist_pivot'].fillna(0.0),
+                df['dist_weekly_ext'].fillna(0.0)
             ])
             y = df['target'].values
 
