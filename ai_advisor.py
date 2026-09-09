@@ -60,11 +60,10 @@ class AITradingAdvisor:
 
         if not response_text:
             return {
-                "decision": "YES",
-                "confidence": 7,
+                "decision": "NO",
+                "confidence": 1,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "ШІ недоступний (пройдено за індикаторами)",
-                "fallback": True
+                "reason": "Усі моделі Gemini наразі недоступні."
             }
 
         try:
@@ -82,14 +81,12 @@ class AITradingAdvisor:
                 "decision": result.get("decision", "NO"),
                 "confidence": int(result.get("confidence", 5)),
                 "suggested_expiration": int(result.get("suggested_expiration", payload.get('suggested_exp', 5))),
-                "reason": result.get("reason", "ШІ не надав детального пояснення"),
-                "fallback": False
+                "reason": result.get("reason", "ШІ не надав детального пояснення")
             }
         except Exception as e:
             return {
-                "decision": "YES",
-                "confidence": 7,
+                "decision": "NO",
+                "confidence": 1,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "Помилка обробки відповіді ШІ (пройдено за індикаторами)",
-                "fallback": True
+                "reason": "Помилка обробки відповіді ШІ"
             }
