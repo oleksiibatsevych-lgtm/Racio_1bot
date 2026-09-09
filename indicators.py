@@ -20,11 +20,6 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
 
-        # Volume Surge розрахунок
-        vol_sma = df['volume'].rolling(window=20).mean()
-        df['volume_surge'] = df['volume'] / (vol_sma + 1e-9)
-        df['volume_surge'] = df['volume_surge'].fillna(1.0)
-
         high = df['high']
         low = df['low']
         close = df['close']
@@ -61,22 +56,6 @@ class AdaptiveTechnicalAnalysis:
         elif current_price < current_ema * 0.999:
             return "BEARISH"
         return "NEUTRAL"
-
-    def get_timeframe_consistency(self, df_macro, df_mid, df_fast):
-        try:
-            t_macro = self.get_trend(df_macro, span_val=200)
-            t_mid = self.get_trend(df_mid, span_val=50)
-            t_fast = self.get_trend(df_fast, span_val=20)
-            
-            matches = 0
-            total = 2
-            if t_macro == t_mid and t_macro != "NEUTRAL":
-                matches += 1
-            if t_mid == t_fast and t_mid != "NEUTRAL":
-                matches += 1
-            return float(matches / total)
-        except Exception:
-            return 0.5
 
     def calculate_pivots(self, df_macro):
         if df_macro.empty or len(df_macro) < 2:
@@ -147,7 +126,7 @@ class AdaptiveTechnicalAnalysis:
 
     def generate_signal(self, df_1m, df_5m, global_trend, mid_trend, df_macro=None):
         if df_5m.empty or len(df_5m) < 15 or df_1m.empty or len(df_1m) < 10:
-            return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5}
+            return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 10}
 
         last_5m = df_5m.iloc[-1]
         last_1m = df_1m.iloc[-1]
@@ -198,8 +177,8 @@ class AdaptiveTechnicalAnalysis:
                     signal = 'PUT'
                     expiration = 5
                     reason_parts.append(f"Тренд вниз (ADX: {adx:.1f})")
-                    if bb_upper > 0 and close_5m >= bb_upper * 0.997: reason_parts.append("Відбій від Bollinger Upper")
-                    if r1 > 0 and close_5m >= r1 * 0.998: reason_parts.append("Відбій від Pivot R1")
+                    if bb_upper > 0 and close_5m >= bb_upper * 0.997: reason_parts.append("Відбій від Bollinger Upper (Опір)")
+                    if r1 > 0 and close_5m >= r1 * 0.998: reason_parts.append("Відбій від Pivot R1 (Опір)")
                     if rsi_5m > 45: reason_parts.append(f"Відкат RSI ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
 
