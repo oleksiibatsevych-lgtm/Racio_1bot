@@ -51,8 +51,8 @@ class TradingMLFilter:
             df = pd.read_sql(query, conn)
             conn.close()
 
-            if len(df) < 10:
-                return False, "⚠️ Замало завершених угод для навчання ШІ (мінімум 10)."
+            if len(df) < 100:
+                return False, f"⚠️ Замало завершених угод загалом для якісного навчання ШІ ({len(df)}/100)."
 
             df['target'] = df['res'].apply(lambda x: 1 if x == 'WIN' else 0)
             df['div_encoded'] = df['divergence'].apply(lambda x: 1 if x != "NONE" else 0)
