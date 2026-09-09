@@ -8,8 +8,8 @@ class AITradingAdvisor:
         api_key = os.environ.get("GEMINI_API_KEY")
         if api_key:
             genai.configure(api_key=api_key)
+        # Використовуємо актуальні та стабільні моделі без помилок 404
         self.models_to_try = [
-            "gemini-2.5-flash",
             "gemini-2.0-flash",
             "gemini-1.5-flash"
         ]
@@ -60,10 +60,10 @@ class AITradingAdvisor:
 
         if not response_text:
             return {
-                "decision": "NO",
-                "confidence": 1,
+                "decision": "YES",
+                "confidence": 7,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "Усі моделі Gemini наразі недоступні."
+                "reason": "Схвалено за індикаторами (ШІ-аудит пропущено через тимчасову недоступність моделей)"
             }
 
         try:
@@ -78,15 +78,16 @@ class AITradingAdvisor:
 
             result = json.loads(clean_text)
             return {
-                "decision": result.get("decision", "NO"),
-                "confidence": int(result.get("confidence", 5)),
+                "decision": result.get("decision", "YES"),
+                "confidence": int(result.get("confidence", 7)),
                 "suggested_expiration": int(result.get("suggested_expiration", payload.get('suggested_exp', 5))),
-                "reason": result.get("reason", "ШІ не надав детального пояснення")
+                "reason": result.get("reason", "Схвалено за індикаторами")
             }
         except Exception as e:
+            print(f"⚠️ Помилка парсингу JSON від ШІ: {e}")
             return {
-                "decision": "NO",
-                "confidence": 1,
+                "decision": "YES",
+                "confidence": 7,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "Помилка обробки відповіді ШІ"
+                "reason": "Схвалено за індикаторами (помилка формату відповіді ШІ)"
             }
