@@ -173,7 +173,7 @@ def get_pair_session_winrate(ticker, session_code):
     )
     row = cursor.fetchone()
     conn.close()
-    if row and row[0] and row[0] >= 3:
+    if row and row[0] and row[0] >= 100:
         total = row[0]
         wins = row[1] if row[1] else 0
         return total, wins, (wins / total)
