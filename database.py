@@ -29,6 +29,7 @@ def init_db():
             hour INTEGER,
             divergence TEXT,
             dist_pivot REAL,
+            dist_weekly_ext REAL DEFAULT 0.0,
             message_text TEXT
         )
     ''')
@@ -37,7 +38,7 @@ def init_db():
 
 def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, 
                 rsi=0.0, adx=0.0, bb_width=0.0, session_code=1, hour=12, 
-                divergence="NONE", dist_pivot=0.0, message_text=""):
+                divergence="NONE", dist_pivot=0.0, dist_weekly_ext=0.0, message_text=""):
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -45,10 +46,10 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
-                             rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext, message_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
-          rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text))
+          rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext, message_text))
     signal_id = cursor.lastrowid
     conn.commit()
     conn.close()
