@@ -62,6 +62,22 @@ class AdaptiveTechnicalAnalysis:
             return "BEARISH"
         return "NEUTRAL"
 
+    def get_timeframe_consistency(self, df_macro, df_mid, df_fast):
+        try:
+            t_macro = self.get_trend(df_macro, span_val=200)
+            t_mid = self.get_trend(df_mid, span_val=50)
+            t_fast = self.get_trend(df_fast, span_val=20)
+            
+            matches = 0
+            total = 2
+            if t_macro == t_mid and t_macro != "NEUTRAL":
+                matches += 1
+            if t_mid == t_fast and t_mid != "NEUTRAL":
+                matches += 1
+            return float(matches / total)
+        except Exception:
+            return 0.5
+
     def calculate_pivots(self, df_macro):
         if df_macro.empty or len(df_macro) < 2:
             return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
