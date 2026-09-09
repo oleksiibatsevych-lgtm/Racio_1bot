@@ -20,6 +20,11 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
 
+        # Volume Surge розрахунок
+        vol_sma = df['volume'].rolling(window=20).mean()
+        df['volume_surge'] = df['volume'] / (vol_sma + 1e-9)
+        df['volume_surge'] = df['volume_surge'].fillna(1.0)
+
         high = df['high']
         low = df['low']
         close = df['close']
@@ -126,7 +131,7 @@ class AdaptiveTechnicalAnalysis:
 
     def generate_signal(self, df_1m, df_5m, global_trend, mid_trend, df_macro=None):
         if df_5m.empty or len(df_5m) < 15 or df_1m.empty or len(df_1m) < 10:
-            return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 10}
+            return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5}
 
         last_5m = df_5m.iloc[-1]
         last_1m = df_1m.iloc[-1]
@@ -177,8 +182,8 @@ class AdaptiveTechnicalAnalysis:
                     signal = 'PUT'
                     expiration = 5
                     reason_parts.append(f"Тренд вниз (ADX: {adx:.1f})")
-                    if bb_upper > 0 and close_5m >= bb_upper * 0.997: reason_parts.append("Відбій від Bollinger Upper (Опір)")
-                    if r1 > 0 and close_5m >= r1 * 0.998: reason_parts.append("Відбій від Pivot R1 (Опір)")
+                    if bb_upper > 0 and close_5m >= bb_upper * 0.997: reason_parts.append("Відбій від Bollinger Upper")
+                    if r1 > 0 and close_5m >= r1 * 0.998: reason_parts.append("Відбій від Pivot R1")
                     if rsi_5m > 45: reason_parts.append(f"Відкат RSI ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
 
