@@ -30,8 +30,6 @@ def init_db():
             divergence TEXT,
             dist_pivot REAL,
             dist_weekly_ext REAL DEFAULT 0.0,
-            volume_surge REAL DEFAULT 1.0,
-            trend_alignment REAL DEFAULT 1.0,
             message_text TEXT
         )
     ''')
@@ -40,7 +38,7 @@ def init_db():
 
 def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, 
                 rsi=0.0, adx=0.0, bb_width=0.0, session_code=1, hour=12, 
-                divergence="NONE", dist_pivot=0.0, dist_weekly_ext=0.0, volume_surge=1.0, trend_alignment=1.0, message_text=""):
+                divergence="NONE", dist_pivot=0.0, dist_weekly_ext=0.0, message_text=""):
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -48,10 +46,10 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
-                             rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext, volume_surge, trend_alignment, message_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext, message_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
-          rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext, volume_surge, trend_alignment, message_text))
+          rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext, message_text))
     signal_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -176,7 +174,7 @@ def get_pair_session_winrate(ticker, session_code):
     )
     row = cursor.fetchone()
     conn.close()
-    if row and row[0] and row[0] >= 50:
+    if row and row[0] and row[0] >= 100:
         total = row[0]
         wins = row[1] if row[1] else 0
         return total, wins, (wins / total)
