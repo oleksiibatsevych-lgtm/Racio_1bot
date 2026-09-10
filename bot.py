@@ -161,7 +161,6 @@ def get_weekly_extremum_distance(df_1h, current_price):
     return min(dist_to_high, dist_to_low)
 
 def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
-    # Динамічна оптимізація експірації через поточний ATR та швидкість проходження діапазону
     try:
         adx = float(sig_data.get('adx', 20))
         atr = float(sig_data.get('atr', 0))
@@ -171,7 +170,6 @@ def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
         close = float(df_indicators_5m['close'].iloc[-1])
         volatility_ratio = (atr / close) * 1000 if close > 0 else 1.0
 
-        # Математичний розрахунок часу експірації
         base_mins = int(round(6.0 / (volatility_ratio + 0.1) + (30.0 / (adx + 5.0))))
         expiration = max(2, min(30, base_mins))
         return expiration
@@ -202,7 +200,6 @@ def get_current_session_info():
     return session_str, session_code, hour
 
 def is_news_blackout_window():
-    # Інтеграція економічного календаря / перевірка вікна важливих новин
     now_utc = datetime.utcnow()
     high_impact_hours = [12, 13, 14, 15, 18]
     if now_utc.minute < 10 and now_utc.hour in high_impact_hours:
@@ -284,7 +281,8 @@ def process_single_pair(chat_id, name, ticker):
         day_of_week = datetime.utcnow().weekday()
         current_time = time.time()
         
-        if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
+        # Зменшено кулдаун до 180 секунд для вищої частоти сигналів
+        if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 180:
             bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні. Зачекайте трохи.")
             return
 
@@ -316,7 +314,6 @@ def process_single_pair(chat_id, name, ticker):
         bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
         divergence_str = str(sig_data.get('divergence', 'NONE'))
         
-        # Розрахунок нових ознак для ML: Volume Surge та Trend Alignment
         vol_series = df_indicators_5m.get('volume', pd.Series([1]*len(df_indicators_5m)))
         vol_ma = vol_series.rolling(20).mean().iloc[-1]
         current_vol = vol_series.iloc[-1]
@@ -378,7 +375,8 @@ def process_single_pair(chat_id, name, ticker):
             if is_ai_busy:
                 ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
                 ai_confidence = 7
-            elif decision != "YES" or ai_confidence < 7:
+            # Пом'якшено поріг впевненості ШІ з 7 до 6 для збільшення пропускної здатності
+            elif decision != "YES" or ai_confidence < 6:
                 log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
                 save_filtered_log(chat_id, log_msg)
                 bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відхилено ШІ-радником.")
@@ -434,7 +432,7 @@ def run_full_scan_background(chat_id):
         
         for name, ticker in PAIRS_MAP.items():
             try:
-                if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
+                if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 180:
                     continue
 
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="7d")
@@ -524,7 +522,7 @@ def run_full_scan_background(chat_id):
                     if is_ai_busy:
                         ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
                         ai_confidence = 7
-                    elif decision != "YES" or ai_confidence < 7:
+                    elif decision != "YES" or ai_confidence < 6:
                         filtered_count += 1
                         log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
                         save_filtered_log(chat_id, log_msg)
@@ -569,7 +567,7 @@ def run_full_scan_background(chat_id):
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
-                time.sleep(5)
+                time.sleep(3)
             except Exception as e:
                 logger.exception(f"Помилка обробки пари {ticker}: {e}")
                 
