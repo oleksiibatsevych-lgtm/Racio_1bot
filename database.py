@@ -29,7 +29,6 @@ def init_db():
             hour INTEGER,
             divergence TEXT,
             dist_pivot REAL,
-            dist_weekly_ext REAL DEFAULT 0.0,
             message_text TEXT
         )
     ''')
@@ -38,7 +37,7 @@ def init_db():
 
 def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, message_id=None, 
                 rsi=0.0, adx=0.0, bb_width=0.0, session_code=1, hour=12, 
-                divergence="NONE", dist_pivot=0.0, dist_weekly_ext=0.0, message_text=""):
+                divergence="NONE", dist_pivot=0.0, message_text=""):
     init_db()
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -46,10 +45,10 @@ def save_signal(ticker, signal, entry_price, expiration_mins, chat_id=None, mess
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     cursor.execute('''
         INSERT INTO signals (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
-                             rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext, message_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id, 
-          rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, dist_weekly_ext, message_text))
+          rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text))
     signal_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -162,30 +161,3 @@ def get_overall_stats():
         "losses": losses, 
         "winrate": winrate
     }
-
-def get_pair_session_winrate(ticker, session_code):
-    init_db()
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) FROM signals WHERE ticker = ? AND session_code = ? AND result IN ('WIN', 'LOSS')",
-        (ticker, session_code)
-    )
-    row = cursor.fetchone()
-    conn.close()
-    if row and row[0] and row[0] >= 100:
-        total = row[0]
-        wins = row[1] if row[1] else 0
-        return total, wins, (wins / total)
-    return 0, 0, None
-
-def get_detailed_pair_stats():
-    init_db()
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    cursor = conn.cursor()
-    cursor.execute("SELECT ticker, session_code, COUNT(*), SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) FROM signals WHERE result IN ('WIN', 'LOSS') GROUP BY ticker, session_code")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
