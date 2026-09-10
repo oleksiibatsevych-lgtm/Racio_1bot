@@ -97,8 +97,8 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
     })
     
     try:
-        session.get("https://finance.yahoo.com", timeout=5)
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        session.get("[https://finance.yahoo.com](https://finance.yahoo.com)", timeout=5)
+        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
         params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
         
         response = session.get(url, params=params, timeout=5)
@@ -146,32 +146,6 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
         logger.warning(f"yfinance fallback failed for {ticker}: {e}")
 
     return pd.DataFrame()
-
-def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
-    try:
-        adx = float(sig_data.get('adx', 20))
-        atr = float(sig_data.get('atr', 0))
-        if atr == 0 and 'atr' in df_indicators_5m.columns:
-            atr = float(df_indicators_5m['atr'].iloc[-1])
-            
-        close = float(df_indicators_5m['close'].iloc[-1])
-        volatility_ratio = (atr / close) * 1000 if close > 0 else 1.0
-
-        is_trend = adx >= 22 and global_trend != "NEUTRAL"
-
-        if is_trend:
-            if adx > 32 or volatility_ratio < 1.5:
-                return 15
-            elif adx >= 25:
-                return 10
-            else:
-                return 5
-        else:
-            return 5
-    except Exception as e:
-        logger.warning(f"Помилка розрахунку експірації: {e}")
-    
-    return 5
 
 def get_current_session_info():
     now_utc = datetime.utcnow()
@@ -263,7 +237,7 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    update.message.reply_text("Бот Racio_1 готовий до роботи (Оновлені фільтри)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("Бот Racio_1 готовий до роботи (Аналіз + Волатильна Експірація)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
@@ -278,6 +252,7 @@ def process_single_pair(chat_id, name, ticker):
             bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні. Зачекайте трохи.")
             return
 
+        df_daily = fetch_yahoo_data(ticker, interval="1d", range_period="30d")
         df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
         df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
         df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
@@ -289,12 +264,12 @@ def process_single_pair(chat_id, name, ticker):
 
         global_trend = analyzer.get_trend(df_macro, span_val=200)
         mid_trend = analyzer.get_trend(df_mid, span_val=50)
-        pivots = analyzer.calculate_pivots(df_macro)
+        pivots = analyzer.calculate_pivots(df_daily if not df_daily.empty else df_macro)
         
         df_indicators_5m = analyzer.calculate_indicators(df_fast)
         df_indicators_1m = analyzer.calculate_indicators(df_micro)
         
-        sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
+        sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_daily)
         
         signal_type = sig_data.get('signal')
         if signal_type not in ['CALL', 'PUT']:
@@ -303,17 +278,16 @@ def process_single_pair(chat_id, name, ticker):
         
         rsi = sig_data.get('rsi', 50)
         adx = sig_data.get('adx', 20)
-        bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
+        bb_width = float(df_indicators_5m['bb_width'].iloc[-2]) if len(df_indicators_5m) >= 2 else 0.001
         divergence_str = str(sig_data.get('divergence', 'NONE'))
         
-        current_price = float(df_indicators_5m['close'].iloc[-1])
+        current_price = float(df_indicators_5m['close'].iloc[-2]) if len(df_indicators_5m) >= 2 else float(df_indicators_5m['close'].iloc[-1])
         dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
         
         win_probability = ml_filter.predict_signal_probability(
             rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
         )
-        # Підвищено поріг фільтрації з 0.54 до 0.65
-        if win_probability < 0.65:
+        if win_probability < 0.54:
             log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
             save_filtered_log(chat_id, log_msg)
             bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно фільтром.")
@@ -323,6 +297,8 @@ def process_single_pair(chat_id, name, ticker):
         ai_reason = "ШІ зайнятий / пройдено за індикаторами"
         ai_audit_failed = False
         
+        calculated_expiration = sig_data.get('suggested_exp', 5)
+
         try:
             macro_chart = create_chart_image(df_macro, name, tf_label="1h")
             mid_chart = create_chart_image(df_mid, name, tf_label="15m")
@@ -336,7 +312,7 @@ def process_single_pair(chat_id, name, ticker):
                 'reason': sig_data.get('reason'),
                 'rsi': rsi,
                 'atr': sig_data.get('atr'),
-                'suggested_exp': calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
+                'suggested_exp': calculated_expiration
             }
 
             ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -357,22 +333,22 @@ def process_single_pair(chat_id, name, ticker):
                 return
             else:
                 ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
+                if "ai_audit" in locals() and ai_audit.get("suggested_expiration"):
+                    calculated_expiration = int(ai_audit.get("suggested_expiration"))
         except Exception as e:
             logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name}: {e}")
             ai_reason = "ШІ недоступний (пройдено за індикаторами)"
             ai_confidence = 7
 
         last_sent_signals[ticker] = time.time()  
-        
-        ai_sug_exp = ai_audit.get("suggested_expiration") if 'ai_audit' in locals() and not ai_audit_failed else None
-        expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
+        expiration = calculated_expiration
         
         icon = "🟢" if signal_type == "CALL" else "🔴"
         action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
         
         msg_text = (
             f"📊 {name} ({ticker})\n"
-            f"{icon} {action_text} | ⏱ {expiration} хв\n"
+            f"{icon} {action_text} | ⏱ {expiration} хв (динамічна)\n"
             f"🎯 Ціна входу: {current_price:.5f}\n"
             f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
             f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
@@ -403,54 +379,62 @@ def run_full_scan_background(chat_id):
         filtered_count = 0
         current_time = time.time()
         
+        logger.info(f"Початок фонового сканування для chat_id={chat_id}. Всього пар: {len(PAIRS_MAP)}")
+
         for name, ticker in PAIRS_MAP.items():
             try:
+                logger.info(f"Перевірка пари: {name} ({ticker})")
                 if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
+                    logger.info(f"Пара {ticker} пропущена через кулдаун")
                     continue
 
+                df_daily = fetch_yahoo_data(ticker, interval="1d", range_period="30d")
                 df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
                 df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
                 df_micro = fetch_yahoo_data(ticker, interval="1m", range_period="7d")
                 
                 if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
+                    logger.warning(f"Не вдалося завантажити всі ТФ для {ticker}")
                     continue
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
-                pivots = analyzer.calculate_pivots(df_macro)
+                pivots = analyzer.calculate_pivots(df_daily if not df_daily.empty else df_macro)
                 
                 df_indicators_5m = analyzer.calculate_indicators(df_fast)
                 df_indicators_1m = analyzer.calculate_indicators(df_micro)
                 
-                sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
+                sig_data = analyzer.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_daily)
                 
                 signal_type = sig_data.get('signal')
                 if signal_type not in ['CALL', 'PUT']:
+                    logger.info(f"Пара {name}: сигнал HOLD")
                     continue
                 
                 rsi = sig_data.get('rsi', 50)
                 adx = sig_data.get('adx', 20)
-                bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
+                bb_width = float(df_indicators_5m['bb_width'].iloc[-2]) if len(df_indicators_5m) >= 2 else 0.001
                 divergence_str = str(sig_data.get('divergence', 'NONE'))
                 
-                current_price = float(df_indicators_5m['close'].iloc[-1])
+                current_price = float(df_indicators_5m['close'].iloc[-2]) if len(df_indicators_5m) >= 2 else float(df_indicators_5m['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
-                # Підвищено поріг фільтрації з 0.54 до 0.56
-                if win_probability < 0.56:
+                if win_probability < 0.54:
                     filtered_count += 1
                     log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
+                    logger.info(log_msg)
                     save_filtered_log(chat_id, log_msg)
                     continue
                 
                 ai_confidence = 7
                 ai_reason = "ШІ зайнятий / пройдено за індикаторами"
                 ai_audit_failed = False
-                
+                calculated_expiration = sig_data.get('suggested_exp', 5)
+
                 try:
                     macro_chart = create_chart_image(df_macro, name, tf_label="1h")
                     mid_chart = create_chart_image(df_mid, name, tf_label="15m")
@@ -464,7 +448,7 @@ def run_full_scan_background(chat_id):
                         'reason': sig_data.get('reason'),
                         'rsi': rsi,
                         'atr': sig_data.get('atr'),
-                        'suggested_exp': calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
+                        'suggested_exp': calculated_expiration
                     }
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -481,11 +465,15 @@ def run_full_scan_background(chat_id):
                     elif decision != "YES" or ai_confidence < 7:
                         filtered_count += 1
                         log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
+                        logger.info(log_msg)
                         save_filtered_log(chat_id, log_msg)
                         ai_audit_failed = True
                     else:
                         ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
+                        if ai_audit.get("suggested_expiration"):
+                            calculated_expiration = int(ai_audit.get("suggested_expiration"))
                 except Exception as e:
+                    logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name}: {e}")
                     ai_reason = "ШІ недоступний (пройдено за індикаторами)"
                     ai_confidence = 7
 
@@ -494,16 +482,14 @@ def run_full_scan_background(chat_id):
 
                 sent_signals_count += 1
                 last_sent_signals[ticker] = time.time()  
-                
-                ai_sug_exp = ai_audit.get("suggested_expiration") if 'ai_audit' in locals() and not ai_audit_failed else None
-                expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
+                expiration = calculated_expiration
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
                 
                 msg_text = (
                     f"📊 {name} ({ticker})\n"
-                    f"{icon} {action_text} | ⏱ {expiration} хв\n"
+                    f"{icon} {action_text} | ⏱ {expiration} хв (динамічна)\n"
                     f"🎯 Ціна входу: {current_price:.5f}\n"
                     f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
                     f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
