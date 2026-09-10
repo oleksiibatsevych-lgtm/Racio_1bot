@@ -151,18 +151,17 @@ class AdaptiveTechnicalAnalysis:
 
         effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
 
-        # Покращені умови для флету (підвищуємо вінрейт за рахунок суворіших зон RSI)
         if adx < 21:
-            if (close_1m <= bb_lower or rsi_1m < 32):
+            if close_1m <= bb_lower or rsi_1m < 35:
                 signal = 'CALL'
                 expiration = 3
-                reason_parts.append("Флет: якісний відскок знизу")
-                reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
-            elif (close_1m >= bb_upper or rsi_1m > 68):
+                reason_parts.append("Флет: відскок знизу")
+                if rsi_1m < 35: reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
+            elif close_1m >= bb_upper or rsi_1m > 65:
                 signal = 'PUT'
                 expiration = 3
-                reason_parts.append("Флет: якісний відскок зверху")
-                reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
+                reason_parts.append("Флет: відскок зверху")
+                if rsi_1m > 65: reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
         else:
             if effective_trend == 'BULLISH':
                 if (bb_lower > 0 and close_5m <= bb_lower * 1.003) or (s1 > 0 and close_5m <= s1 * 1.002) or rsi_5m < 55 or div == 'BULLISH_DIV':
