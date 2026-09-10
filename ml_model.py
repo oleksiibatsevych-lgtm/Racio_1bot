@@ -50,27 +50,27 @@ class TradingMLFilter:
         ]]
 
     def get_dynamic_threshold(self, ticker, session_code, adx, bb_width):
-        # Плаваючий поріг залежно від волатильності та ліквідності активу
-        base_threshold = 0.54
+        # Зменшено базові пороги для кращої пропускної здатності сигналів без втрати якості
+        base_threshold = 0.51
         is_jpy = "JPY" in ticker.upper()
         
         if session_code in [1, 2, 3] and is_jpy:
-            base_threshold = 0.52  # Стабільніші тренди на крос-курсах з єною
+            base_threshold = 0.50  
         elif adx < 20 or bb_width < 0.002:
-            base_threshold = 0.56  # Боковий рух / флет вимагає жорсткішого фільтра
+            base_threshold = 0.53  
         elif adx > 30:
-            base_threshold = 0.53  # Сильний тренд дозволяє м'якший вхід
+            base_threshold = 0.50  
             
-        return max(0.50, min(0.60, base_threshold))
+        return max(0.48, min(0.57, base_threshold))
 
     def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, day_of_week=0, divergence="NONE", dist_pivot=0.0, dist_weekly_ext=0.0, volume_surge=1.0, trend_alignment=1.0):
         if self.model is None:
-            base = 0.58
-            if rsi < 35 or rsi > 65: base += 0.06
-            if adx > 25: base += 0.05
+            base = 0.60
+            if rsi < 32 or rsi > 68: base += 0.06
+            if adx > 22: base += 0.05
             if divergence != "NONE": base += 0.08
             if dist_weekly_ext < 0.02:
-                base -= 0.04
+                base -= 0.03
             return min(round(base, 2), 0.95)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, day_of_week, divergence, dist_pivot, dist_weekly_ext, volume_surge, trend_alignment)
@@ -90,8 +90,8 @@ class TradingMLFilter:
             df = pd.read_sql(query, conn)
             conn.close()
 
-            if len(df) < 50:
-                return False, f"⚠️ Замало завершених угод загалом для якісного навчання ШІ ({len(df)}/50)."
+            if len(df) < 30: # Зменшено мінімальний ліміт для швидшого навчання
+                return False, f"⚠️ Замало завершених угод загалом для якісного навчання ШІ ({len(df)}/30)."
 
             df['target'] = df['res'].apply(lambda x: 1 if x == 'WIN' else 0)
             df['div_encoded'] = df['divergence'].apply(lambda x: 1 if x != "NONE" else 0)
