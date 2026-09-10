@@ -89,19 +89,44 @@ def get_filtered_logs(chat_id):
         return []
 
 def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
-    })
-    
+    """
+    Надійне отримання даних з Yahoo Finance з автоматичним обходом блокувань Render IPs.
+    """
+    # 1. Основна спроба через yfinance
     try:
-        session.get("[https://finance.yahoo.com](https://finance.yahoo.com)", timeout=5)
-        url = f"[https://query1.finance.yahoo.com/v8/finance/chart/](https://query1.finance.yahoo.com/v8/finance/chart/){ticker}"
-        params = {"interval": interval, "range": range_period, "includeAdjustedClose": "true"}
+        df_yf = yf.download(
+            tickers=ticker,
+            period=range_period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True
+        )
+        if not df_yf.empty:
+            if isinstance(df_yf.columns, pd.MultiIndex):
+                df_yf.columns = df_yf.columns.get_level_values(0)
+            
+            df_yf = df_yf.rename(columns={
+                "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"
+            })
+            df_yf = df_yf[["open", "high", "low", "close", "volume"]].copy()
+            df_yf.dropna(subset=["open", "high", "low", "close"], inplace=True)
+            if not df_yf.empty:
+                if df_yf.index.tz is not None:
+                    df_yf.index = df_yf.index.tz_localize(None)
+                return df_yf
+    except Exception as e:
+        logger.warning(f"yf.download failed for {ticker}: {e}")
+
+    # 2. Резервна спроба через прямий HTTP-запит до query2 API з браузерним User-Agent
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+        }
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+        params = {"interval": interval, "range": range_period}
         
-        response = session.get(url, params=params, timeout=5)
+        response = requests.get(url, headers=headers, params=params, timeout=7)
         if response.status_code == 200:
             data = response.json()
             result = data.get("chart", {}).get("result")
@@ -109,7 +134,7 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
                 res = result[0]
                 timestamps = res.get("timestamp", [])
                 quotes = res.get("indicators", {}).get("quote", [{}])[0]
-                if timestamps and quotes:
+                if timestamps and quotes and quotes.get("close"):
                     df = pd.DataFrame({
                         "open": quotes.get("open", []),
                         "high": quotes.get("high", []),
@@ -124,26 +149,7 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
                             df.index = df.index.tz_localize(None)
                         return df
     except Exception as e:
-        logger.warning(f"Yahoo API query failed for {ticker}: {e}")
-
-    try:
-        yf.pdr_override()
-        df_yf = yf.download(ticker, period=range_period, interval=interval, progress=False, session=session)
-        if not df_yf.empty:
-            if isinstance(df_yf.columns, pd.MultiIndex):
-                df_yf.columns = df_yf.columns.get_level_values(0)
-            
-            df_yf = df_yf.rename(columns={
-                "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"
-            })
-            df_yf = df_yf[["open", "high", "low", "close", "volume"]].copy()
-            df_yf.dropna(subset=["open", "high", "low", "close"], inplace=True)
-            df_yf["volume"] = df_yf["volume"].fillna(0)
-            if df_yf.index.tz is not None:
-                df_yf.index = df_yf.index.tz_localize(None)
-            return df_yf
-    except Exception as e:
-        logger.warning(f"yfinance fallback failed for {ticker}: {e}")
+        logger.warning(f"Direct Yahoo query failed for {ticker}: {e}")
 
     return pd.DataFrame()
 
@@ -295,7 +301,6 @@ def process_single_pair(chat_id, name, ticker):
         
         ai_confidence = 7
         ai_reason = "ШІ зайнятий / пройдено за індикаторами"
-        ai_audit_failed = False
         
         calculated_expiration = sig_data.get('suggested_exp', 5)
 
