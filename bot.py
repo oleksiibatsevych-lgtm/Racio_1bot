@@ -148,18 +148,6 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
 
     return pd.DataFrame()
 
-def get_weekly_extremum_distance(df_1h, current_price):
-    if df_1h.empty:
-        return 0.0
-    weekly_high = df_1h['high'].max()
-    weekly_low = df_1h['low'].min()
-    weekly_range = weekly_high - weekly_low
-    if weekly_range == 0:
-        return 0.0
-    dist_to_high = (weekly_high - current_price) / weekly_range
-    dist_to_low = (current_price - weekly_low) / weekly_range
-    return min(dist_to_high, dist_to_low)
-
 def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
     try:
         adx = float(sig_data.get('adx', 20))
@@ -170,11 +158,22 @@ def calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend):
         close = float(df_indicators_5m['close'].iloc[-1])
         volatility_ratio = (atr / close) * 1000 if close > 0 else 1.0
 
-        base_mins = int(round(6.0 / (volatility_ratio + 0.1) + (30.0 / (adx + 5.0))))
-        expiration = max(2, min(30, base_mins))
-        return expiration
+        is_trend = adx >= 22 and global_trend != "NEUTRAL"
+
+        if is_trend:
+            if adx > 32 or volatility_ratio < 1.5:
+                return 15
+            elif adx >= 25:
+                return 10
+            else:
+                return 3
+        else:
+            if volatility_ratio < 1.2:
+                return 10
+            else:
+                return 5
     except Exception as e:
-        logger.warning(f"Помилка розрахунку експірації за ATR: {e}")
+        logger.warning(f"Помилка розрахунку експірації: {e}")
     
     return 5
 
@@ -201,8 +200,7 @@ def get_current_session_info():
 
 def is_news_blackout_window():
     now_utc = datetime.utcnow()
-    high_impact_hours = [12, 13, 14, 15, 18]
-    if now_utc.minute < 10 and now_utc.hour in high_impact_hours:
+    if now_utc.minute < 10 and now_utc.hour in [12, 13, 14, 15, 18]:
         return True
     return False
 
@@ -278,15 +276,13 @@ def train_ml_command(update, context):
 def process_single_pair(chat_id, name, ticker):
     try:
         session_str, session_code, hour = get_current_session_info()
-        day_of_week = datetime.utcnow().weekday()
         current_time = time.time()
         
-        # Зменшено кулдаун до 180 секунд для вищої частоти сигналів
-        if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 180:
+        if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
             bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні. Зачекайте трохи.")
             return
 
-        df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="7d")
+        df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
         df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
         df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
         df_micro = fetch_yahoo_data(ticker, interval="1m", range_period="7d")
@@ -314,32 +310,14 @@ def process_single_pair(chat_id, name, ticker):
         bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
         divergence_str = str(sig_data.get('divergence', 'NONE'))
         
-        vol_series = df_indicators_5m.get('volume', pd.Series([1]*len(df_indicators_5m)))
-        vol_ma = vol_series.rolling(20).mean().iloc[-1]
-        current_vol = vol_series.iloc[-1]
-        volume_surge = float(current_vol / vol_ma) if vol_ma > 0 else 1.0
-        
-        trend_alignment = 1.0 if global_trend == mid_trend else (0.5 if global_trend != "NEUTRAL" and mid_trend != "NEUTRAL" else 0.0)
-
         current_price = float(df_indicators_5m['close'].iloc[-1])
         dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
-        dist_weekly_ext = get_weekly_extremum_distance(df_macro, current_price)
         
         win_probability = ml_filter.predict_signal_probability(
-            rsi, adx, bb_width, session_code, hour, day_of_week, divergence_str, dist_pivot, dist_weekly_ext, volume_surge, trend_alignment
+            rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
         )
-        
-        dynamic_threshold = ml_filter.get_dynamic_threshold(ticker, session_code, adx, bb_width)
-
-        _, _, pair_session_wr = database.get_pair_session_winrate(ticker, session_code)
-        if pair_session_wr is not None:
-            if pair_session_wr < 0.45:
-                win_probability *= 0.80
-            elif pair_session_wr > 0.65:
-                win_probability = min(1.0, win_probability * 1.15)
-
-        if win_probability < dynamic_threshold:
-            log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < поріг {round(dynamic_threshold * 100, 1)}%)"
+        if win_probability < 0.54:
+            log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
             save_filtered_log(chat_id, log_msg)
             bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно фільтром.")
             return
@@ -375,8 +353,7 @@ def process_single_pair(chat_id, name, ticker):
             if is_ai_busy:
                 ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
                 ai_confidence = 7
-            # Пом'якшено поріг впевненості ШІ з 7 до 6 для збільшення пропускної здатності
-            elif decision != "YES" or ai_confidence < 6:
+            elif decision != "YES" or ai_confidence < 7:
                 log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
                 save_filtered_log(chat_id, log_msg)
                 bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відхилено ШІ-радником.")
@@ -391,7 +368,7 @@ def process_single_pair(chat_id, name, ticker):
         last_sent_signals[ticker] = time.time()  
         
         ai_sug_exp = ai_audit.get("suggested_expiration") if 'ai_audit' in locals() and not ai_audit_failed else None
-        expiration = int(ai_sug_exp) if ai_sug_exp and ai_sug_exp > 0 else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
+        expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
         
         icon = "🟢" if signal_type == "CALL" else "🔴"
         action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -414,7 +391,7 @@ def process_single_pair(chat_id, name, ticker):
             ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
             rsi=rsi, adx=adx, bb_width=bb_width,
             session_code=session_code, hour=hour, divergence=divergence_str,
-            dist_pivot=dist_pivot, dist_weekly_ext=dist_weekly_ext, message_text=msg_text
+            dist_pivot=dist_pivot, message_text=msg_text
         )
         schedule_signal_timer(sig_id, timestamp_str, expiration)
     except Exception as e:
@@ -425,22 +402,26 @@ def run_full_scan_background(chat_id):
     clear_filtered_logs(chat_id)
     try:
         session_str, session_code, hour = get_current_session_info()
-        day_of_week = datetime.utcnow().weekday()
         sent_signals_count = 0
         filtered_count = 0
         current_time = time.time()
         
+        logger.info(f"Початок фонового сканування для chat_id={chat_id}. Всього пар: {len(PAIRS_MAP)}")
+
         for name, ticker in PAIRS_MAP.items():
             try:
-                if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 180:
+                logger.info(f"Перевірка пари: {name} ({ticker})")
+                if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 300:
+                    logger.info(f"Пара {ticker} пропущена через кулдаун")
                     continue
 
-                df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="7d")
+                df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
                 df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
                 df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
                 df_micro = fetch_yahoo_data(ticker, interval="1m", range_period="7d")
                 
                 if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
+                    logger.warning(f"Не вдалося завантажити всі ТФ для {ticker}")
                     continue
 
                 global_trend = analyzer.get_trend(df_macro, span_val=200)
@@ -454,6 +435,7 @@ def run_full_scan_background(chat_id):
                 
                 signal_type = sig_data.get('signal')
                 if signal_type not in ['CALL', 'PUT']:
+                    logger.info(f"Пара {name}: сигнал HOLD")
                     continue
                 
                 rsi = sig_data.get('rsi', 50)
@@ -461,33 +443,16 @@ def run_full_scan_background(chat_id):
                 bb_width = float(df_indicators_5m['bb_width'].iloc[-1]) if 'bb_width' in df_indicators_5m.columns else 0.001
                 divergence_str = str(sig_data.get('divergence', 'NONE'))
                 
-                vol_series = df_indicators_5m.get('volume', pd.Series([1]*len(df_indicators_5m)))
-                vol_ma = vol_series.rolling(20).mean().iloc[-1]
-                current_vol = vol_series.iloc[-1]
-                volume_surge = float(current_vol / vol_ma) if vol_ma > 0 else 1.0
-                
-                trend_alignment = 1.0 if global_trend == mid_trend else (0.5 if global_trend != "NEUTRAL" and mid_trend != "NEUTRAL" else 0.0)
-
                 current_price = float(df_indicators_5m['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
-                dist_weekly_ext = get_weekly_extremum_distance(df_macro, current_price)
                 
                 win_probability = ml_filter.predict_signal_probability(
-                    rsi, adx, bb_width, session_code, hour, day_of_week, divergence_str, dist_pivot, dist_weekly_ext, volume_surge, trend_alignment
+                    rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot
                 )
-                
-                dynamic_threshold = ml_filter.get_dynamic_threshold(ticker, session_code, adx, bb_width)
-
-                _, _, pair_session_wr = database.get_pair_session_winrate(ticker, session_code)
-                if pair_session_wr is not None:
-                    if pair_session_wr < 0.45:
-                        win_probability *= 0.80
-                    elif pair_session_wr > 0.65:
-                        win_probability = min(1.0, win_probability * 1.15)
-
-                if win_probability < dynamic_threshold:
+                if win_probability < 0.54:
                     filtered_count += 1
-                    log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < поріг {round(dynamic_threshold * 100, 1)}%)"
+                    log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
+                    logger.info(log_msg)
                     save_filtered_log(chat_id, log_msg)
                     continue
                 
@@ -522,14 +487,16 @@ def run_full_scan_background(chat_id):
                     if is_ai_busy:
                         ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
                         ai_confidence = 7
-                    elif decision != "YES" or ai_confidence < 6:
+                    elif decision != "YES" or ai_confidence < 7:
                         filtered_count += 1
                         log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
+                        logger.info(log_msg)
                         save_filtered_log(chat_id, log_msg)
                         ai_audit_failed = True
                     else:
                         ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
                 except Exception as e:
+                    logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name}: {e}")
                     ai_reason = "ШІ недоступний (пройдено за індикаторами)"
                     ai_confidence = 7
 
@@ -540,7 +507,7 @@ def run_full_scan_background(chat_id):
                 last_sent_signals[ticker] = time.time()  
                 
                 ai_sug_exp = ai_audit.get("suggested_expiration") if 'ai_audit' in locals() and not ai_audit_failed else None
-                expiration = int(ai_sug_exp) if ai_sug_exp and ai_sug_exp > 0 else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
+                expiration = int(ai_sug_exp) if ai_sug_exp in [3, 5, 10, 15] else calculate_balanced_expiration(sig_data, df_indicators_5m, global_trend)
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
@@ -563,11 +530,11 @@ def run_full_scan_background(chat_id):
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
                     rsi=rsi, adx=adx, bb_width=bb_width,
                     session_code=session_code, hour=hour, divergence=divergence_str,
-                    dist_pivot=dist_pivot, dist_weekly_ext=dist_weekly_ext, message_text=msg_text
+                    dist_pivot=dist_pivot, message_text=msg_text
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
                 
-                time.sleep(3)
+                time.sleep(5)
             except Exception as e:
                 logger.exception(f"Помилка обробки пари {ticker}: {e}")
                 
@@ -603,31 +570,20 @@ def handle_text_menu(update, context):
         threading.Thread(target=run_full_scan_background, args=(chat_id,)).start()
         
     elif text == "📈 Статистика":
-        update.message.reply_text("🔄 Розрахунок правдивої статистики по парах та сесіях...")
+        update.message.reply_text("🔄 Розрахунок правдивої статистики...")
         try:
             stats = database.get_overall_stats()
             ml_filter.train_model()
-            
-            rows = database.get_detailed_pair_stats()
-            session_names = {0: "🌏 Азія", 1: "🇬🇧 Лондон", 2: "🇺🇸 Нью-Йорк", 3: "🔥 Перетин"}
-            detailed_lines = ["\n📌 **Ефективність пар за сесіями:**"]
-            for r in rows:
-                tck, s_code, tot, wns = r[0], r[1], r[2], r[3] if r[3] else 0
-                wr = round((wns / tot) * 100, 1) if tot > 0 else 0
-                s_name = session_names.get(s_code, "Інша")
-                detailed_lines.append(f"• {tck} ({s_name}): {tot} угод, WR: {wr}%")
-
             stats_text = (
-                f"📈 **Правдива статистика трейдингу:**\n"
+                f"📈 Правдива статистика трейдингу:\n"
                 f"• Успішних угод (WIN): {stats.get('wins', 0)}\n"
                 f"• Нейтральних угод (BE): {stats.get('neutral', 0)}\n"
                 f"• Збиткових угод (LOSS): {stats.get('losses', 0)}\n"
                 f"• Усього перевірених угод: {stats.get('total', 0)}\n"
                 f"• Реальний вінрейт: {stats.get('winrate', 0.0)}%\n"
-                + ("\n".join(detailed_lines[:15]) if len(rows) > 0 else "\n• Недостатньо даних по сесіях") +
-                f"\n\n🧠 ML-фільтр перенавчено (Gradient Boosting) та адаптовано під сесії!"
+                f"🧠 ML-фільтр перенавчено на актуальній базі!"
             )
-            update.message.reply_text(stats_text, parse_mode="Markdown")
+            update.message.reply_text(stats_text)
         except Exception as e:
             logger.exception(f"Помилка отримання статистики: {e}")
             update.message.reply_text("❌ Помилка при отриманні статистики.")
