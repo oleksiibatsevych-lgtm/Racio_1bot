@@ -89,6 +89,13 @@ def evaluate_single_signal(sig_id, fetch_data_func):
     signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
     expiry_time = signal_time + timedelta(minutes=expiration_mins)
     
+    # Захист від застарілих угод
+    if datetime.utcnow() - expiry_time > timedelta(hours=3):
+        cursor.execute("UPDATE signals SET status = 'EXPIRED', result = 'EXPIRED' WHERE id = ?", (sig_id,))
+        conn.commit()
+        conn.close()
+        return None
+
     df = pd.DataFrame()
     for _ in range(3):
         df = fetch_data_func(ticker, interval="1m", range_period="2d")
@@ -107,9 +114,17 @@ def evaluate_single_signal(sig_id, fetch_data_func):
 
     future_df = df[df.index >= expiry_time]
     if not future_df.empty:
+        time_diff_mins = (future_df.index[0] - expiry_time).total_seconds() / 60.0
+        # Якщо розрив у часі занадто великий (наприклад, вихідні)
+        if time_diff_mins > 20:
+            cursor.execute("UPDATE signals SET status = 'EXPIRED', result = 'EXPIRED' WHERE id = ?", (sig_id,))
+            conn.commit()
+            conn.close()
+            return None
         current_price = float(future_df['close'].iloc[0])
     else:
-        current_price = float(df['close'].iloc[-1])
+        conn.close()
+        return None
         
     multiplier = 1000 if "JPY" in ticker.upper() else 100000
     
