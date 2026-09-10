@@ -32,17 +32,17 @@ class TradingMLFilter:
 
     def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0):
         if self.model is None:
-            base = 0.58
-            if rsi < 35 or rsi > 65: base += 0.06
+            base = 0.50
+            if 35 <= rsi <= 65: base += 0.05
             if adx > 25: base += 0.05
-            if divergence != "NONE": base += 0.08
-            return min(round(base, 2), 0.95)
+            if divergence != "NONE": base += 0.10
+            return min(round(base, 2), 0.85)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot)
             proba = self.model.predict_proba(X)[0][1]
             return float(proba)
         except:
-            return 0.62
+            return 0.50
 
     def train_model(self):
         try:
@@ -78,7 +78,7 @@ class TradingMLFilter:
     def generate_strategy_report(self):
         return (
             "📊 *Повний звіт ШІ-стратегії та ринкового аналізу*:\n\n"
-            "• **Мультитаймфрейм:** Інтегровано 1h, 15m, 5m та 1m з компромісним режимом флету.\n"
+            "• **Мультитаймфрейм:** Інтегровано 1h, 15m, 5m та 1m з фільтрацією конфліктів.\n"
             "• **Макрозахист:** Автоматичне блокування під час новинних вікон.\n"
-            "• **Експірація:** Динамічний розрахунок (3–10 хв) залежно від волатильності."
+            "• **Експірація:** Динамічний розрахунок (5–10 хв) залежно від волатильності."
         )
