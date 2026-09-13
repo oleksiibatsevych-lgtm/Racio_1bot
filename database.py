@@ -7,7 +7,6 @@ logger = logging.getLogger(__name__)
 DB_NAME = "trading_bot.db"
 
 def init_db():
-    """Створення таблиці сигналів при старті."""
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -31,21 +30,28 @@ def init_db():
                 message_text TEXT,
                 exit_price REAL,
                 result TEXT,
-                pips REAL
+                pips REAL,
+                volatility_ratio REAL DEFAULT 1.0,
+                wick_ratio REAL DEFAULT 0.0,
+                ema_dist REAL DEFAULT 0.0
             )
         ''')
+        
+        existing_cols = [col[1] for col in cursor.execute("PRAGMA table_info(signals)").fetchall()]
+        for col_name, col_type in [("volatility_ratio", "REAL DEFAULT 1.0"), ("wick_ratio", "REAL DEFAULT 0.0"), ("ema_dist", "REAL DEFAULT 0.0")]:
+            if col_name not in existing_cols:
+                cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
+                
         conn.commit()
         conn.close()
     except Exception as e:
         logger.exception(f"Помилка ініціалізації бази даних: {e}")
 
-# Автоматична ініціалізація БД при імпорті модуля
 init_db()
 
 def save_signal(ticker, signal_type, entry_price, expiration_mins, chat_id, message_id,
                 rsi=0, adx=0, bb_width=0, session_code=0, hour=0, divergence='NONE',
-                dist_pivot=0, message_text=''):
-    """Збереження нового сигналу в БД."""
+                dist_pivot=0, message_text='', volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -53,11 +59,13 @@ def save_signal(ticker, signal_type, entry_price, expiration_mins, chat_id, mess
         cursor.execute('''
             INSERT INTO signals (
                 ticker, signal, entry_price, expiration_mins, timestamp, chat_id, message_id,
-                rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text,
+                volatility_ratio, wick_ratio, ema_dist
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             ticker, signal_type, entry_price, expiration_mins, timestamp_str, chat_id, message_id,
-            rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text
+            rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, message_text,
+            volatility_ratio, wick_ratio, ema_dist
         ))
         sig_id = cursor.lastrowid
         conn.commit()
@@ -68,7 +76,6 @@ def save_signal(ticker, signal_type, entry_price, expiration_mins, chat_id, mess
         return None
 
 def get_pending_signals():
-    """Отримання всіх сигналів, які ще не завершилися (результат IS NULL)."""
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -85,9 +92,6 @@ def get_pending_signals():
         return []
 
 def evaluate_single_signal(sig_id, fetch_yahoo_data_func):
-    """
-    Точна перевірка результату угоди за часом експірації та типом сигналу (CALL/PUT).
-    """
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -105,18 +109,15 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func):
             
         ticker, signal_type, entry_price, expiration_mins, timestamp_str, chat_id, message_id, message_text = row
         
-        # 1. Визначаємо точний час закінчення експірації (UTC)
         entry_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
         expiry_time = entry_time + timedelta(minutes=expiration_mins)
         
-        # 2. Отримуємо 1-хвилинні дані з Yahoo Finance
         df = fetch_yahoo_data_func(ticker, interval="1m", range_period="2d")
         
         if df.empty:
             conn.close()
             return None
 
-        # 3. Знаходимо свічку, найближчу до моменту закінчення експірації
         df_filtered = df[(df.index >= expiry_time - timedelta(seconds=30)) & 
                          (df.index <= expiry_time + timedelta(minutes=2))]
         
@@ -125,18 +126,15 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func):
         else:
             exit_price = float(df['close'].iloc[-1])
 
-        # 4. Визначення розміру пункту (Pip size: 0.01 для пар з JPY, 0.0001 для інших)
         pip_size = 0.01 if "JPY" in ticker else 0.0001
 
-        # 5. Розрахунок різниці ціни з урахуванням напрямку (CALL vs PUT)
         if signal_type == "CALL":
             price_diff = exit_price - entry_price
-        else:  # PUT
+        else:
             price_diff = entry_price - exit_price
 
         pips = round(price_diff / pip_size, 1)
 
-        # 6. Визначення фінального статусу угоди
         if pips > 0.1:
             result = "WIN"
         elif pips < -0.1:
@@ -144,7 +142,6 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func):
         else:
             result = "NEUTRAL"
 
-        # 7. Запис результату в базу даних
         cursor.execute("""
             UPDATE signals 
             SET exit_price = ?, result = ?, pips = ?
@@ -167,7 +164,6 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func):
         return None
 
 def get_overall_stats():
-    """Розрахунок загальної статистики результатів."""
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
