@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from datetime import datetime
 
 class AdaptiveTechnicalAnalysis:
     def calculate_indicators(self, df):
@@ -75,7 +76,6 @@ class AdaptiveTechnicalAnalysis:
         current_price = df['close'].iloc[-2] if len(df) >= 2 else df['close'].iloc[-1]
         current_ema = ema.iloc[-2] if len(df) >= 2 else ema.iloc[-1]
         
-        # Адаптивний поріг тренду на основі ATR або динамічного відхилення
         if 'atr' in df.columns and not pd.isna(df['atr'].iloc[-1]):
             atr_val = df['atr'].iloc[-1]
             threshold = max(atr_val * 0.5, current_ema * 0.0003)
@@ -90,9 +90,6 @@ class AdaptiveTechnicalAnalysis:
         return "NEUTRAL"
 
     def calculate_pivots(self, df_daily):
-        """
-        Розрахунок рівнів Pivot на основі денних свічок (df_daily).
-        """
         if df_daily.empty or len(df_daily) < 2:
             return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
             
@@ -109,9 +106,6 @@ class AdaptiveTechnicalAnalysis:
         return {"P": p, "R1": r1, "S1": s1, "R2": r2, "S2": s2}
 
     def detect_divergence(self, df, window=30):
-        """
-        Пошук дивергенції на основі екстремумів (Swing High / Swing Low).
-        """
         if df.empty or 'rsi' not in df.columns or len(df) < window:
             return "NONE"
             
@@ -119,7 +113,6 @@ class AdaptiveTechnicalAnalysis:
         prices = sub['close'].values
         rsi_vals = sub['rsi'].values
         
-        # Локальні мінімуми для бичачої дивергенції
         low_pivots = []
         for i in range(2, len(prices) - 2):
             if prices[i] <= prices[i-1] and prices[i] <= prices[i-2] and prices[i] <= prices[i+1] and prices[i] <= prices[i+2]:
@@ -130,7 +123,6 @@ class AdaptiveTechnicalAnalysis:
             if p2[1] < p1[1] and p2[2] > p1[2] + 1.5:
                 return "BULLISH_DIV"
 
-        # Локальні максимуми для ведмежої дивергенції
         high_pivots = []
         for i in range(2, len(prices) - 2):
             if prices[i] >= prices[i-1] and prices[i] >= prices[i-2] and prices[i] >= prices[i+1] and prices[i] >= prices[i+2]:
@@ -143,80 +135,57 @@ class AdaptiveTechnicalAnalysis:
 
         return "NONE"
 
-    def detect_channel_pattern(self, df, window=30):
-        if len(df) < window:
-            return "UNKNOWN", 0.0
+    def get_wick_ratio(self, candle, direction):
+        high = float(candle['high'])
+        low = float(candle['low'])
+        open_p = float(candle['open'])
+        close_p = float(candle['close'])
+        total_range = high - low
+        if total_range == 0:
+            return 0.0
             
-        recent = df.tail(window).copy()
-        highs = recent['high'].values
-        lows = recent['low'].values
-        x = np.arange(len(recent))
-        
-        slope_high, _ = np.polyfit(x, highs, 1)
-        slope_low, _ = np.polyfit(x, lows, 1)
-        
-        avg_price = recent['close'].mean()
-        norm_high = (slope_high * window) / (avg_price + 1e-10) * 100
-        norm_low = (slope_low * window) / (avg_price + 1e-10) * 100
-        
-        if abs(norm_high) < 0.2 and abs(norm_low) < 0.2:
-            return "HORIZONTAL_FLAT", 0.0
-        elif norm_high > 0.15 and norm_low > 0.15:
-            return "ASCENDING_CHANNEL", (norm_high + norm_low) / 2
-        elif norm_high < -0.15 and norm_low < -0.15:
-            return "DESCENDING_CHANNEL", (norm_high + norm_low) / 2
+        if direction == 'CALL':
+            lower_wick = min(open_p, close_p) - low
+            return lower_wick / total_range
         else:
-            return "EXPANDING_OR_WEDGE", (norm_high + norm_low) / 2
+            upper_wick = high - max(open_p, close_p)
+            return upper_wick / total_range
 
-    def is_candle_too_wide(self, df, threshold_multiplier=2.3):
-        if len(df) < 15:
-            return False
-        target_candle = df.iloc[-2]
-        total_range = target_candle['high'] - target_candle['low']
-        recent_ranges = (df['high'] - df['low']).iloc[-16:-2].mean()
-        if total_range > (recent_ranges * threshold_multiplier):
-            return True
-        return False
-
-    def calculate_dynamic_expiration(self, df_5m, df_1m, signal, adx, atr, rsi):
+    def calculate_dynamic_expiration(self, df_5m, df_1m, signal, adx, atr, rsi, divergence="NONE", trend_aligned=False, is_pivot_rejection=False):
         """
-        Розрахунок динамічної експірації на основі швидкості ринку (ATR, ADX, відхилення RSI).
+        Мультитаймфреймовий Candle-Clock: адаптивний вибір між закриттям 5m та 15m свічки.
         """
         try:
-            if df_5m.empty or len(df_5m) < 20:
-                return 5
+            now_utc = datetime.utcnow()
+            minute = now_utc.minute
+            
+            mins_to_5m = 5 - (minute % 5)
+            mins_to_15m = 15 - (minute % 15)
+            
+            if mins_to_5m < 2:
+                mins_to_5m += 5
+            if mins_to_15m < 3:
+                mins_to_15m += 15
 
-            close = float(df_5m['close'].iloc[-2]) if len(df_5m) >= 2 else float(df_5m['close'].iloc[-1])
-            if close <= 0:
-                return 5
+            # Перемикання на 15m Candle-Clock для глибоких структурних сетапів
+            use_15m_clock = (
+                divergence != "NONE" or
+                (trend_aligned and adx >= 25) or
+                is_pivot_rejection
+            )
 
-            atr_ma = df_5m['atr'].rolling(20).mean().iloc[-2] if len(df_5m) >= 2 else atr
-            volatility_ratio = (atr / (atr_ma + 1e-10))
-
-            if adx >= 25:
-                # Трендовий режим: експірація пропорційна імпульсу тренду
-                base_mins = 5.0
-                time_factor = (30.0 / max(adx, 15.0)) * (1.0 / max(volatility_ratio, 0.5))
-                calculated_mins = round(base_mins * time_factor)
-                expiration = int(np.clip(calculated_mins, 2, 30))
-            else:
-                # Флетовий режим: експірація залежить від ступеня перекупленості/перепроданості RSI
-                rsi_dev = abs(rsi - 50.0)
-                base_mins = 4.0 + (15.0 / (rsi_dev + 1.0))
-                time_factor = 1.0 / max(volatility_ratio, 0.6)
-                calculated_mins = round(base_mins * time_factor)
-                expiration = int(np.clip(calculated_mins, 2, 25))
-
-            return expiration
-        except Exception as e:
+            expiration = mins_to_15m if use_15m_clock else mins_to_5m
+            return int(np.clip(expiration, 2, 15))
+        except Exception:
             return 5
 
     def generate_signal(self, df_1m, df_5m, global_trend, mid_trend, df_daily=None):
-        """
-        Генерація сигналів по повністю закритих свічках (iloc[-2]) для усунення перемальовування.
-        """
         if df_5m.empty or len(df_5m) < 20 or df_1m.empty or len(df_1m) < 20:
-            return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5, 'rsi': 50, 'adx': 20, 'atr': 0.001}
+            return {
+                'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5, 
+                'rsi': 50, 'adx': 20, 'atr': 0.001, 'volatility_ratio': 1.0, 
+                'wick_ratio': 0.0, 'ema_dist': 0.0
+            }
 
         last_5m = df_5m.iloc[-2] if len(df_5m) >= 2 else df_5m.iloc[-1]
         last_1m = df_1m.iloc[-2] if len(df_1m) >= 2 else df_1m.iloc[-1]
@@ -229,68 +198,104 @@ class AdaptiveTechnicalAnalysis:
         bb_lower = float(last_5m.get('bb_lower', 0))
         close_5m = float(last_5m['close'])
         close_1m = float(last_1m['close'])
+        ema_50 = float(last_5m.get('ema_50', close_5m))
+        
+        atr_ma = df_5m['atr'].rolling(20).mean().iloc[-2] if len(df_5m) >= 20 else atr
+        volatility_ratio = float(atr / (atr_ma + 1e-10))
+        ema_dist = float((close_5m - ema_50) / (ema_50 + 1e-10))
         div = self.detect_divergence(df_5m, window=30)
 
         pivots = self.calculate_pivots(df_daily) if df_daily is not None and not df_daily.empty else {}
-        r1 = pivots.get('R1', 0)
-        s1 = pivots.get('S1', 0)
-
-        signal = 'HOLD'
-        reason_parts = []
+        r1, s1 = pivots.get('R1', 0), pivots.get('S1', 0)
 
         effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
 
-        if adx < 21:
-            if close_1m <= bb_lower or rsi_1m < 35:
-                signal = 'CALL'
-                reason_parts.append("Флет: відскок знизу")
-                if rsi_1m < 35: reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
-            elif close_1m >= bb_upper or rsi_1m > 65:
-                signal = 'PUT'
-                reason_parts.append("Флет: відскок зверху")
-                if rsi_1m > 65: reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
-        else:
-            if effective_trend == 'BULLISH':
-                if (bb_lower > 0 and close_5m <= bb_lower * 1.003) or (s1 > 0 and close_5m <= s1 * 1.002) or rsi_5m < 55 or div == 'BULLISH_DIV':
-                    signal = 'CALL'
-                    reason_parts.append(f"Тренд вгору (ADX: {adx:.1f})")
-                    if bb_lower > 0 and close_5m <= bb_lower * 1.003: reason_parts.append("Відбій від Bollinger Lower")
-                    if s1 > 0 and close_5m <= s1 * 1.002: reason_parts.append("Відбій від Pivot S1")
-                    if rsi_5m < 55: reason_parts.append(f"Відкат RSI ({rsi_5m:.1f})")
-                    if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
-            elif effective_trend == 'BEARISH':
-                if (bb_upper > 0 and close_5m >= bb_upper * 0.997) or (r1 > 0 and close_5m >= r1 * 0.998) or rsi_5m > 45 or div == 'BEARISH_DIV':
-                    signal = 'PUT'
-                    reason_parts.append(f"Тренд вниз (ADX: {adx:.1f})")
-                    if bb_upper > 0 and close_5m >= bb_upper * 0.997: reason_parts.append("Відбій від Bollinger Upper (Опір)")
-                    if r1 > 0 and close_5m >= r1 * 0.998: reason_parts.append("Відбій від Pivot R1 (Опір)")
-                    if rsi_5m > 45: reason_parts.append(f"Відкат RSI ({rsi_5m:.1f})")
-                    if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
+        call_score, put_score = 0, 0
+        call_reasons, put_reasons = [], []
+        is_pivot_rejection = False
 
-        if signal != 'HOLD':
-            channel_type, _ = self.detect_channel_pattern(df_5m, window=30)
-            is_wide = self.is_candle_too_wide(df_5m, threshold_multiplier=2.3)
+        # 1. Відбої від Боллінджера та рівнів Pivot
+        if bb_lower > 0 and close_1m <= bb_lower * 1.001:
+            call_score += 25
+            call_reasons.append("Відбій від BB Lower")
+        if s1 > 0 and close_5m <= s1 * 1.002:
+            call_score += 20
+            call_reasons.append("Підтримка Pivot S1")
+            is_pivot_rejection = True
 
-            if is_wide:
-                if (effective_trend == 'BULLISH' and signal == 'CALL') or \
-                   (effective_trend == 'BEARISH' and signal == 'PUT'):
-                    reason_parts.append("Імпульсне підтвердження за трендом")
-                else:
-                    signal = 'HOLD'
-                    reason_parts = ["Пропущено: Широка свічка проти тренду"]
-            else:
-                if channel_type == "ASCENDING_CHANNEL" and signal == 'PUT':
-                    if effective_trend != 'BEARISH':
-                        signal = 'HOLD'
-                        reason_parts = ["Пропущено: Продаж проти висхідного каналу"]
-                elif channel_type == "DESCENDING_CHANNEL" and signal == 'CALL':
-                    if effective_trend != 'BULLISH':
-                        signal = 'HOLD'
-                        reason_parts = ["Пропущено: Купівля проти низхідного каналу"]
+        if bb_upper > 0 and close_1m >= bb_upper * 0.999:
+            put_score += 25
+            put_reasons.append("Відбій від BB Upper")
+        if r1 > 0 and close_5m >= r1 * 0.998:
+            put_score += 20
+            put_reasons.append("Опір Pivot R1")
+            is_pivot_rejection = True
 
-        suggested_exp = self.calculate_dynamic_expiration(df_5m, df_1m, signal, adx, atr, rsi_5m)
+        # 2. Smart Divergence (+35 балів)
+        if div == 'BULLISH_DIV':
+            call_score += 35
+            call_reasons.append("🎯 Бичача дивергенція (+35)")
+        elif div == 'BEARISH_DIV':
+            put_score += 35
+            put_reasons.append("🎯 Ведмежа дивергенція (+35)")
 
-        reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
+        # 3. RSI Перекупленість / Перепроданість
+        if rsi_1m < 35 or rsi_5m < 40:
+            call_score += 20
+            call_reasons.append(f"Перепроданість RSI ({rsi_1m:.1f})")
+        if rsi_1m > 65 or rsi_5m > 60:
+            put_score += 20
+            put_reasons.append(f"Перекупленість RSI ({rsi_1m:.1f})")
+
+        # 4. Wick Rejection / Pinbar
+        call_wick = self.get_wick_ratio(last_1m, 'CALL')
+        put_wick = self.get_wick_ratio(last_1m, 'PUT')
+
+        if call_wick >= 0.40:
+            call_score += 15
+            call_reasons.append(f"Ґніт відскоку CALL ({round(call_wick*100)}%)")
+        if put_wick >= 0.40:
+            put_score += 15
+            put_reasons.append(f"Ґніт відскоку PUT ({round(put_wick*100)}%)")
+
+        # 5. Трендова відповідність
+        if effective_trend == 'BULLISH':
+            call_score += 15
+            call_reasons.append("За трендом B")
+        elif effective_trend == 'BEARISH':
+            put_score += 15
+            put_reasons.append("За трендом S")
+
+        # Фіксація порогу: для дивергенції поріг 50 балів, для інших угод — 60 балів
+        threshold_call = 50 if div == 'BULLISH_DIV' else 60
+        threshold_put = 50 if div == 'BEARISH_DIV' else 60
+
+        # Захист при екстремальному тренді ADX > 35
+        if adx > 35:
+            if div == 'BULLISH_DIV' and global_trend == 'BEARISH':
+                call_score -= 20
+            elif div == 'BEARISH_DIV' and global_trend == 'BULLISH':
+                put_score -= 20
+
+        signal = 'HOLD'
+        reason = 'Недостатньо конфлюентності'
+        wick_ratio = 0.0
+
+        if call_score >= threshold_call and call_score > put_score:
+            signal = 'CALL'
+            reason = " + ".join(call_reasons)
+            wick_ratio = call_wick
+        elif put_score >= threshold_put and put_score > call_score:
+            signal = 'PUT'
+            reason = " + ".join(put_reasons)
+            wick_ratio = put_wick
+
+        suggested_exp = self.calculate_dynamic_expiration(
+            df_5m, df_1m, signal, adx, atr, rsi_5m, 
+            divergence=div, trend_aligned=(effective_trend == global_trend),
+            is_pivot_rejection=is_pivot_rejection
+        )
+
         return {
             'signal': signal,
             'rsi': round(rsi_5m, 1),
@@ -298,5 +303,8 @@ class AdaptiveTechnicalAnalysis:
             'atr': atr,
             'divergence': div,
             'suggested_exp': suggested_exp,
-            'reason': reason
+            'reason': reason,
+            'volatility_ratio': round(volatility_ratio, 3),
+            'wick_ratio': round(wick_ratio, 3),
+            'ema_dist': round(ema_dist, 5)
         }
