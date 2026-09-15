@@ -12,6 +12,11 @@ from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
 
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:
+    curl_requests = None
+
 from config import TELEGRAM_TOKEN, PAIRS_MAP
 from indicators import AdaptiveTechnicalAnalysis
 import database
@@ -89,7 +94,7 @@ def get_filtered_logs(chat_id):
         return []
 
 def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
-    """Завантаження котирувань через yfinance із прямим REST-фолбеком Yahoo Finance."""
+    """Завантаження котирувань через yfinance з обходом за допомогою curl_cffi."""
     try:
         df_yf = yf.download(
             tickers=ticker,
@@ -119,10 +124,14 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
         }
-        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+        url = f"[https://query2.finance.yahoo.com/v8/finance/chart/](https://query2.finance.yahoo.com/v8/finance/chart/){ticker}"
         params = {"interval": interval, "range": range_period}
         
-        response = requests.get(url, headers=headers, params=params, timeout=7)
+        if curl_requests:
+            response = curl_requests.get(url, headers=headers, params=params, timeout=7, impersonate="chrome120")
+        else:
+            response = requests.get(url, headers=headers, params=params, timeout=7)
+
         if response.status_code == 200:
             data = response.json()
             result = data.get("chart", {}).get("result")
@@ -172,9 +181,7 @@ def get_current_session_info():
 
 def is_news_blackout_window():
     now_utc = datetime.utcnow()
-    if now_utc.minute < 10 and now_utc.hour in [12, 13, 14, 15, 18]:
-        return True
-    return False
+    return now_utc.minute < 10 and now_utc.hour in [12, 13, 14, 15, 18]
 
 def process_signal_expiration(sig_id):
     try:
@@ -201,8 +208,7 @@ def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
     try:
         signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
-        # Додано 60 секунд буферної затримки для 100% завантаження свічки з Yahoo Finance
-        delay = max((expiry_time - datetime.utcnow()).total_seconds() + 60, 5)
+        delay = max((expiry_time - datetime.utcnow()).total_seconds(), 1)
         timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
         timer.daemon = True
         timer.start()
@@ -215,7 +221,7 @@ def restore_pending_timers():
         sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
         try:
             expiry_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S") + timedelta(minutes=expiration_mins)
-            delay = max((expiry_time - datetime.utcnow()).total_seconds() + 60, 5 + (i * 2))
+            delay = max((expiry_time - datetime.utcnow()).total_seconds(), 2 + (i * 2))
             timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
@@ -276,8 +282,7 @@ def process_single_pair(chat_id, name, ticker):
         
         signal_type = sig_data.get('signal')
         if signal_type not in ['CALL', 'PUT']:
-            reason_str = sig_data.get('reason', 'немає чіткої точки входу')
-            bot.send_message(chat_id=chat_id, text=f"ℹ️ {name}: Поточний сигнал HOLD ({reason_str}).")
+            bot.send_message(chat_id=chat_id, text=f"ℹ️ {name}: Поточний сигнал HOLD (немає чіткої точки входу).")
             return
         
         rsi = sig_data.get('rsi', 50)
@@ -295,7 +300,7 @@ def process_single_pair(chat_id, name, ticker):
             rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
             volatility_ratio, wick_ratio, ema_dist
         )
-        if win_probability < 0.62:
+        if win_probability < 0.52:
             log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
             save_filtered_log(chat_id, log_msg)
             bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно фільтром.")
@@ -311,14 +316,9 @@ def process_single_pair(chat_id, name, ticker):
             micro_chart = create_chart_image(df_indicators_5m, name, tf_label="5m")
 
             ai_payload = {
-                'signal': signal_type,
-                'adx': adx,
-                'global_trend': global_trend,
-                'mid_trend': mid_trend,
-                'reason': sig_data.get('reason'),
-                'rsi': rsi,
-                'atr': sig_data.get('atr'),
-                'suggested_exp': calculated_expiration
+                'signal': signal_type, 'adx': adx, 'global_trend': global_trend,
+                'mid_trend': mid_trend, 'reason': sig_data.get('reason'),
+                'rsi': rsi, 'atr': sig_data.get('atr'), 'suggested_exp': calculated_expiration
             }
 
             ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -428,7 +428,7 @@ def run_full_scan_background(chat_id):
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
                     volatility_ratio, wick_ratio, ema_dist
                 )
-                if win_probability < 0.62:
+                if win_probability < 0.52:
                     filtered_count += 1
                     log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
                     save_filtered_log(chat_id, log_msg)
@@ -445,14 +445,9 @@ def run_full_scan_background(chat_id):
                     micro_chart = create_chart_image(df_indicators_5m, name, tf_label="5m")
 
                     ai_payload = {
-                        'signal': signal_type,
-                        'adx': adx,
-                        'global_trend': global_trend,
-                        'mid_trend': mid_trend,
-                        'reason': sig_data.get('reason'),
-                        'rsi': rsi,
-                        'atr': sig_data.get('atr'),
-                        'suggested_exp': calculated_expiration
+                        'signal': signal_type, 'adx': adx, 'global_trend': global_trend,
+                        'mid_trend': mid_trend, 'reason': sig_data.get('reason'),
+                        'rsi': rsi, 'atr': sig_data.get('atr'), 'suggested_exp': calculated_expiration
                     }
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -575,20 +570,12 @@ def button_callback(update, context):
 
     if data == "show_filtered_log":
         logs = get_filtered_logs(chat_id)
-        if logs:
-            text = "🛡 Останні відсіяні сигнали:\n\n" + "\n".join(logs[:15])
-        else:
-            text = "ℹ️ Немає відсіяних сигналів за останню годину."
-        if len(text) > 4096:
-            text = text[:4096]
+        text = "🛡 Останні відсіяні сигнали:\n\n" + "\n".join(logs[:15]) if logs else "ℹ️ Немає відсіяних сигналів за останню годину."
+        if len(text) > 4096: text = text[:4096]
         query.message.reply_text(text)
     elif data.startswith("scan_"):
         ticker = data.replace("scan_", "")
-        pair_name = ticker
-        for name, t in PAIRS_MAP.items():
-            if t == ticker:
-                pair_name = name
-                break
+        pair_name = next((name for name, t in PAIRS_MAP.items() if t == ticker), ticker)
         query.message.reply_text(f"🔄 Запуск аналізу для {pair_name} ({ticker})...")
         threading.Thread(target=process_single_pair, args=(chat_id, pair_name, ticker)).start()
 
