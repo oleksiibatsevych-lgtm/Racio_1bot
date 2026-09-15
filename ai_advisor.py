@@ -1,6 +1,5 @@
 import os
 import json
-import base64
 import requests
 import google.generativeai as genai
 from PIL import Image
@@ -13,14 +12,16 @@ class AITradingAdvisor:
         if self.gemini_key:
             genai.configure(api_key=self.gemini_key)
             
-        # Робочі та стабільні назви моделей Gemini
+        # Актуальний спискок моделей Gemini для перевірки
         self.gemini_models = [
+            "gemini-1.5-flash-latest",
             "gemini-1.5-flash",
+            "gemini-2.0-flash",
             "gemini-1.5-pro"
         ]
 
-    def _evaluate_with_openrouter(self, prompt, chart_bytes_list):
-        """Резервний виклик через OpenRouter (DeepSeek / Llama)"""
+    def _evaluate_with_openrouter(self, prompt):
+        """Резервний текстовий аналіз через OpenRouter (DeepSeek / Llama)"""
         if not self.openrouter_key:
             return None
             
@@ -30,39 +31,33 @@ class AITradingAdvisor:
             "Content-Type": "application/json"
         }
 
-        content = [{"type": "text", "text": prompt}]
-        
-        # Додавання графіків у базі base64, якщо вони присутні
-        for buf in chart_bytes_list:
-            if buf:
-                try:
-                    buf.seek(0)
-                    b64 = base64.b64encode(buf.read()).decode("utf-8")
-                    content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64}"}
-                    })
-                except Exception:
-                    pass
+        # Безкоштовні текстові моделі OpenRouter
+        models_to_try = [
+            "deepseek/deepseek-r1:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "google/gemini-2.0-flash-exp:free"
+        ]
 
-        payload = {
-            "model": "deepseek/deepseek-r1:free",
-            "messages": [{"role": "user", "content": content}]
-        }
+        for model_slug in models_to_try:
+            payload = {
+                "model": model_slug,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=12)
+                if response.status_code == 200:
+                    data = response.json()
+                    res_text = data["choices"][0]["message"]["content"]
+                    if res_text:
+                        return res_text
+            except Exception as e:
+                print(f"⚠️ Помилка OpenRouter ({model_slug}): {e}")
 
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            print(f"⚠️ Помилка OpenRouter: {e}")
-            
         return None
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
         prompt = f"""
-        Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
+        Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані для активу {name}.
         Параметри сигналу:
         - Сигнал: {payload.get('signal')}
         - RSI: {payload.get('rsi')}
@@ -85,7 +80,7 @@ class AITradingAdvisor:
 
         response_text = None
 
-        # 1. Перша спроба: Gemini (офіційні моделі 1.5)
+        # 1. Основна спроба: Gemini (з аналізом графіків)
         if self.gemini_key:
             content_parts = [prompt]
             for chart in [macro_chart, mid_chart, micro_chart]:
@@ -106,11 +101,10 @@ class AITradingAdvisor:
                 except Exception as e:
                     print(f"⚠️ Збій Gemini ({model_name}): {e}")
 
-        # 2. Резервна спроба: OpenRouter (DeepSeek / Llama), якщо Gemini видала помилку або ліміти
+        # 2. Резервна спроба: OpenRouter (текстовий аналіз за параметрами)
         if not response_text and self.openrouter_key:
             print("🔄 Gemini недоступна. Перемикаємося на резервний OpenRouter...")
-            charts = [macro_chart, mid_chart, micro_chart]
-            response_text = self._evaluate_with_openrouter(prompt, charts)
+            response_text = self._evaluate_with_openrouter(prompt)
 
         # 3. Якщо жоден сервіс не відповів
         if not response_text:
@@ -118,7 +112,7 @@ class AITradingAdvisor:
                 "decision": "NO",
                 "confidence": 1,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "Усі AI-моделі (Gemini та OpenRouter) недоступні або вичерпано ліміти."
+                "reason": "Усі AI-моделі недоступні."
             }
 
         try:
@@ -135,7 +129,8 @@ class AITradingAdvisor:
                 "suggested_expiration": int(result.get("suggested_expiration", payload.get('suggested_exp', 5))),
                 "reason": result.get("reason", "ШІ не надав детального пояснення")
             }
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Помилка парсингу JSON від ШІ: {e}")
             return {
                 "decision": "NO",
                 "confidence": 1,
