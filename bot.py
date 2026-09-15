@@ -201,7 +201,8 @@ def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
     try:
         signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
-        delay = max((expiry_time - datetime.utcnow()).total_seconds(), 1)
+        # Додано 60 секунд буферної затримки для 100% завантаження свічки з Yahoo Finance
+        delay = max((expiry_time - datetime.utcnow()).total_seconds() + 60, 5)
         timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
         timer.daemon = True
         timer.start()
@@ -214,7 +215,7 @@ def restore_pending_timers():
         sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
         try:
             expiry_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S") + timedelta(minutes=expiration_mins)
-            delay = max((expiry_time - datetime.utcnow()).total_seconds(), 2 + (i * 2))
+            delay = max((expiry_time - datetime.utcnow()).total_seconds() + 60, 5 + (i * 2))
             timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
@@ -275,7 +276,8 @@ def process_single_pair(chat_id, name, ticker):
         
         signal_type = sig_data.get('signal')
         if signal_type not in ['CALL', 'PUT']:
-            bot.send_message(chat_id=chat_id, text=f"ℹ️ {name}: Поточний сигнал HOLD (немає чіткої точки входу).")
+            reason_str = sig_data.get('reason', 'немає чіткої точки входу')
+            bot.send_message(chat_id=chat_id, text=f"ℹ️ {name}: Поточний сигнал HOLD ({reason_str}).")
             return
         
         rsi = sig_data.get('rsi', 50)
@@ -293,7 +295,7 @@ def process_single_pair(chat_id, name, ticker):
             rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
             volatility_ratio, wick_ratio, ema_dist
         )
-        if win_probability < 0.52:
+        if win_probability < 0.62:
             log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
             save_filtered_log(chat_id, log_msg)
             bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно фільтром.")
@@ -426,7 +428,7 @@ def run_full_scan_background(chat_id):
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
                     volatility_ratio, wick_ratio, ema_dist
                 )
-                if win_probability < 0.52:
+                if win_probability < 0.62:
                     filtered_count += 1
                     log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
                     save_filtered_log(chat_id, log_msg)
