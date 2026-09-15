@@ -7,7 +7,7 @@ def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Створення та оновлення таблиць при запуску бота"""
+    """Ініціалізація та приведення структури БД до актуального стану"""
     query_users = """
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
@@ -18,8 +18,8 @@ def init_db():
     query_signals = """
     CREATE TABLE IF NOT EXISTS signals (
         id SERIAL PRIMARY KEY,
-        pair TEXT NOT NULL,
-        signal_type TEXT NOT NULL,
+        pair TEXT,
+        signal_type TEXT,
         entry_price NUMERIC,
         expiration INT,
         ai_decision TEXT,
@@ -29,17 +29,28 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
-    query_add_status_col = """
-    ALTER TABLE signals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';
-    """
+    
+    # Автоматичне додавання колонок, якщо таблиця вже існувала раніше
+    columns_to_add = [
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS pair TEXT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS signal_type TEXT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS entry_price NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS expiration INT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_decision TEXT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_confidence INT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_reason TEXT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';"
+    ]
+    
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(query_users)
                 cur.execute(query_signals)
-                cur.execute(query_add_status_col)
+                for col_query in columns_to_add:
+                    cur.execute(col_query)
             conn.commit()
-        print("✅ База даних PostgreSQL успішно ініціалізована.")
+        print("✅ База даних PostgreSQL успішно ініціалізована та оновлена.")
     except Exception as e:
         print(f"⚠️ Помилка ініціалізації бази даних: {e}")
 
@@ -72,10 +83,7 @@ def get_all_users():
         return []
 
 def save_signal(*args, **kwargs):
-    """
-    Універсальна функція збереження сигналу.
-    Автоматично розбирає як позиційні (args), так і іменовані (kwargs) параметри.
-    """
+    """Універсальне збереження сигналу в БД"""
     pair = kwargs.get('pair') or (args[0] if len(args) > 0 else "UNKNOWN")
     signal_type = kwargs.get('signal_type') or (args[1] if len(args) > 1 else "HOLD")
     entry_price = kwargs.get('entry_price') or (args[2] if len(args) > 2 else 0.0)
