@@ -1,6 +1,8 @@
 import os
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 PAIRS_MAP = {
     "EUR/USD": "EURUSD=X",
