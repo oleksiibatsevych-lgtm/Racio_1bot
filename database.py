@@ -7,7 +7,7 @@ def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Створення необхідних таблиць при запуску бота"""
+    """Створення та оновлення таблиць при запуску бота"""
     query_users = """
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
@@ -29,13 +29,19 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
+    # Додавання колонки status у випадок, якщо таблиця вже існувала раніше
+    query_add_status_col = """
+    ALTER TABLE signals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';
+    """
+    
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(query_users)
                 cur.execute(query_signals)
+                cur.execute(query_add_status_col)
             conn.commit()
-        print("✅ База даних PostgreSQL (Neon) успішно ініціалізована.")
+        print("✅ База даних PostgreSQL (Neon) успішно ініціалізована та оновлена.")
     except Exception as e:
         print(f"⚠️ Помилка ініціалізації бази даних: {e}")
 
