@@ -12,7 +12,6 @@ class AITradingAdvisor:
         if self.gemini_key:
             genai.configure(api_key=self.gemini_key)
             
-        # Актуальний спискок моделей Gemini для перевірки
         self.gemini_models = [
             "gemini-1.5-flash-latest",
             "gemini-1.5-flash",
@@ -21,7 +20,7 @@ class AITradingAdvisor:
         ]
 
     def _evaluate_with_openrouter(self, prompt):
-        """Резервний текстовий аналіз через OpenRouter (DeepSeek / Llama)"""
+        """Резервний аналіз через OpenRouter (DeepSeek / Llama)"""
         if not self.openrouter_key:
             return None
             
@@ -31,7 +30,6 @@ class AITradingAdvisor:
             "Content-Type": "application/json"
         }
 
-        # Безкоштовні текстові моделі OpenRouter
         models_to_try = [
             "deepseek/deepseek-r1:free",
             "meta-llama/llama-3.3-70b-instruct:free",
@@ -80,7 +78,7 @@ class AITradingAdvisor:
 
         response_text = None
 
-        # 1. Основна спроба: Gemini (з аналізом графіків)
+        # 1. Основна спроба: Gemini
         if self.gemini_key:
             content_parts = [prompt]
             for chart in [macro_chart, mid_chart, micro_chart]:
@@ -101,7 +99,7 @@ class AITradingAdvisor:
                 except Exception as e:
                     print(f"⚠️ Збій Gemini ({model_name}): {e}")
 
-        # 2. Резервна спроба: OpenRouter (текстовий аналіз за параметрами)
+        # 2. Резервна спроба: OpenRouter
         if not response_text and self.openrouter_key:
             print("🔄 Gemini недоступна. Перемикаємося на резервний OpenRouter...")
             response_text = self._evaluate_with_openrouter(prompt)
