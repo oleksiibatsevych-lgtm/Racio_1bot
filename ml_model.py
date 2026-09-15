@@ -1,9 +1,9 @@
 import os
-import sqlite3
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 import pickle
+import database
 
 class TradingMLFilter:
     def __init__(self, model_path="ml_model.pkl"):
@@ -52,7 +52,7 @@ class TradingMLFilter:
 
     def train_model(self):
         try:
-            conn = sqlite3.connect("trading_bot.db")
+            conn, db_type = database.get_connection()
             query = """
                 SELECT rsi, adx, bb_width, 
                        COALESCE(session_code, 1) as session_code, 
