@@ -153,7 +153,7 @@ class AdaptiveTechnicalAnalysis:
 
     def calculate_dynamic_expiration(self, df_5m, df_1m, signal, adx, atr, rsi, divergence="NONE", trend_aligned=False, is_pivot_rejection=False):
         """
-        Мультитаймфреймовий Candle-Clock: адаптивний вибір між закриттям 5m та 15m свічки.
+        Мультитаймфреймовий Candle-Clock з гарантованим буфером часу не менше 3 хвилин.
         """
         try:
             now_utc = datetime.utcnow()
@@ -162,12 +162,11 @@ class AdaptiveTechnicalAnalysis:
             mins_to_5m = 5 - (minute % 5)
             mins_to_15m = 15 - (minute % 15)
             
-            if mins_to_5m < 2:
+            if mins_to_5m < 3:
                 mins_to_5m += 5
-            if mins_to_15m < 3:
+            if mins_to_15m < 4:
                 mins_to_15m += 15
 
-            # Перемикання на 15m Candle-Clock для глибоких структурних сетапів
             use_15m_clock = (
                 divergence != "NONE" or
                 (trend_aligned and adx >= 25) or
@@ -175,7 +174,7 @@ class AdaptiveTechnicalAnalysis:
             )
 
             expiration = mins_to_15m if use_15m_clock else mins_to_5m
-            return int(np.clip(expiration, 2, 15))
+            return int(np.clip(expiration, 3, 15))
         except Exception:
             return 5
 
@@ -196,6 +195,7 @@ class AdaptiveTechnicalAnalysis:
         atr = float(last_5m.get('atr', 0.001))
         bb_upper = float(last_5m.get('bb_upper', 0))
         bb_lower = float(last_5m.get('bb_lower', 0))
+        bb_width = float(last_5m.get('bb_width', 0.001))
         close_5m = float(last_5m['close'])
         close_1m = float(last_1m['close'])
         ema_50 = float(last_5m.get('ema_50', close_5m))
@@ -204,6 +204,25 @@ class AdaptiveTechnicalAnalysis:
         volatility_ratio = float(atr / (atr_ma + 1e-10))
         ema_dist = float((close_5m - ema_50) / (ema_50 + 1e-10))
         div = self.detect_divergence(df_5m, window=30)
+
+        # ----------------------------------------------------
+        # 🛡 ФІЛЬТР ВОЛАТИЛЬНОСТІ
+        # ----------------------------------------------------
+        if bb_width < 0.0003:
+            return {
+                'signal': 'HOLD', 'reason': 'Стиснення BB (накопичення / флет)', 
+                'suggested_exp': 5, 'rsi': round(rsi_5m, 1), 'adx': round(adx, 1), 
+                'atr': atr, 'divergence': div, 'volatility_ratio': round(volatility_ratio, 3), 
+                'wick_ratio': 0.0, 'ema_dist': round(ema_dist, 5)
+            }
+
+        if volatility_ratio < 0.75 or volatility_ratio > 2.5:
+            return {
+                'signal': 'HOLD', 'reason': 'Аномальна або низька волатильність', 
+                'suggested_exp': 5, 'rsi': round(rsi_5m, 1), 'adx': round(adx, 1), 
+                'atr': atr, 'divergence': div, 'volatility_ratio': round(volatility_ratio, 3), 
+                'wick_ratio': 0.0, 'ema_dist': round(ema_dist, 5)
+            }
 
         pivots = self.calculate_pivots(df_daily) if df_daily is not None and not df_daily.empty else {}
         r1, s1 = pivots.get('R1', 0), pivots.get('S1', 0)
@@ -214,22 +233,23 @@ class AdaptiveTechnicalAnalysis:
         call_reasons, put_reasons = [], []
         is_pivot_rejection = False
 
-        # 1. Відбої від Боллінджера та рівнів Pivot
-        if bb_lower > 0 and close_1m <= bb_lower * 1.001:
-            call_score += 25
-            call_reasons.append("Відбій від BB Lower")
-        if s1 > 0 and close_5m <= s1 * 1.002:
-            call_score += 20
-            call_reasons.append("Підтримка Pivot S1")
-            is_pivot_rejection = True
+        # 1. Відбої від Боллінджера та рівнів Pivot (працюють тільки при слабкому/помірному ADX)
+        if adx < 22:
+            if bb_lower > 0 and close_1m <= bb_lower * 1.001:
+                call_score += 25
+                call_reasons.append("Відбій від BB Lower")
+            if s1 > 0 and close_5m <= s1 * 1.002:
+                call_score += 20
+                call_reasons.append("Підтримка Pivot S1")
+                is_pivot_rejection = True
 
-        if bb_upper > 0 and close_1m >= bb_upper * 0.999:
-            put_score += 25
-            put_reasons.append("Відбій від BB Upper")
-        if r1 > 0 and close_5m >= r1 * 0.998:
-            put_score += 20
-            put_reasons.append("Опір Pivot R1")
-            is_pivot_rejection = True
+            if bb_upper > 0 and close_1m >= bb_upper * 0.999:
+                put_score += 25
+                put_reasons.append("Відбій від BB Upper")
+            if r1 > 0 and close_5m >= r1 * 0.998:
+                put_score += 20
+                put_reasons.append("Опір Pivot R1")
+                is_pivot_rejection = True
 
         # 2. Smart Divergence (+35 балів)
         if div == 'BULLISH_DIV':
@@ -260,22 +280,30 @@ class AdaptiveTechnicalAnalysis:
 
         # 5. Трендова відповідність
         if effective_trend == 'BULLISH':
-            call_score += 15
+            call_score += 20
             call_reasons.append("За трендом B")
         elif effective_trend == 'BEARISH':
-            put_score += 15
+            put_score += 20
             put_reasons.append("За трендом S")
 
-        # Фіксація порогу: для дивергенції поріг 50 балів, для інших угод — 60 балів
-        threshold_call = 50 if div == 'BULLISH_DIV' else 60
-        threshold_put = 50 if div == 'BEARISH_DIV' else 60
+        # ----------------------------------------------------
+        # 🚫 ЖОРСТКЕ БЛОКУВАННЯ КОНТР-ТРЕНДОВИХ УГОД
+        # ----------------------------------------------------
+        if global_trend == 'BULLISH':
+            put_score -= 40  # Понижуємо бали для контр-трендових PUT
+        elif global_trend == 'BEARISH':
+            call_score -= 40 # Понижуємо бали для контр-трендових CALL
 
-        # Захист при екстремальному тренді ADX > 35
-        if adx > 35:
-            if div == 'BULLISH_DIV' and global_trend == 'BEARISH':
-                call_score -= 20
-            elif div == 'BEARISH_DIV' and global_trend == 'BULLISH':
-                put_score -= 20
+        # При зваженому тренді з ADX >= 22 повністю блокуємо контр-трендові угоди
+        if adx >= 22:
+            if global_trend == 'BULLISH':
+                put_score = -999
+            elif global_trend == 'BEARISH':
+                call_score = -999
+
+        # Фіксація підвищеного порогу якості входів: 60 для дивергенцій, 75 для стандартних угод
+        threshold_call = 60 if div == 'BULLISH_DIV' else 75
+        threshold_put = 60 if div == 'BEARISH_DIV' else 75
 
         signal = 'HOLD'
         reason = 'Недостатньо конфлюентності'
