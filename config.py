@@ -1,9 +1,16 @@
 import os
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# Обробка та очищення DATABASE_URL
+raw_db_url = os.environ.get("DATABASE_URL", "")
+
+if raw_db_url.startswith("postgres://"):
+    raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
+
+DATABASE_URL = raw_db_url.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
 
 PAIRS_MAP = {
     "EUR/USD": "EURUSD=X",
