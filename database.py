@@ -25,6 +25,7 @@ def init_db():
         ai_decision TEXT,
         ai_confidence INT,
         ai_reason TEXT,
+        status TEXT DEFAULT 'PENDING',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
@@ -53,16 +54,55 @@ def register_user(user_id, username=None):
     except Exception as e:
         print(f"⚠️ Помилка реєстрації користувача {user_id}: {e}")
 
+def get_all_users():
+    """Отримання списку всіх користувачів для розсилки"""
+    query = "SELECT user_id FROM users;"
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                rows = cur.fetchall()
+                return [row[0] for row in rows]
+    except Exception as e:
+        print(f"⚠️ Помилка отримання користувачів: {e}")
+        return []
+
 def save_signal(pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason):
-    """Збереження торгового сигналу"""
+    """Збереження нового сигналу"""
     query = """
-    INSERT INTO signals (pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason)
-    VALUES (%s, %s, %s, %s, %s, %s, %s);
+    INSERT INTO signals (pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason, status)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING') RETURNING id;
     """
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(query, (pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason))
+                signal_id = cur.fetchone()[0]
             conn.commit()
+            return signal_id
     except Exception as e:
         print(f"⚠️ Помилка збереження сигналу для {pair}: {e}")
+        return None
+
+def get_pending_signals():
+    """Отримання незавершених сигналів"""
+    query = "SELECT id, pair, signal_type, entry_price, expiration, created_at FROM signals WHERE status = 'PENDING';"
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                return cur.fetchall()
+    except Exception as e:
+        print(f"⚠️ Помилка отримання pending сигналів: {e}")
+        return []
+
+def update_signal_status(signal_id, status):
+    """Оновлення статусу сигналу (WIN / LOSS / EXPIRED)"""
+    query = "UPDATE signals SET status = %s WHERE id = %s;"
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (status, signal_id))
+            conn.commit()
+    except Exception as e:
+        print(f"⚠️ Помилка оновлення статусу сигналу {signal_id}: {e}")
