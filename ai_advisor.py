@@ -68,12 +68,9 @@ class AITradingAdvisor:
 
         try:
             clean_text = response_text.strip()
-            if clean_text.startswith("```json"):
-                clean_text = clean_text[7:]
-            if clean_text.startswith("```"):
-                clean_text = clean_text[3:]
-            if clean_text.endswith("```"):
-                clean_text = clean_text[:-3]
+            if clean_text.startswith("```json"): clean_text = clean_text[7:]
+            if clean_text.startswith("```"): clean_text = clean_text[3:]
+            if clean_text.endswith("```"): clean_text = clean_text[:-3]
             clean_text = clean_text.strip()
 
             result = json.loads(clean_text)
@@ -83,7 +80,7 @@ class AITradingAdvisor:
                 "suggested_expiration": int(result.get("suggested_expiration", payload.get('suggested_exp', 5))),
                 "reason": result.get("reason", "ШІ не надав детального пояснення")
             }
-        except Exception as e:
+        except Exception:
             return {
                 "decision": "NO",
                 "confidence": 1,
