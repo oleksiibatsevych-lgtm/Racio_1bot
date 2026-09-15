@@ -71,8 +71,19 @@ def get_all_users():
         print(f"⚠️ Помилка отримання користувачів: {e}")
         return []
 
-def save_signal(pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason, *args, **kwargs):
-    """Збереження нового сигналу з підтримкою додаткових аргументів"""
+def save_signal(*args, **kwargs):
+    """
+    Універсальна функція збереження сигналу.
+    Автоматично розбирає як позиційні (args), так і іменовані (kwargs) параметри.
+    """
+    pair = kwargs.get('pair') or (args[0] if len(args) > 0 else "UNKNOWN")
+    signal_type = kwargs.get('signal_type') or (args[1] if len(args) > 1 else "HOLD")
+    entry_price = kwargs.get('entry_price') or (args[2] if len(args) > 2 else 0.0)
+    expiration = kwargs.get('expiration') or (args[3] if len(args) > 3 else 5)
+    ai_decision = kwargs.get('ai_decision') or (args[4] if len(args) > 4 else "NO")
+    ai_confidence = kwargs.get('ai_confidence') or (args[5] if len(args) > 5 else 0)
+    ai_reason = kwargs.get('ai_reason') or (args[6] if len(args) > 6 else "")
+
     query = """
     INSERT INTO signals (pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason, status)
     VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING') RETURNING id;
