@@ -29,11 +29,9 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
-    # Додавання колонки status у випадок, якщо таблиця вже існувала раніше
     query_add_status_col = """
     ALTER TABLE signals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';
     """
-    
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -41,7 +39,7 @@ def init_db():
                 cur.execute(query_signals)
                 cur.execute(query_add_status_col)
             conn.commit()
-        print("✅ База даних PostgreSQL (Neon) успішно ініціалізована та оновлена.")
+        print("✅ База даних PostgreSQL успішно ініціалізована.")
     except Exception as e:
         print(f"⚠️ Помилка ініціалізації бази даних: {e}")
 
@@ -61,7 +59,7 @@ def register_user(user_id, username=None):
         print(f"⚠️ Помилка реєстрації користувача {user_id}: {e}")
 
 def get_all_users():
-    """Отримання списку всіх користувачів для розсилки"""
+    """Отримання списку всіх користувачів"""
     query = "SELECT user_id FROM users;"
     try:
         with get_connection() as conn:
@@ -73,8 +71,8 @@ def get_all_users():
         print(f"⚠️ Помилка отримання користувачів: {e}")
         return []
 
-def save_signal(pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason):
-    """Збереження нового сигналу"""
+def save_signal(pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason, *args, **kwargs):
+    """Збереження нового сигналу з підтримкою додаткових аргументів"""
     query = """
     INSERT INTO signals (pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason, status)
     VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING') RETURNING id;
