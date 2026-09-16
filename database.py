@@ -1,3 +1,4 @@
+# database.py
 import psycopg2
 from config import DATABASE_URL
 
@@ -38,7 +39,22 @@ def init_db():
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_decision TEXT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_confidence INT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_reason TEXT;",
-        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';"
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'PENDING';",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS chat_id BIGINT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_id BIGINT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS rsi NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS adx NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS bb_width NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS session_code INT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS hour INT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS divergence TEXT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS dist_pivot NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS volatility_ratio NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS wick_ratio NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ema_dist NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS message_text TEXT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS result TEXT;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS pips NUMERIC;"
     ]
     
     try:
@@ -82,23 +98,48 @@ def get_all_users():
         return []
 
 def save_signal(*args, **kwargs):
-    """Універсальне збереження сигналу в БД"""
+    """Універсальне збереження сигналу в БД зі збереженням усіх метрик та параметрів повідомлення"""
     pair = kwargs.get('pair') or (args[0] if len(args) > 0 else "UNKNOWN")
     signal_type = kwargs.get('signal_type') or (args[1] if len(args) > 1 else "HOLD")
     entry_price = kwargs.get('entry_price') or (args[2] if len(args) > 2 else 0.0)
     expiration = kwargs.get('expiration') or (args[3] if len(args) > 3 else 5)
-    ai_decision = kwargs.get('ai_decision') or (args[4] if len(args) > 4 else "NO")
-    ai_confidence = kwargs.get('ai_confidence') or (args[5] if len(args) > 5 else 0)
-    ai_reason = kwargs.get('ai_reason') or (args[6] if len(args) > 6 else "")
+    chat_id = kwargs.get('chat_id') or (args[4] if len(args) > 4 else None)
+    message_id = kwargs.get('message_id') or (args[5] if len(args) > 5 else None)
+
+    ai_decision = kwargs.get('ai_decision', 'YES')
+    ai_confidence = kwargs.get('ai_confidence', 7)
+    ai_reason = kwargs.get('ai_reason', '')
+    rsi = kwargs.get('rsi')
+    adx = kwargs.get('adx')
+    bb_width = kwargs.get('bb_width')
+    session_code = kwargs.get('session_code')
+    hour = kwargs.get('hour')
+    divergence = kwargs.get('divergence')
+    dist_pivot = kwargs.get('dist_pivot')
+    message_text = kwargs.get('message_text')
+    volatility_ratio = kwargs.get('volatility_ratio')
+    wick_ratio = kwargs.get('wick_ratio')
+    ema_dist = kwargs.get('ema_dist')
 
     query = """
-    INSERT INTO signals (pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason, status)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, 'PENDING') RETURNING id;
+    INSERT INTO signals (
+        pair, signal_type, entry_price, expiration, chat_id, message_id,
+        ai_decision, ai_confidence, ai_reason, status,
+        rsi, adx, bb_width, session_code, hour, divergence, dist_pivot,
+        message_text, volatility_ratio, wick_ratio, ema_dist
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    RETURNING id;
     """
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(query, (pair, signal_type, entry_price, expiration, ai_decision, ai_confidence, ai_reason))
+                cur.execute(query, (
+                    pair, signal_type, entry_price, expiration, chat_id, message_id,
+                    ai_decision, ai_confidence, ai_reason,
+                    rsi, adx, bb_width, session_code, hour, divergence, dist_pivot,
+                    message_text, volatility_ratio, wick_ratio, ema_dist
+                ))
                 signal_id = cur.fetchone()[0]
             conn.commit()
             return signal_id
@@ -107,8 +148,13 @@ def save_signal(*args, **kwargs):
         return None
 
 def get_pending_signals():
-    """Отримання незавершених сигналів"""
-    query = "SELECT id, pair, signal_type, entry_price, expiration, created_at FROM signals WHERE status = 'PENDING';"
+    """Отримання незавершених сигналів з повним набором полів для таймера"""
+    query = """
+    SELECT id, pair, signal_type, entry_price, expiration, 
+           TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') as created_at_str, 
+           chat_id, message_id, message_text 
+    FROM signals WHERE status = 'PENDING';
+    """
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -117,6 +163,67 @@ def get_pending_signals():
     except Exception as e:
         print(f"⚠️ Помилка отримання pending сигналів: {e}")
         return []
+
+def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
+    """Перевірка результату угоди після завершення терміну експірації"""
+    query = "SELECT id, pair, signal_type, entry_price, expiration, chat_id, message_id, message_text FROM signals WHERE id = %s;"
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (sig_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                
+                sig_id, pair, signal_type, entry_price, expiration, chat_id, message_id, message_text = row
+                entry_price = float(entry_price)
+                
+                if fetch_yahoo_data_func:
+                    df = fetch_yahoo_data_func(pair, interval="1m", range_period="1d")
+                    if not df.empty and 'close' in df.columns:
+                        exit_price = float(df['close'].iloc[-1])
+                    else:
+                        exit_price = entry_price
+                else:
+                    exit_price = entry_price
+
+                pips_multiplier = 100.0 if "JPY" in str(pair) else 10000.0
+                raw_diff = exit_price - entry_price
+
+                if signal_type == "CALL":
+                    pips = round(raw_diff * pips_multiplier, 1)
+                    if exit_price > entry_price:
+                        res = "WIN"
+                    elif exit_price < entry_price:
+                        res = "LOSS"
+                    else:
+                        res = "NEUTRAL"
+                elif signal_type == "PUT":
+                    pips = round(-raw_diff * pips_multiplier, 1)
+                    if exit_price < entry_price:
+                        res = "WIN"
+                    elif exit_price > entry_price:
+                        res = "LOSS"
+                    else:
+                        res = "NEUTRAL"
+                else:
+                    pips = 0.0
+                    res = "NEUTRAL"
+
+                update_query = "UPDATE signals SET result = %s, status = %s, pips = %s WHERE id = %s;"
+                cur.execute(update_query, (res, res, pips, sig_id))
+            conn.commit()
+
+        return {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "pips": pips,
+            "result": res,
+            "message_text": message_text
+        }
+    except Exception as e:
+        print(f"⚠️ Помилка оцінки сигналу {sig_id}: {e}")
+        return None
 
 def update_signal_status(signal_id, status):
     """Оновлення статусу сигналу (WIN / LOSS / EXPIRED)"""
@@ -134,8 +241,9 @@ def get_overall_stats():
     query = """
     SELECT 
         COUNT(*) as total,
-        COUNT(CASE WHEN status = 'WIN' THEN 1 END) as wins,
-        COUNT(CASE WHEN status = 'LOSS' THEN 1 END) as losses,
+        COUNT(CASE WHEN result = 'WIN' OR status = 'WIN' THEN 1 END) as wins,
+        COUNT(CASE WHEN result = 'LOSS' OR status = 'LOSS' THEN 1 END) as losses,
+        COUNT(CASE WHEN result = 'NEUTRAL' OR status = 'NEUTRAL' THEN 1 END) as neutral,
         COUNT(CASE WHEN status = 'PENDING' THEN 1 END) as pending
     FROM signals;
     """
@@ -145,13 +253,14 @@ def get_overall_stats():
                 cur.execute(query)
                 row = cur.fetchone()
                 if row:
-                    total, wins, losses, pending = row[0], row[1], row[2], row[3]
+                    total, wins, losses, neutral, pending = row[0], row[1], row[2], row[3], row[4]
                     completed = wins + losses
                     winrate = round((wins / completed * 100), 1) if completed > 0 else 0.0
                     return {
                         'total': total,
                         'wins': wins,
                         'losses': losses,
+                        'neutral': neutral,
                         'pending': pending,
                         'completed': completed,
                         'winrate': winrate,
@@ -164,6 +273,7 @@ def get_overall_stats():
         'total': 0,
         'wins': 0,
         'losses': 0,
+        'neutral': 0,
         'pending': 0,
         'completed': 0,
         'winrate': 0.0,
