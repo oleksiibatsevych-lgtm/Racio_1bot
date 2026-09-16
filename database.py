@@ -7,7 +7,7 @@ def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Ініціалізація та приведення структури БД до актуального стану"""
+    """Створення та оновлення таблиць при запуску бота"""
     query_users = """
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
@@ -30,7 +30,6 @@ def init_db():
     );
     """
     
-    # Автоматичне додавання колонок, якщо таблиця вже існувала раніше
     columns_to_add = [
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS pair TEXT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS signal_type TEXT;",
@@ -129,3 +128,44 @@ def update_signal_status(signal_id, status):
             conn.commit()
     except Exception as e:
         print(f"⚠️ Помилка оновлення статусу сигналу {signal_id}: {e}")
+
+def get_overall_stats():
+    """Розрахунок загальної статистики угод з бази даних"""
+    query = """
+    SELECT 
+        COUNT(*) as total,
+        COUNT(CASE WHEN status = 'WIN' THEN 1 END) as wins,
+        COUNT(CASE WHEN status = 'LOSS' THEN 1 END) as losses,
+        COUNT(CASE WHEN status = 'PENDING' THEN 1 END) as pending
+    FROM signals;
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                row = cur.fetchone()
+                if row:
+                    total, wins, losses, pending = row[0], row[1], row[2], row[3]
+                    completed = wins + losses
+                    winrate = round((wins / completed * 100), 1) if completed > 0 else 0.0
+                    return {
+                        'total': total,
+                        'wins': wins,
+                        'losses': losses,
+                        'pending': pending,
+                        'completed': completed,
+                        'winrate': winrate,
+                        'win_rate': winrate
+                    }
+    except Exception as e:
+        print(f"⚠️ Помилка отримання загальної статистики: {e}")
+        
+    return {
+        'total': 0,
+        'wins': 0,
+        'losses': 0,
+        'pending': 0,
+        'completed': 0,
+        'winrate': 0.0,
+        'win_rate': 0.0
+    }
