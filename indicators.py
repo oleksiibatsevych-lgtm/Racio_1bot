@@ -4,10 +4,16 @@ from datetime import datetime
 
 class AdaptiveTechnicalAnalysis:
     def calculate_indicators(self, df):
-        if df.empty or len(df) < 20:
+        if df is None or df.empty or len(df) < 20:
             return df
 
         df = df.copy()
+        
+        # Приведення назв колонок до нижнього регістру (захист від Open/Close з великої літери)
+        df.columns = [str(col).lower() for col in df.columns]
+
+        if 'close' not in df.columns:
+            return df
 
         # 1. RSI
         delta = df['close'].diff()
@@ -29,36 +35,41 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = ((df['bb_upper'] - df['bb_lower']) / (sma + 1e-10)).fillna(0.001)
 
         # 3. ATR
-        high = df['high']
-        low = df['low']
-        close_prev = df['close'].shift(1)
-        
-        tr1 = high - low
-        tr2 = (high - close_prev).abs()
-        tr3 = (low - close_prev).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
-        df['atr'] = tr.ewm(alpha=1/14, adjust=False).mean().fillna(0.0010)
+        if 'high' in df.columns and 'low' in df.columns:
+            high = df['high']
+            low = df['low']
+            close_prev = df['close'].shift(1)
+            
+            tr1 = high - low
+            tr2 = (high - close_prev).abs()
+            tr3 = (low - close_prev).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            df['atr'] = tr.ewm(alpha=1/14, adjust=False).mean().fillna(0.0010)
+        else:
+            df['atr'] = 0.0010
 
         # 4. ADX
-        high_prev = high.shift(1)
-        low_prev = low.shift(1)
-        
-        up_move = high - high_prev
-        down_move = low_prev - low
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        plus_dm_series = pd.Series(plus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean()
-        minus_dm_series = pd.Series(minus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean()
-        tr_smoothed = tr.ewm(alpha=1/14, adjust=False).mean() + 1e-10
-        
-        plus_di = 100 * (plus_dm_series / tr_smoothed)
-        minus_di = 100 * (minus_dm_series / tr_smoothed)
-        
-        dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
-        df['adx'] = dx.ewm(alpha=1/14, adjust=False).mean().fillna(20)
+        if 'high' in df.columns and 'low' in df.columns and 'atr' in df.columns:
+            high_prev = df['high'].shift(1)
+            low_prev = df['low'].shift(1)
+            
+            up_move = df['high'] - high_prev
+            down_move = low_prev - df['low']
+            
+            plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+            minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+            
+            plus_dm_series = pd.Series(plus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean()
+            minus_dm_series = pd.Series(minus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean()
+            tr_smoothed = df['atr'].ewm(alpha=1/14, adjust=False).mean() + 1e-10
+            
+            plus_di = 100 * (plus_dm_series / tr_smoothed)
+            minus_di = 100 * (minus_dm_series / tr_smoothed)
+            
+            dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
+            df['adx'] = dx.ewm(alpha=1/14, adjust=False).mean().fillna(20)
+        else:
+            df['adx'] = 20
 
         # 5. EMA
         df['ema_10'] = df['close'].ewm(span=10, adjust=False).mean()
@@ -67,7 +78,7 @@ class AdaptiveTechnicalAnalysis:
         return df
 
     def get_trend(self, df, span_val=50):
-        if df.empty or len(df) < span_val:
+        if df.empty or 'close' not in df.columns or len(df) < span_val:
             return "NEUTRAL"
         
         ema = df['close'].ewm(span=span_val, adjust=False).mean()
@@ -88,7 +99,7 @@ class AdaptiveTechnicalAnalysis:
         return "NEUTRAL"
 
     def calculate_pivots(self, df_daily):
-        if df_daily.empty or len(df_daily) < 2:
+        if df_daily.empty or 'high' not in df_daily.columns or len(df_daily) < 2:
             return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
             
         last_day = df_daily.iloc[-2] if len(df_daily) >= 2 else df_daily.iloc[-1]
@@ -98,7 +109,7 @@ class AdaptiveTechnicalAnalysis:
         return {"P": p, "R1": (2 * p) - low, "S1": (2 * p) - high, "R2": p + (high - low), "S2": p - (high - low)}
 
     def detect_divergence(self, df, window=30):
-        if df.empty or 'rsi' not in df.columns or len(df) < window:
+        if df.empty or 'rsi' not in df.columns or 'close' not in df.columns or len(df) < window:
             return "NONE"
             
         sub = df.tail(window).copy().reset_index(drop=True)
@@ -128,8 +139,8 @@ class AdaptiveTechnicalAnalysis:
         return "NONE"
 
     def get_wick_ratio(self, candle, direction):
-        high, low = float(candle['high']), float(candle['low'])
-        open_p, close_p = float(candle['open']), float(candle['close'])
+        high, low = float(candle.get('high', candle.get('close', 0))), float(candle.get('low', candle.get('close', 0)))
+        open_p, close_p = float(candle.get('open', candle.get('close', 0))), float(candle.get('close', 0))
         total_range = high - low
         if total_range == 0:
             return 0.0
@@ -159,7 +170,6 @@ class AdaptiveTechnicalAnalysis:
             return 5
 
     def generate_signal(self, df_1m, df_5m, global_trend="NEUTRAL", mid_trend="NEUTRAL", df_daily=None):
-        # Гнучка сумісність: якщо у якості global_trend передано DataFrame (наприклад, df_macro з bot.py)
         if isinstance(global_trend, pd.DataFrame):
             df_macro = global_trend
             global_trend = self.get_trend(df_macro, span_val=200)
@@ -167,9 +177,13 @@ class AdaptiveTechnicalAnalysis:
             if df_daily is None:
                 df_daily = df_macro
 
-        if df_5m.empty or len(df_5m) < 20 or df_1m.empty or len(df_1m) < 20:
+        # Попередній розрахунок індикаторів для захисту від відсутності колонок
+        df_1m = self.calculate_indicators(df_1m)
+        df_5m = self.calculate_indicators(df_5m)
+
+        if df_5m.empty or 'close' not in df_5m.columns or len(df_5m) < 20 or df_1m.empty or 'close' not in df_1m.columns or len(df_1m) < 20:
             return {
-                'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5, 
+                'signal': 'HOLD', 'reason': 'Мало даних або відсутні колонки', 'suggested_exp': 5, 
                 'expiration_minutes': 5, 'strategy': 'HOLD', 'priority': 1,
                 'rsi': 50, 'adx': 20, 'atr': 0.001, 'volatility_ratio': 1.0, 
                 'wick_ratio': 0.0, 'ema_dist': 0.0
@@ -184,7 +198,7 @@ class AdaptiveTechnicalAnalysis:
         close_5m, close_1m = float(last_5m['close']), float(last_1m['close'])
         ema_50 = float(last_5m.get('ema_50', close_5m))
         
-        atr_ma = df_5m['atr'].rolling(20).mean().iloc[-2] if len(df_5m) >= 20 else atr
+        atr_ma = df_5m['atr'].rolling(20).mean().iloc[-2] if 'atr' in df_5m.columns and len(df_5m) >= 20 else atr
         volatility_ratio = float(atr / (atr_ma + 1e-10))
         ema_dist = float((close_5m - ema_50) / (ema_50 + 1e-10))
         div = self.detect_divergence(df_5m, window=30)
@@ -256,7 +270,7 @@ class AdaptiveTechnicalAnalysis:
             call_reasons.append("За трендом B")
         elif effective_trend == 'BEARISH':
             put_score += 15
-            call_reasons.append("За трендом S")
+            put_reasons.append("За трендом S")
 
         threshold_call = 50 if div == 'BULLISH_DIV' else 60
         threshold_put = 50 if div == 'BEARISH_DIV' else 60
