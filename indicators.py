@@ -24,13 +24,12 @@ class AdaptiveTechnicalAnalysis:
 
         # 2. Bollinger Bands & %B
         sma = df['close'].rolling(window=20).mean()
--       std = df['close'].rolling(window=20).std()
+        std = df['close'].rolling(window=20).std()
         df['bb_upper'] = sma + (std * 2)
         df['bb_lower'] = sma - (std * 2)
         df['bb_middle'] = sma
         df['bb_width'] = ((df['bb_upper'] - df['bb_lower']) / (sma + 1e-10)).fillna(0.001)
         
-        # Розрахунок %B для M1 скальпінгу
         bb_range = df['bb_upper'] - df['bb_lower']
         df['pct_b'] = np.where(bb_range > 0, (df['close'] - df['bb_lower']) / bb_range, 0.5)
 
@@ -62,7 +61,7 @@ class AdaptiveTechnicalAnalysis:
         else:
             df['adx'] = 20
 
-        # 5. EMA Віяло (EMA9 / EMA21 / EMA50)
+        # 5. EMA Віяло
         df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
         df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
@@ -142,21 +141,18 @@ class AdaptiveTechnicalAnalysis:
         r1, s1 = pivots.get('R1', 0), pivots.get('S1', 0)
         r2, s2 = pivots.get('R2', 0), pivots.get('S2', 0)
 
-        # Визначення стану ринку згідно з вашою матрицею
         signal = 'HOLD'
         reason = ''
         strategy_name = 'HOLD'
         priority = 4
         suggested_exp = 5
 
-        # -------------------------------------------------------------
-        # ПРІОРИТЕТ 1: Трендовий Імпульс (Hard Veto проти відбоїв)
-        # -------------------------------------------------------------
+        # ПРІОРИТЕТ 1: Трендовий Імпульс
         if adx >= 25 and volatility_ratio >= 1.15 and ema_9 > ema_21:
             signal = 'CALL'
             strategy_name = 'Трендовий Імпульс (BUY)'
             priority = 1
-            suggested_exp = 7  # 3-10 хвилин
+            suggested_exp = 7
             reason = f"Вибух волатильності та тренд (ADX: {adx:.1f}, Vol_Ratio: {volatility_ratio:.2f})"
         elif adx >= 25 and volatility_ratio >= 1.15 and ema_9 < ema_21:
             signal = 'PUT'
@@ -165,30 +161,26 @@ class AdaptiveTechnicalAnalysis:
             suggested_exp = 7
             reason = f"Вибух волатильності та тренд (ADX: {adx:.1f}, Vol_Ratio: {volatility_ratio:.2f})"
 
-        # -------------------------------------------------------------
-        # ПРІОРИТЕТ 2: HTF Макро-Тренд / Дивергенції (15-30 хв)
-        # -------------------------------------------------------------
-        elif div_5m == 'BULLISH_DIV' or global_trend == 'BULLISH' and (s2 > 0 and close_5m <= s2 * 1.002):
+        # ПРІОРИТЕТ 2: HTF Макро-Тренд / Дивергенції
+        elif div_5m == 'BULLISH_DIV' or (global_trend == 'BULLISH' and s2 > 0 and close_5m <= s2 * 1.002):
             signal = 'CALL'
             strategy_name = 'HTF Макро-Тренд / Розворот'
             priority = 2
-            suggested_exp = 20  # 15, 20 або 30 хв
+            suggested_exp = 20
             reason = f"Макро-сигнал / Дивергенція біля S2/R2"
-        elif div_5m == 'BEARISH_DIV' or global_trend == 'BEARISH' and (r2 > 0 and close_5m >= r2 * 0.998):
+        elif div_5m == 'BEARISH_DIV' or (global_trend == 'BEARISH' and r2 > 0 and close_5m >= r2 * 0.998):
             signal = 'PUT'
             strategy_name = 'HTF Макро-Тренд / Розворот'
             priority = 2
             suggested_exp = 20
             reason = f"Макро-сигнал / Дивергенція біля S2/R2"
 
-        # -------------------------------------------------------------
-        # ПРІОРИТЕТ 3: M5 Конфлюентність (Відбиття від рівнів, 3-7 хв)
-        # -------------------------------------------------------------
+        # ПРІОРИТЕТ 3: M5 Конфлюентність
         elif adx < 25 and ((s1 > 0 and close_5m <= s1 * 1.002) or rsi_5m <= 40):
             signal = 'CALL'
             strategy_name = 'M5 Конфлюентність'
             priority = 3
-            suggested_exp = 5  # 3-7 хвилин
+            suggested_exp = 5
             reason = f"Відбиття від рівня S1 / RSI перепроданість ({rsi_5m:.1f})"
         elif adx < 25 and ((r1 > 0 and close_5m >= r1 * 0.998) or rsi_5m >= 60):
             signal = 'PUT'
@@ -197,14 +189,12 @@ class AdaptiveTechnicalAnalysis:
             suggested_exp = 5
             reason = f"Відбиття від рівня R1 / RSI перекупленість ({rsi_5m:.1f})"
 
-        # -------------------------------------------------------------
-        # ПРІОРИТЕТ 4: M1 Скальпінг (Мікрофлет / Торкання меж, 1-3 хв)
-        # -------------------------------------------------------------
+        # ПРІОРИТЕТ 4: M1 Скальпінг
         elif pct_b_1m <= 0.15 and rsi_1m <= 32:
             signal = 'CALL'
             strategy_name = 'M1 Скальпінг (Відбиття меж)'
             priority = 4
-            suggested_exp = 2  # 1-3 хвилини
+            suggested_exp = 2
             reason = f"Торкання нижньої межі %B ({pct_b_1m:.2f}) та RSI M1 ({rsi_1m:.1f})"
         elif pct_b_1m >= 0.85 and rsi_1m >= 68:
             signal = 'PUT'
