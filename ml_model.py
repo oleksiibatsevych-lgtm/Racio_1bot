@@ -1,3 +1,4 @@
+# ml_model.py
 import os
 import pandas as pd
 import numpy as np
@@ -52,7 +53,7 @@ class TradingMLFilter:
 
     def train_model(self):
         try:
-            conn, db_type = database.get_connection()
+            conn = database.get_connection()
             query = """
                 SELECT rsi, adx, bb_width, 
                        COALESCE(session_code, 1) as session_code, 
