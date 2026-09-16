@@ -128,7 +128,7 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
         }
-        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
+        url = f"[https://query2.finance.yahoo.com/v8/finance/chart/](https://query2.finance.yahoo.com/v8/finance/chart/){ticker}"
         params = {"interval": interval, "range": range_period}
         
         if curl_requests:
@@ -259,7 +259,7 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    update.message.reply_text("Бот Racio_1 готовий до роботи (Максимальний захист)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("Бот Racio_1 готовий до роботи (Оновлені фільтри)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
@@ -319,7 +319,6 @@ def process_single_pair(chat_id, name, ticker):
             volatility_ratio, wick_ratio, ema_dist
         )
         
-        # Підвищений поріг ML для точкового аналізу
         if win_probability < 0.65:
             log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 65%)"
             save_filtered_log(chat_id, log_msg)
@@ -327,7 +326,7 @@ def process_single_pair(chat_id, name, ticker):
             return
         
         ai_confidence = 7
-        ai_reason = "ШІ зайнятий / пройдено за індикаторами"
+        ai_reason = "ШІ недоступний (пройдено за індикаторами)"
         calculated_expiration = sig_data.get('suggested_exp', 5)
 
         try:
@@ -342,23 +341,20 @@ def process_single_pair(chat_id, name, ticker):
             }
 
             ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
-            ai_confidence = int(ai_audit.get("confidence", 5))
+            ai_confidence = int(ai_audit.get("confidence", 7))
             rejection_reason = str(ai_audit.get("reason", ""))
-            decision = ai_audit.get("decision", "NO")
+            decision = ai_audit.get("decision", "YES")
 
-            busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
-            is_ai_busy = any(kw in rejection_reason.lower() for kw in busy_keywords)
+            busy_keywords = ["недоступн", "зайнят", "404", "quota", "limit", "пройдено за індикаторами"]
+            is_ai_unavailable = any(kw in rejection_reason.lower() for kw in busy_keywords)
 
-            if is_ai_busy:
-                ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
-                ai_confidence = 7
-            elif decision != "YES" or ai_confidence < 7:
-                log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10 < 7/10)"
+            if not is_ai_unavailable and (decision == "NO" or ai_confidence < 6):
+                log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
                 save_filtered_log(chat_id, log_msg)
                 bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відхилено ШІ-радником.")
                 return
             else:
-                ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
+                ai_reason = rejection_reason if rejection_reason else "Схвалено за індикаторами"
                 if ai_audit.get("suggested_expiration"):
                     calculated_expiration = int(ai_audit.get("suggested_expiration"))
         except Exception as e:
@@ -454,7 +450,6 @@ def run_full_scan_background(chat_id):
                     volatility_ratio, wick_ratio, ema_dist
                 )
                 
-                # Пороговий відбір ML під час сканування (58%)
                 if win_probability < 0.58:
                     filtered_count += 1
                     log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
@@ -462,7 +457,7 @@ def run_full_scan_background(chat_id):
                     continue
                 
                 ai_confidence = 7
-                ai_reason = "ШІ зайнятий / пройдено за індикаторами"
+                ai_reason = "ШІ недоступний (пройдено за індикаторами)"
                 ai_audit_failed = False
                 calculated_expiration = sig_data.get('suggested_exp', 5)
 
@@ -478,23 +473,20 @@ def run_full_scan_background(chat_id):
                     }
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
-                    ai_confidence = int(ai_audit.get("confidence", 5))
+                    ai_confidence = int(ai_audit.get("confidence", 7))
                     rejection_reason = str(ai_audit.get("reason", ""))
-                    decision = ai_audit.get("decision", "NO")
+                    decision = ai_audit.get("decision", "YES")
 
-                    busy_keywords = ["недоступні", "зайняті", "quota", "429", "resource", "exhausted", "limit", "busy", "unavailable"]
-                    is_ai_busy = any(kw in rejection_reason.lower() for kw in busy_keywords)
+                    busy_keywords = ["недоступн", "зайнят", "404", "quota", "limit", "пройдено за індикаторами"]
+                    is_ai_unavailable = any(kw in rejection_reason.lower() for kw in busy_keywords)
 
-                    if is_ai_busy:
-                        ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
-                        ai_confidence = 7
-                    elif decision != "YES" or ai_confidence < 7:
+                    if not is_ai_unavailable and (decision == "NO" or ai_confidence < 6):
                         filtered_count += 1
                         log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
                         save_filtered_log(chat_id, log_msg)
                         ai_audit_failed = True
                     else:
-                        ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
+                        ai_reason = rejection_reason if rejection_reason else "Схвалено за індикаторами"
                         if ai_audit.get("suggested_expiration"):
                             calculated_expiration = int(ai_audit.get("suggested_expiration"))
                 except Exception as e:
