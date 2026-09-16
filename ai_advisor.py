@@ -1,30 +1,25 @@
 import os
 import json
 import requests
-import logging
 import google.generativeai as genai
-
-logger = logging.getLogger(__name__)
+from PIL import Image
 
 class AITradingAdvisor:
     def __init__(self):
-        self.gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        self.openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        self.openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         
         if self.gemini_key:
-            try:
-                genai.configure(api_key=self.gemini_key)
-            except Exception as e:
-                logger.error(f"⚠️ Помилка конфігурації Gemini API: {e}")
-
-        # Актуальні робочі моделі Gemini
+            genai.configure(api_key=self.gemini_key)
+            
         self.gemini_models = [
-            "gemini-2.0-flash",
-            "gemini-1.5-flash"
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-2.0-flash-exp"
         ]
 
     def _evaluate_with_openrouter(self, prompt):
-        """Резервний аналіз через OpenRouter"""
+        """Резервний аналіз через OpenRouter (DeepSeek / Llama)"""
         if not self.openrouter_key:
             return None
             
@@ -46,14 +41,14 @@ class AITradingAdvisor:
                 "messages": [{"role": "user", "content": prompt}]
             }
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=10)
+                response = requests.post(url, headers=headers, json=payload, timeout=12)
                 if response.status_code == 200:
                     data = response.json()
                     res_text = data["choices"][0]["message"]["content"]
                     if res_text:
                         return res_text
             except Exception as e:
-                logger.warning(f"⚠️ Помилка OpenRouter ({model_slug}): {e}")
+                print(f"⚠️ Помилка OpenRouter ({model_slug}): {e}")
 
         return None
 
@@ -82,57 +77,39 @@ class AITradingAdvisor:
 
         response_text = None
 
-        # 1. Спроба: Gemini
+        # 1. Основна спроба: Gemini
         if self.gemini_key:
-            images_parts = []
+            content_parts = [prompt]
             for chart in [macro_chart, mid_chart, micro_chart]:
                 if chart:
                     try:
                         chart.seek(0)
-                        img_bytes = chart.getvalue()
-                        if img_bytes:
-                            images_parts.append({
-                                "mime_type": "image/png",
-                                "data": img_bytes
-                            })
+                        content_parts.append(Image.open(chart))
                     except Exception as e:
-                        logger.warning(f"⚠️ Помилка зчитування байтів графіка: {e}")
-
-            content_parts = [prompt] + images_parts
+                        print(f"⚠️ Помилка відкриття зображення для Gemini: {e}")
 
             for model_name in self.gemini_models:
                 try:
                     model = genai.GenerativeModel(model_name)
-                    resp = model.generate_content(
-                        content_parts,
-                        safety_settings=[
-                            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                        ]
-                    )
-                    
-                    if resp and resp.candidates and resp.candidates[0].content.parts:
+                    resp = model.generate_content(content_parts)
+                    if resp and resp.text:
                         response_text = resp.text
-                        logger.info(f"✅ Успішний аналіз через Gemini ({model_name})")
                         break
                 except Exception as e:
-                    logger.warning(f"⚠️ Збій Gemini ({model_name}): {e}")
+                    print(f"⚠️ Збій Gemini ({model_name}): {e}")
 
-        # 2. Спроба: OpenRouter
+        # 2. Резервна спроба: OpenRouter
         if not response_text and self.openrouter_key:
-            logger.info("🔄 Gemini недоступна. Перемикання на OpenRouter...")
+            print("🔄 Gemini недоступна. Перемикаємося на резервний OpenRouter...")
             response_text = self._evaluate_with_openrouter(prompt)
 
-        # 3. ФОЛБЕК: При недоступності ШІ пропускаємо за індикаторами (YES)
+        # 3. Якщо жоден сервіс не відповів
         if not response_text:
-            logger.info(f"ℹ️ ШІ недоступний для {name}. Сигнал пропущено за індикаторами.")
             return {
-                "decision": "YES",
-                "confidence": 7,
+                "decision": "NO",
+                "confidence": 1,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "ШІ недоступний (пройдено за індикаторами)"
+                "reason": "Усі AI-моделі недоступні."
             }
 
         try:
@@ -144,16 +121,16 @@ class AITradingAdvisor:
 
             result = json.loads(clean_text)
             return {
-                "decision": result.get("decision", "YES"),
-                "confidence": int(result.get("confidence", 7)),
+                "decision": result.get("decision", "NO"),
+                "confidence": int(result.get("confidence", 5)),
                 "suggested_expiration": int(result.get("suggested_expiration", payload.get('suggested_exp', 5))),
-                "reason": result.get("reason", "Схвалено ШІ")
+                "reason": result.get("reason", "ШІ не надав детального пояснення")
             }
         except Exception as e:
-            logger.error(f"⚠️ Помилка парсингу JSON від ШІ: {e}")
+            print(f"⚠️ Помилка парсингу JSON від ШІ: {e}")
             return {
-                "decision": "YES",
-                "confidence": 7,
+                "decision": "NO",
+                "confidence": 1,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "ШІ недоступний (помилка JSON, пройдено за індикаторами)"
+                "reason": "Помилка обробки відповіді ШІ"
             }
