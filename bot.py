@@ -259,7 +259,7 @@ def start(update, context):
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика")]
     ]
-    update.message.reply_text("Бот Racio_1 готовий до роботи! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("Бот Racio_1 готовий до роботи (Максимальний захист)! 🚀", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 def train_ml_command(update, context):
     _, msg = ml_filter.train_model()
@@ -267,6 +267,10 @@ def train_ml_command(update, context):
 
 def process_single_pair(chat_id, name, ticker):
     try:
+        if is_news_blackout_window():
+            bot.send_message(chat_id=chat_id, text="⚠️ Зараз період підвищеної новинної волатильності. Аналіз призупинено.")
+            return
+
         session_str, session_code, hour = get_current_session_info()
         current_time = time.time()
         
@@ -295,7 +299,8 @@ def process_single_pair(chat_id, name, ticker):
         
         signal_type = sig_data.get('signal')
         if signal_type not in ['CALL', 'PUT']:
-            bot.send_message(chat_id=chat_id, text=f"ℹ️ {name}: Поточний сигнал HOLD (немає чіткої точки входу).")
+            reason_txt = sig_data.get('reason', 'немає чіткої точки входу')
+            bot.send_message(chat_id=chat_id, text=f"ℹ️ {name}: Сигнал HOLD ({reason_txt}).")
             return
         
         rsi = sig_data.get('rsi', 50)
@@ -313,10 +318,12 @@ def process_single_pair(chat_id, name, ticker):
             rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
             volatility_ratio, wick_ratio, ema_dist
         )
-        if win_probability < 0.52:
-            log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
+        
+        # Підвищений поріг ML для точкового аналізу
+        if win_probability < 0.65:
+            log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}% < 65%)"
             save_filtered_log(chat_id, log_msg)
-            bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно фільтром.")
+            bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно ML-фільтром.")
             return
         
         ai_confidence = 7
@@ -345,8 +352,8 @@ def process_single_pair(chat_id, name, ticker):
             if is_ai_busy:
                 ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
                 ai_confidence = 7
-            elif decision != "YES" or ai_confidence < 6:
-                log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
+            elif decision != "YES" or ai_confidence < 7:
+                log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10 < 7/10)"
                 save_filtered_log(chat_id, log_msg)
                 bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відхилено ШІ-радником.")
                 return
@@ -395,6 +402,10 @@ def process_single_pair(chat_id, name, ticker):
 def run_full_scan_background(chat_id):
     clear_filtered_logs(chat_id)
     try:
+        if is_news_blackout_window():
+            bot.send_message(chat_id=chat_id, text="⚠️ Сканування скасовано: період підвищеної новинної волатильності.")
+            return
+
         session_str, session_code, hour = get_current_session_info()
         sent_signals_count = 0
         filtered_count = 0
@@ -442,7 +453,9 @@ def run_full_scan_background(chat_id):
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
                     volatility_ratio, wick_ratio, ema_dist
                 )
-                if win_probability < 0.52:
+                
+                # Пороговий відбір ML під час сканування (58%)
+                if win_probability < 0.58:
                     filtered_count += 1
                     log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
                     save_filtered_log(chat_id, log_msg)
@@ -475,7 +488,7 @@ def run_full_scan_background(chat_id):
                     if is_ai_busy:
                         ai_reason = "ШІ зайнятий (пройдено за індикаторами)"
                         ai_confidence = 7
-                    elif decision != "YES" or ai_confidence < 6:
+                    elif decision != "YES" or ai_confidence < 7:
                         filtered_count += 1
                         log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
                         save_filtered_log(chat_id, log_msg)
