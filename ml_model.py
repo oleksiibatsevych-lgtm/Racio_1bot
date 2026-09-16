@@ -39,10 +39,11 @@ class TradingMLFilter:
                                    volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
         if self.model is None:
             base = 0.58
-            if rsi < 35 or rsi > 65: base += 0.06
+            if rsi < 35 or rsi > 65: base += 0.05
             if adx > 25: base += 0.05
             if divergence != "NONE": base += 0.08
             if wick_ratio >= 0.40: base += 0.05
+            if 0.8 <= volatility_ratio <= 1.8: base += 0.04
             return min(round(base, 2), 0.95)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist)
