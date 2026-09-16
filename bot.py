@@ -1,3 +1,4 @@
+# bot.py
 import os
 import io
 import time
@@ -40,6 +41,9 @@ ml_filter = TradingMLFilter()
 ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
+
+# Ініціалізація PostgreSQL
+database.init_db()
 
 def init_logs_db():
     try:
@@ -124,7 +128,7 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
         }
-        url = f"[https://query2.finance.yahoo.com/v8/finance/chart/](https://query2.finance.yahoo.com/v8/finance/chart/){ticker}"
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
         params = {"interval": interval, "range": range_period}
         
         if curl_requests:
@@ -199,14 +203,18 @@ def process_signal_expiration(sig_id):
                 res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
 
             orig_txt = res_data["message_text"]
-            if "🏁 Результат" not in orig_txt:
+            if orig_txt and "🏁 Результат" not in orig_txt:
                 bot.edit_message_text(chat_id=res_data["chat_id"], message_id=res_data["message_id"], text=f"{orig_txt}\n{res_icon}")
     except Exception as e:
         logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
 
-def schedule_signal_timer(sig_id, timestamp_str, expiration_mins):
+def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
     try:
-        signal_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+        if isinstance(timestamp_val, datetime):
+            signal_time = timestamp_val
+        else:
+            signal_time = datetime.strptime(str(timestamp_val), "%Y-%m-%d %H:%M:%S")
+            
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
         delay = max((expiry_time - datetime.utcnow()).total_seconds(), 1)
         timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
@@ -220,13 +228,18 @@ def restore_pending_timers():
     for i, row in enumerate(pending):
         sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
         try:
-            expiry_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S") + timedelta(minutes=expiration_mins)
+            if isinstance(timestamp_str, datetime):
+                signal_time = timestamp_str
+            else:
+                signal_time = datetime.strptime(str(timestamp_str), "%Y-%m-%d %H:%M:%S")
+                
+            expiry_time = signal_time + timedelta(minutes=expiration_mins)
             delay = max((expiry_time - datetime.utcnow()).total_seconds(), 2 + (i * 2))
             timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"⚠️ Помилка відновлення таймера {sig_id}: {e}")
     logger.info(f"⏳ Відновлено активних таймерів: {len(pending)}")
 
 restore_pending_timers()
@@ -368,6 +381,7 @@ def process_single_pair(chat_id, name, ticker):
         timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         sig_id = database.save_signal(
             ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
+            ai_decision="YES", ai_confidence=ai_confidence, ai_reason=ai_reason,
             rsi=rsi, adx=adx, bb_width=bb_width,
             session_code=session_code, hour=hour, divergence=divergence_str,
             dist_pivot=dist_pivot, message_text=msg_text,
@@ -501,6 +515,7 @@ def run_full_scan_background(chat_id):
                 timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 sig_id = database.save_signal(
                     ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
+                    ai_decision="YES", ai_confidence=ai_confidence, ai_reason=ai_reason,
                     rsi=rsi, adx=adx, bb_width=bb_width,
                     session_code=session_code, hour=hour, divergence=divergence_str,
                     dist_pivot=dist_pivot, message_text=msg_text,
