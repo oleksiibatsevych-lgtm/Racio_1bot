@@ -20,17 +20,13 @@ class AdaptiveTechnicalAnalysis:
         rs = avg_gain / (avg_loss + 1e-10)
         df['rsi'] = (100 - (100 / (1 + rs))).fillna(50)
 
-        # 2. Bollinger Bands + %B Oscillator
+        # 2. Bollinger Bands
         sma = df['close'].rolling(window=20).mean()
         std = df['close'].rolling(window=20).std()
         df['bb_upper'] = sma + (std * 2)
         df['bb_lower'] = sma - (std * 2)
         df['bb_middle'] = sma
         df['bb_width'] = ((df['bb_upper'] - df['bb_lower']) / (sma + 1e-10)).fillna(0.001)
-        df['bb_width_ma'] = df['bb_width'].rolling(window=20).mean().fillna(df['bb_width'])
-        
-        # Відносне положення ціни в каналі (%B) від 0.0 до 1.0
-        df['percent_b'] = ((df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'] + 1e-10)).fillna(0.5)
 
         # 3. ATR
         high = df['high']
@@ -67,10 +63,6 @@ class AdaptiveTechnicalAnalysis:
         # 5. EMA
         df['ema_10'] = df['close'].ewm(span=10, adjust=False).mean()
         df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
-
-        # 6. Volume
-        if 'volume' in df.columns:
-            df['volume_ma'] = df['volume'].rolling(window=20).mean().fillna(df['volume'])
         
         return df
 
@@ -105,7 +97,7 @@ class AdaptiveTechnicalAnalysis:
         p = (high + low + close) / 3
         return {"P": p, "R1": (2 * p) - low, "S1": (2 * p) - high, "R2": p + (high - low), "S2": p - (high - low)}
 
-    def detect_divergence(self, df, window=35):
+    def detect_divergence(self, df, window=30):
         if df.empty or 'rsi' not in df.columns or len(df) < window:
             return "NONE"
             
@@ -174,40 +166,19 @@ class AdaptiveTechnicalAnalysis:
                 'wick_ratio': 0.0, 'ema_dist': 0.0
             }
 
-        # 1. Конфлікт трендів 1h та 15m
-        if global_trend != mid_trend and global_trend != 'NEUTRAL' and mid_trend != 'NEUTRAL':
-            return {
-                'signal': 'HOLD', 'reason': 'Конфлікт трендів між 1h та 15m', 'suggested_exp': 5,
-                'rsi': 50, 'adx': 20, 'atr': 0.001, 'volatility_ratio': 1.0,
-                'wick_ratio': 0.0, 'ema_dist': 0.0
-            }
-
         last_5m = df_5m.iloc[-2] if len(df_5m) >= 2 else df_5m.iloc[-1]
         last_1m = df_1m.iloc[-2] if len(df_1m) >= 2 else df_1m.iloc[-1]
         
         rsi_5m, rsi_1m = float(last_5m.get('rsi', 50)), float(last_1m.get('rsi', 50))
         adx, atr = float(last_5m.get('adx', 20)), float(last_5m.get('atr', 0.001))
+        bb_upper, bb_lower = float(last_5m.get('bb_upper', 0)), float(last_5m.get('bb_lower', 0))
         close_5m, close_1m = float(last_5m['close']), float(last_1m['close'])
-        pct_b_1m = float(last_1m.get('percent_b', 0.5))
-        pct_b_5m = float(last_5m.get('percent_b', 0.5))
         ema_50 = float(last_5m.get('ema_50', close_5m))
         
         atr_ma = df_5m['atr'].rolling(20).mean().iloc[-2] if len(df_5m) >= 20 else atr
         volatility_ratio = float(atr / (atr_ma + 1e-10))
-
-        if volatility_ratio < 0.6 or volatility_ratio > 2.5:
-            return {
-                'signal': 'HOLD', 'reason': 'Аномальна волатильність', 'suggested_exp': 5,
-                'rsi': round(rsi_5m, 1), 'adx': round(adx, 1), 'atr': atr, 'volatility_ratio': round(volatility_ratio, 3),
-                'wick_ratio': 0.0, 'ema_dist': 0.0
-            }
-
-        vol_1m = float(last_1m.get('volume', 0))
-        vol_ma_1m = float(df_1m['volume_ma'].iloc[-2]) if 'volume_ma' in df_1m.columns and len(df_1m) >= 2 else 1.0
-        volume_ratio = vol_1m / (vol_ma_1m + 1e-10) if vol_ma_1m > 0 else 1.0
-
         ema_dist = float((close_5m - ema_50) / (ema_50 + 1e-10))
-        div = self.detect_divergence(df_5m, window=35)
+        div = self.detect_divergence(df_5m, window=30)
 
         pivots = self.calculate_pivots(df_daily) if df_daily is not None and not df_daily.empty else {}
         r1, s1 = pivots.get('R1', 0), pivots.get('S1', 0)
@@ -217,89 +188,69 @@ class AdaptiveTechnicalAnalysis:
         call_reasons, put_reasons = [], []
         is_pivot_rejection = False
 
-        # ==========================================
-        # 🟢 ОЦІНКА УМОВ ДЛЯ КУПІВЛІ (CALL)
-        # ==========================================
-        # Точний відбій від нижньої межі BB (%B <= 0.20)
-        if pct_b_1m <= 0.20 or pct_b_5m <= 0.20:
-            call_score += 30
-            call_reasons.append("Відбій від BB Lower (%B <= 0.20)")
-
-        if s1 > 0 and close_5m <= s1 * 1.0015:
+        if bb_lower > 0 and close_1m <= bb_lower * 1.001:
+            call_score += 25
+            call_reasons.append("Відбій від BB Lower")
+        if s1 > 0 and close_5m <= s1 * 1.002:
             call_score += 20
             call_reasons.append("Підтримка Pivot S1")
             is_pivot_rejection = True
 
-        if div == 'BULLISH_DIV':
-            call_score += 35
-            call_reasons.append("🎯 Бичача дивергенція")
-
-        if rsi_1m < 38 and rsi_5m < 48:
-            call_score += 20
-            call_reasons.append(f"Перепроданість RSI ({rsi_1m:.1f})")
-
-        call_wick = self.get_wick_ratio(last_1m, 'CALL')
-        if call_wick >= 0.40:
-            call_score += 25 if volume_ratio >= 1.2 else 15
-            call_reasons.append(f"Ґніт CALL ({round(call_wick*100)}%)")
-
-        if effective_trend == 'BULLISH':
-            call_score += 15
-            call_reasons.append("За трендом B")
-
-        # ==========================================
-        # 🔴 ОЦІНКА УМОВ ДЛЯ ПРОДАЖУ (PUT)
-        # ==========================================
-        # Точний відбій від верхньої межі BB (%B >= 0.80)
-        if pct_b_1m >= 0.80 or pct_b_5m >= 0.80:
-            put_score += 30
-            put_reasons.append("Відбій від BB Upper (%B >= 0.80)")
-
-        if r1 > 0 and close_5m >= r1 * 0.9985:
+        if bb_upper > 0 and close_1m >= bb_upper * 0.999:
+            put_score += 25
+            put_reasons.append("Відбій від BB Upper")
+        if r1 > 0 and close_5m >= r1 * 0.998:
             put_score += 20
             put_reasons.append("Опір Pivot R1")
             is_pivot_rejection = True
 
-        if div == 'BEARISH_DIV':
+        if div == 'BULLISH_DIV':
+            call_score += 35
+            call_reasons.append("🎯 Бичача дивергенція (+35)")
+        elif div == 'BEARISH_DIV':
             put_score += 35
-            put_reasons.append("🎯 Ведмежа дивергенція")
+            put_reasons.append("🎯 Ведмежа дивергенція (+35)")
 
-        if rsi_1m > 62 and rsi_5m > 52:
+        if rsi_1m < 35 or rsi_5m < 40:
+            call_score += 20
+            call_reasons.append(f"Перепроданість RSI ({rsi_1m:.1f})")
+        if rsi_1m > 65 or rsi_5m > 60:
             put_score += 20
             put_reasons.append(f"Перекупленість RSI ({rsi_1m:.1f})")
 
+        call_wick = self.get_wick_ratio(last_1m, 'CALL')
         put_wick = self.get_wick_ratio(last_1m, 'PUT')
-        if put_wick >= 0.40:
-            put_score += 25 if volume_ratio >= 1.2 else 15
-            put_reasons.append(f"Ґніт PUT ({round(put_wick*100)}%)")
 
-        if effective_trend == 'BEARISH':
+        if call_wick >= 0.40:
+            call_score += 15
+            call_reasons.append(f"Ґніт відскоку CALL ({round(call_wick*100)}%)")
+        if put_wick >= 0.40:
+            put_score += 15
+            put_reasons.append(f"Ґніт відскоку PUT ({round(put_wick*100)}%)")
+
+        if effective_trend == 'BULLISH':
+            call_score += 15
+            call_reasons.append("За трендом B")
+        elif effective_trend == 'BEARISH':
             put_score += 15
             put_reasons.append("За трендом S")
 
-        # ==========================================
-        # 🛡 СУВОРІ ФІЛЬТРИ ВЗАЄМОВИКЛЮЧЕННЯ (HARD VETO)
-        # ==========================================
-        # CALL БЛОКУЄТЬСЯ, якщо ціна у верхній половині каналу (%B > 0.50) або RSI > 50
-        if pct_b_1m > 0.50 or rsi_5m >= 52 or rsi_1m >= 55:
-            call_score = 0
-            call_reasons = []
+        threshold_call = 50 if div == 'BULLISH_DIV' else 60
+        threshold_put = 50 if div == 'BEARISH_DIV' else 60
 
-        # PUT БЛОКУЄТЬСЯ, якщо ціна у нижній половині каналу (%B < 0.50) або RSI < 50
-        if pct_b_1m < 0.50 or rsi_5m <= 48 or rsi_1m <= 45:
-            put_score = 0
-            put_reasons = []
+        if adx > 35:
+            if div == 'BULLISH_DIV' and global_trend == 'BEARISH': call_score -= 20
+            elif div == 'BEARISH_DIV' and global_trend == 'BULLISH': put_score -= 20
 
-        threshold = 60
         signal = 'HOLD'
-        reason = 'Умови не виконано / Блокування суперечностей індикаторів'
+        reason = 'Недостатньо конфлюентності'
         wick_ratio = 0.0
 
-        if call_score >= threshold and call_score > put_score:
+        if call_score >= threshold_call and call_score > put_score:
             signal = 'CALL'
             reason = " + ".join(call_reasons)
             wick_ratio = call_wick
-        elif put_score >= threshold and put_score > call_score:
+        elif put_score >= threshold_put and put_score > call_score:
             signal = 'PUT'
             reason = " + ".join(put_reasons)
             wick_ratio = put_wick
