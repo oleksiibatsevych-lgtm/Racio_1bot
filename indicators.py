@@ -158,10 +158,19 @@ class AdaptiveTechnicalAnalysis:
         except Exception:
             return 5
 
-    def generate_signal(self, df_1m, df_5m, global_trend, mid_trend, df_daily=None):
+    def generate_signal(self, df_1m, df_5m, global_trend="NEUTRAL", mid_trend="NEUTRAL", df_daily=None):
+        # Гнучка сумісність: якщо у якості global_trend передано DataFrame (наприклад, df_macro з bot.py)
+        if isinstance(global_trend, pd.DataFrame):
+            df_macro = global_trend
+            global_trend = self.get_trend(df_macro, span_val=200)
+            mid_trend = self.get_trend(df_5m, span_val=50)
+            if df_daily is None:
+                df_daily = df_macro
+
         if df_5m.empty or len(df_5m) < 20 or df_1m.empty or len(df_1m) < 20:
             return {
                 'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5, 
+                'expiration_minutes': 5, 'strategy': 'HOLD', 'priority': 1,
                 'rsi': 50, 'adx': 20, 'atr': 0.001, 'volatility_ratio': 1.0, 
                 'wick_ratio': 0.0, 'ema_dist': 0.0
             }
@@ -187,29 +196,43 @@ class AdaptiveTechnicalAnalysis:
         call_score, put_score = 0, 0
         call_reasons, put_reasons = [], []
         is_pivot_rejection = False
+        strategy_name = "Технічний сигнал"
+        priority = 3
 
         if bb_lower > 0 and close_1m <= bb_lower * 1.001:
             call_score += 25
             call_reasons.append("Відбій від BB Lower")
+            strategy_name = "Bollinger Bands Відбій"
+            priority = 4
         if s1 > 0 and close_5m <= s1 * 1.002:
             call_score += 20
             call_reasons.append("Підтримка Pivot S1")
             is_pivot_rejection = True
+            strategy_name = "Pivot S1 Відбій"
+            priority = 4
 
         if bb_upper > 0 and close_1m >= bb_upper * 0.999:
             put_score += 25
             put_reasons.append("Відбій від BB Upper")
+            strategy_name = "Bollinger Bands Відбій"
+            priority = 4
         if r1 > 0 and close_5m >= r1 * 0.998:
             put_score += 20
             put_reasons.append("Опір Pivot R1")
             is_pivot_rejection = True
+            strategy_name = "Pivot R1 Відбій"
+            priority = 4
 
         if div == 'BULLISH_DIV':
             call_score += 35
             call_reasons.append("🎯 Бичача дивергенція (+35)")
+            strategy_name = "Дивергенція RSI"
+            priority = 5
         elif div == 'BEARISH_DIV':
             put_score += 35
             put_reasons.append("🎯 Ведмежа дивергенція (+35)")
+            strategy_name = "Дивергенція RSI"
+            priority = 5
 
         if rsi_1m < 35 or rsi_5m < 40:
             call_score += 20
@@ -233,7 +256,7 @@ class AdaptiveTechnicalAnalysis:
             call_reasons.append("За трендом B")
         elif effective_trend == 'BEARISH':
             put_score += 15
-            put_reasons.append("За трендом S")
+            call_reasons.append("За трендом S")
 
         threshold_call = 50 if div == 'BULLISH_DIV' else 60
         threshold_put = 50 if div == 'BEARISH_DIV' else 60
@@ -262,8 +285,17 @@ class AdaptiveTechnicalAnalysis:
         )
 
         return {
-            'signal': signal, 'rsi': round(rsi_5m, 1), 'adx': round(adx, 1), 'atr': atr,
-            'divergence': div, 'suggested_exp': suggested_exp, 'reason': reason,
-            'volatility_ratio': round(volatility_ratio, 3), 'wick_ratio': round(wick_ratio, 3),
+            'signal': signal, 
+            'rsi': round(rsi_5m, 1), 
+            'adx': round(adx, 1), 
+            'atr': atr,
+            'divergence': div, 
+            'suggested_exp': suggested_exp, 
+            'expiration_minutes': suggested_exp,
+            'strategy': strategy_name, 
+            'priority': priority, 
+            'reason': reason,
+            'volatility_ratio': round(volatility_ratio, 3), 
+            'wick_ratio': round(wick_ratio, 3),
             'ema_dist': round(ema_dist, 5)
         }
