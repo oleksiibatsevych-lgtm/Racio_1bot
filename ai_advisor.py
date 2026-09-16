@@ -17,11 +17,10 @@ class AITradingAdvisor:
             except Exception as e:
                 logger.error(f"⚠️ Помилка конфігурації Gemini API: {e}")
 
-        # Список перевірених назв моделей
+        # Актуальні робочі моделі Gemini
         self.gemini_models = [
             "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro"
+            "gemini-1.5-flash"
         ]
 
     def _evaluate_with_openrouter(self, prompt):
@@ -47,7 +46,7 @@ class AITradingAdvisor:
                 "messages": [{"role": "user", "content": prompt}]
             }
             try:
-                response = requests.post(url, headers=headers, json=payload, timeout=12)
+                response = requests.post(url, headers=headers, json=payload, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     res_text = data["choices"][0]["message"]["content"]
@@ -82,11 +81,9 @@ class AITradingAdvisor:
         """
 
         response_text = None
-        last_error = ""
 
-        # 1. Основна спроба: Gemini
+        # 1. Спроба: Gemini
         if self.gemini_key:
-            # Конвертація графіків у прямий формат байтів dict (без використання PIL.Image)
             images_parts = []
             for chart in [macro_chart, mid_chart, micro_chart]:
                 if chart:
@@ -120,25 +117,22 @@ class AITradingAdvisor:
                         response_text = resp.text
                         logger.info(f"✅ Успішний аналіз через Gemini ({model_name})")
                         break
-                    elif resp and resp.prompt_feedback:
-                        last_error = f"Blocked by safety filter: {resp.prompt_feedback}"
                 except Exception as e:
-                    last_error = str(e)
                     logger.warning(f"⚠️ Збій Gemini ({model_name}): {e}")
 
-        # 2. Резервна спроба: OpenRouter
+        # 2. Спроба: OpenRouter
         if not response_text and self.openrouter_key:
             logger.info("🔄 Gemini недоступна. Перемикання на OpenRouter...")
             response_text = self._evaluate_with_openrouter(prompt)
 
-        # 3. Якщо відповіді немає
+        # 3. ФОЛБЕК: При недоступності ШІ пропускаємо за індикаторами (YES)
         if not response_text:
-            error_msg = f"Деталі: {last_error}" if last_error else "Перевірте GEMINI_API_KEY"
+            logger.info(f"ℹ️ ШІ недоступний для {name}. Сигнал пропущено за індикаторами.")
             return {
-                "decision": "NO",
-                "confidence": 1,
+                "decision": "YES",
+                "confidence": 7,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": f"ШІ недоступний. {error_msg}"
+                "reason": "ШІ недоступний (пройдено за індикаторами)"
             }
 
         try:
@@ -150,16 +144,16 @@ class AITradingAdvisor:
 
             result = json.loads(clean_text)
             return {
-                "decision": result.get("decision", "NO"),
-                "confidence": int(result.get("confidence", 5)),
+                "decision": result.get("decision", "YES"),
+                "confidence": int(result.get("confidence", 7)),
                 "suggested_expiration": int(result.get("suggested_expiration", payload.get('suggested_exp', 5))),
                 "reason": result.get("reason", "Схвалено ШІ")
             }
         except Exception as e:
             logger.error(f"⚠️ Помилка парсингу JSON від ШІ: {e}")
             return {
-                "decision": "NO",
-                "confidence": 1,
+                "decision": "YES",
+                "confidence": 7,
                 "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "Помилка обробки JSON відповіді"
+                "reason": "ШІ недоступний (помилка JSON, пройдено за індикаторами)"
             }
