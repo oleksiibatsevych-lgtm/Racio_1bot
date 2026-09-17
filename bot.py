@@ -18,10 +18,10 @@ except ImportError:
     curl_requests = None
 
 from config import TELEGRAM_TOKEN, PAIRS_MAP
-from indicators_3 import AdaptiveTechnicalAnalysis
+from indicators import AdaptiveTechnicalAnalysis
 import database
 from ml_model import TradingMLFilter
-from ai_advisor_3 import AITradingAdvisor
+from ai_advisor import AITradingAdvisor
 from charts import create_chart_image
 
 logging.basicConfig(
