@@ -187,67 +187,75 @@ class AdaptiveTechnicalAnalysis:
         priority, suggested_exp = 4, 5
         wick_ratio_final = 0.0
 
-        # ПРІОРИТЕТ 1: Трендовий Імпульс
+        # --- ДИНАМІЧНИЙ РОЗРАХУНОК ЕКСПІРАЦІЇ НА ОСНОВІ ATR / ВОЛАТИЛЬНОСТІ ---
+        if volatility_ratio > 1.3:
+            base_exp = 3  # Висока волатильність — швидкий імпульс
+        elif volatility_ratio < 0.8:
+            base_exp = 10 # Низька волатильність — повільний рух
+        else:
+            base_exp = 5  # Стандарт
+
+        # ПРІОРИТЕТ 1: Трендовий Імпульс (з перевіркою обсягу по VWAP)
         if adx >= 25 and volatility_ratio >= 1.15 and ema_9 > ema_21 and close_5m > vwap_20 and macd_hist > 0:
             signal = 'CALL'
             strategy_name = 'Трендовий Імпульс (BUY)'
             priority = 1
-            suggested_exp = int(7)
+            suggested_exp = max(3, base_exp)
             wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
-            reason = f"Волатильність + Об'єм (ADX: {adx:.1f}, MACD+)"
+            reason = f"Волатильність + VWAP об'єм (ADX: {adx:.1f}, MACD+)"
         elif adx >= 25 and volatility_ratio >= 1.15 and ema_9 < ema_21 and close_5m < vwap_20 and macd_hist < 0:
             signal = 'PUT'
             strategy_name = 'Трендовий Імпульс (SELL)'
             priority = 1
-            suggested_exp = int(7)
+            suggested_exp = max(3, base_exp)
             wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
-            reason = f"Волатильність + Об'єм (ADX: {adx:.1f}, MACD-)"
+            reason = f"Волатильність + VWAP об'єм (ADX: {adx:.1f}, MACD-)"
 
         # ПРІОРИТЕТ 2: HTF Макро-Тренд / Дивергенції
         elif 'BULLISH_DIV' in div_5m or (global_trend == 'BULLISH' and s2 > 0 and close_5m <= s2 * 1.002):
             signal = 'CALL'
             strategy_name = 'HTF Макро / Розворот'
             priority = 2
-            suggested_exp = int(20)
+            suggested_exp = 15 if base_exp < 10 else 20
             wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
             reason = f"Макро-сигнал / Дивергенція ({div_5m})"
         elif 'BEARISH_DIV' in div_5m or (global_trend == 'BEARISH' and r2 > 0 and close_5m >= r2 * 0.998):
             signal = 'PUT'
             strategy_name = 'HTF Макро / Розворот'
             priority = 2
-            suggested_exp = int(20)
+            suggested_exp = 15 if base_exp < 10 else 20
             wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
             reason = f"Макро-сигнал / Дивергенція ({div_5m})"
 
-        # ПРІОРИТЕТ 3: M5 Конфлюентність (з додаванням Стохастика)
-        elif adx < 25 and ((s1 > 0 and close_5m <= s1 * 1.002) or (rsi_5m <= 42 and stoch_k_5m < 25)):
+        # ПРІОРИТЕТ 3: M5 Конфлюентність (розширені зони RSI 30/70 та Стохастик)
+        elif adx < 25 and ((s1 > 0 and close_5m <= s1 * 1.003) or (rsi_5m <= 45 and stoch_k_5m < 30)):
             signal = 'CALL'
-            strategy_name = 'M5 Конфлюентність'
+            strategy_name = 'M5 Конфлюентність (Гнучка)'
             priority = 3
-            suggested_exp = int(5)
+            suggested_exp = base_exp
             wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
-            reason = f"S1 / Перепроданість (RSI: {rsi_5m:.1f}, Stoch: {stoch_k_5m:.1f})"
-        elif adx < 25 and ((r1 > 0 and close_5m >= r1 * 0.998) or (rsi_5m >= 58 and stoch_k_5m > 75)):
+            reason = f"S1 / М'яка перепроданість (RSI: {rsi_5m:.1f}, Stoch: {stoch_k_5m:.1f})"
+        elif adx < 25 and ((r1 > 0 and close_5m >= r1 * 0.997) or (rsi_5m >= 55 and stoch_k_5m > 70)):
             signal = 'PUT'
-            strategy_name = 'M5 Конфлюентність'
+            strategy_name = 'M5 Конфлюентність (Гнучка)'
             priority = 3
-            suggested_exp = int(5)
+            suggested_exp = base_exp
             wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
-            reason = f"R1 / Перекупленість (RSI: {rsi_5m:.1f}, Stoch: {stoch_k_5m:.1f})"
+            reason = f"R1 / М'яка перекупленість (RSI: {rsi_5m:.1f}, Stoch: {stoch_k_5m:.1f})"
 
         # ПРІОРИТЕТ 4: M1 Скальпінг (з підтвердженням Стохастиком)
         elif pct_b_1m <= 0.15 and rsi_1m <= 35 and stoch_k_1m <= 20:
             signal = 'CALL'
             strategy_name = 'M1 Скальпінг (Відбиття)'
             priority = 4
-            suggested_exp = int(2)
+            suggested_exp = 2
             wick_ratio_final = float(last_1m.get('lower_wick_ratio', 0.0))
             reason = f"%B ({pct_b_1m:.2f}), RSI M1 ({rsi_1m:.1f}), Stoch ({stoch_k_1m:.1f})"
         elif pct_b_1m >= 0.85 and rsi_1m >= 65 and stoch_k_1m >= 80:
             signal = 'PUT'
             strategy_name = 'M1 Скальпінг (Відбиття)'
             priority = 4
-            suggested_exp = int(2)
+            suggested_exp = 2
             wick_ratio_final = float(last_1m.get('upper_wick_ratio', 0.0))
             reason = f"%B ({pct_b_1m:.2f}), RSI M1 ({rsi_1m:.1f}), Stoch ({stoch_k_1m:.1f})"
 
