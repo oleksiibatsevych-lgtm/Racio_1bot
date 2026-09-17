@@ -190,7 +190,8 @@ def process_signal_expiration(sig_id):
     try:
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
-            pips_val = res_data['pips']
+            # Округлюємо пункти до цілого числа
+            pips_val = int(round(float(res_data['pips'])))
             pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
             
             res_result = res_data['result']
