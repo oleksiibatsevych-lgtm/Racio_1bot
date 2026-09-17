@@ -15,7 +15,7 @@ class TradingMLFilter:
             try:
                 with open(self.model_path, "rb") as f:
                     return pickle.load(f)
-            except:
+            except Exception:
                 pass
         return None
 
@@ -23,12 +23,12 @@ class TradingMLFilter:
         try:
             with open(self.model_path, "wb") as f:
                 pickle.dump(self.model, f)
-        except:
+        except Exception:
             pass
 
     def extract_features(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0,
                          volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
-        div_encoded = 1 if divergence != "NONE" else 0
+        div_encoded = 1 if divergence and divergence != "NONE" else 0
         return [[
             float(rsi), float(adx), float(bb_width), int(session_code), int(hour), 
             int(div_encoded), float(dist_pivot), float(volatility_ratio), float(wick_ratio), float(ema_dist)
@@ -40,14 +40,15 @@ class TradingMLFilter:
             base = 0.58
             if rsi < 35 or rsi > 65: base += 0.06
             if adx > 25: base += 0.05
-            if divergence != "NONE": base += 0.08
+            if divergence and divergence != "NONE": base += 0.08
             if wick_ratio >= 0.40: base += 0.05
             return min(round(base, 2), 0.95)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist)
+            # Перевіряємо, чи є у моделі метод predict_proba і чи відповідає кількість фіч
             proba = self.model.predict_proba(X)[0][1]
             return float(proba)
-        except:
+        except Exception:
             return 0.62
 
     def train_model(self):
@@ -73,19 +74,19 @@ class TradingMLFilter:
                 return False, "⚠️ Замало завершених угод для навчання ШІ (мінімум 10)."
 
             df['target'] = df['result'].apply(lambda x: 1 if x == 'WIN' else 0)
-            df['div_encoded'] = df['divergence'].apply(lambda x: 1 if x != "NONE" else 0)
+            df['div_encoded'] = df['divergence'].apply(lambda x: 1 if x and str(x) != "NONE" else 0)
 
             X = np.column_stack([
-                df['rsi'].fillna(50),
-                df['adx'].fillna(20),
-                df['bb_width'].fillna(0.001),
-                df['session_code'].fillna(1),
-                df['hour'].fillna(12),
-                df['div_encoded'],
-                df['dist_pivot'].fillna(0.0),
-                df['volatility_ratio'].fillna(1.0),
-                df['wick_ratio'].fillna(0.0),
-                df['ema_dist'].fillna(0.0)
+                df['rsi'].fillna(50).astype(float),
+                df['adx'].fillna(20).astype(float),
+                df['bb_width'].fillna(0.001).astype(float),
+                df['session_code'].fillna(1).astype(int),
+                df['hour'].fillna(12).astype(int),
+                df['div_encoded'].astype(int),
+                df['dist_pivot'].fillna(0.0).astype(float),
+                df['volatility_ratio'].fillna(1.0).astype(float),
+                df['wick_ratio'].fillna(0.0).astype(float),
+                df['ema_dist'].fillna(0.0).astype(float)
             ])
             y = df['target'].values
 
