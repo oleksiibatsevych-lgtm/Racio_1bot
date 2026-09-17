@@ -293,6 +293,14 @@ def process_single_pair(chat_id, name, ticker):
             bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}")
             return
 
+        # Обчислюємо технічні індикатори для всіх датафреймів перед аналізом
+        if not df_daily.empty:
+            df_daily = analyzer.calculate_indicators(df_daily)
+        df_macro = analyzer.calculate_indicators(df_macro)
+        df_mid = analyzer.calculate_indicators(df_mid)
+        df_fast = analyzer.calculate_indicators(df_fast)
+        df_micro = analyzer.calculate_indicators(df_micro)
+
         global_trend = analyzer.get_trend(df_macro, span_val=200)
         mid_trend = analyzer.get_trend(df_mid, span_val=50)
         pivots = analyzer.calculate_pivots(df_daily if not df_daily.empty else df_macro)
