@@ -64,6 +64,9 @@ class AITradingAdvisor:
         - Технічна причина: {payload.get('reason')}
         - ATR: {payload.get('atr')}
         - Розрахована динамічна експірація: {payload.get('suggested_exp')} хв
+        - Відстань до EMA: {payload.get('ema_dist', 0)}%
+        - Wick Ratio (відношення тіні): {payload.get('wick_ratio', 0)}
+        - Волатильність: {payload.get('volatility_ratio', 1)}
 
         Оціни доцільність входу в угоду та підтвердь або скоригуй час експірації залежно від динаміки ринку.
         Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи Markdown обгородок:
