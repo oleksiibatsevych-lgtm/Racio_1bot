@@ -297,6 +297,16 @@ def process_single_pair(chat_id, name, ticker):
         rsi = sig_data.get('rsi', 50)
         adx = sig_data.get('adx', 20)
         bb_width = float(df_fast['bb_width'].iloc[-2]) if 'bb_width' in df_fast.columns and len(df_fast) >= 2 else 0.001
+        
+        # Безпечний розрахунок %B для 1m таймфрейму (вирішує проблему NameError)
+        pct_b_1m = 0.5
+        if 'bb_lower' in df_micro.columns and 'bb_upper' in df_micro.columns and len(df_micro) >= 2:
+            lower_b = float(df_micro['bb_lower'].iloc[-2])
+            upper_b = float(df_micro['bb_upper'].iloc[-2])
+            close_1m = float(df_micro['close'].iloc[-2])
+            if (upper_b - lower_b) != 0:
+                pct_b_1m = (close_1m - lower_b) / (upper_b - lower_b)
+
         divergence_str = str(sig_data.get('divergence', 'NONE'))
         volatility_ratio = sig_data.get('volatility_ratio', 1.0)
         wick_ratio = sig_data.get('wick_ratio', 0.0)
@@ -309,7 +319,6 @@ def process_single_pair(chat_id, name, ticker):
         current_price = float(df_fast['close'].iloc[-2]) if len(df_fast) >= 2 else float(df_fast['close'].iloc[-1])
         dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
         
-        # Пом'якшений поріг ML-фільтра (0.48) для збільшення потоку якісних сигналів
         win_probability = ml_filter.predict_signal_probability(
             rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
             volatility_ratio, wick_ratio, ema_dist
@@ -367,7 +376,6 @@ def process_single_pair(chat_id, name, ticker):
         icon = "🟢" if signal_type == "CALL" else "🔴"
         action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
         
-        # Покращений шаблон з повним розбором та прозорістю показників
         msg_text = (
             f"📊 **{name} ({ticker})**\n"
             f"{icon} **{action_text}** | ⏱ Експірація: {expiration} хв (Динамічна ATR)\n"
@@ -439,6 +447,15 @@ def run_full_scan_background(chat_id):
                 rsi = sig_data.get('rsi', 50)
                 adx = sig_data.get('adx', 20)
                 bb_width = float(df_fast['bb_width'].iloc[-2]) if 'bb_width' in df_fast.columns and len(df_fast) >= 2 else 0.001
+                
+                pct_b_1m = 0.5
+                if 'bb_lower' in df_micro.columns and 'bb_upper' in df_micro.columns and len(df_micro) >= 2:
+                    lower_b = float(df_micro['bb_lower'].iloc[-2])
+                    upper_b = float(df_micro['bb_upper'].iloc[-2])
+                    close_1m = float(df_micro['close'].iloc[-2])
+                    if (upper_b - lower_b) != 0:
+                        pct_b_1m = (close_1m - lower_b) / (upper_b - lower_b)
+
                 divergence_str = str(sig_data.get('divergence', 'NONE'))
                 volatility_ratio = sig_data.get('volatility_ratio', 1.0)
                 wick_ratio = sig_data.get('wick_ratio', 0.0)
@@ -451,20 +468,16 @@ def run_full_scan_background(chat_id):
                 current_price = float(df_fast['close'].iloc[-2]) if len(df_fast) >= 2 else float(df_fast['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
-                # Пом'якшений поріг ML-фільтра (0.48)
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
                     volatility_ratio, wick_ratio, ema_dist
                 )
                 if win_probability < 0.48:
                     filtered_count += 1
-                    log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
-                    save_filtered_log(chat_id, log_msg)
                     continue
                 
                 ai_confidence = 7
                 ai_reason = "ШІ зайнятий / пройдено за індикаторами"
-                ai_audit_failed = False
 
                 try:
                     macro_chart = create_chart_image(df_macro, name, tf_label="1h")
@@ -492,23 +505,17 @@ def run_full_scan_background(chat_id):
                         ai_confidence = 7
                     elif decision != "YES" or ai_confidence < 6:
                         filtered_count += 1
-                        log_msg = f"🤖 {name}: ШІ відхилив — {rejection_reason} (Впевненість: {ai_confidence}/10)"
-                        save_filtered_log(chat_id, log_msg)
-                        ai_audit_failed = True
+                        continue
                     else:
                         ai_reason = rejection_reason if rejection_reason else "Схвалено ШІ"
                         if ai_audit.get("suggested_expiration"):
                             calculated_expiration = int(ai_audit.get("suggested_expiration"))
                 except Exception as e:
-                    logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name}: {e}")
+                    logger.warning(f"⚠️ Ліміт або недоступність ШІ для {name} у фоновому скануванні: {e}")
                     ai_reason = "ШІ недоступний (пройдено за індикаторами)"
                     ai_confidence = 7
 
-                if ai_audit_failed:
-                    continue
-
-                sent_signals_count += 1
-                last_sent_signals[ticker] = time.time()  
+                last_sent_signals[ticker] = time.time()
                 expiration = calculated_expiration
                 
                 icon = "🟢" if signal_type == "CALL" else "🔴"
@@ -535,6 +542,7 @@ def run_full_scan_background(chat_id):
                     f"🛡 **Вердикт ШІ:** _{ai_reason}_"
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
+                sent_signals_count += 1
                 
                 timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 sig_id = database.save_signal(
@@ -546,82 +554,69 @@ def run_full_scan_background(chat_id):
                     volatility_ratio=volatility_ratio, wick_ratio=wick_ratio, ema_dist=ema_dist
                 )
                 schedule_signal_timer(sig_id, timestamp_str, expiration)
-                
-                time.sleep(5)
             except Exception as e:
-                logger.exception(f"Помилка обробки пари {ticker}: {e}")
-                
-        finish_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Переглянути чому відсіяно", callback_data="show_filtered_log")]])
+                logger.warning(f"⚠️ Помилка сканування пари {ticker}: {e}")
+
         bot.send_message(
-            chat_id=chat_id, 
-            text=f"✅ Сканування завершено!\n📤 Надіслано сигналів: {sent_signals_count}\n🛡 Відсіяно фільтрами (ML + ШІ): {filtered_count}",
-            reply_markup=finish_keyboard
+            chat_id=chat_id,
+            text=f"🏁 **Сканування завершено!**\n"
+                 f"• Відправлено сигналів: **{sent_signals_count}**\n"
+                 f"• Відсіяно фільтрами/ШІ: **{filtered_count}**",
+            parse_mode="Markdown"
         )
     except Exception as e:
-        logger.exception(f"Помилка у фоновому скануванні: {e}")
+        logger.exception(f"Помилка фонового сканування: {e}")
+        bot.send_message(chat_id=chat_id, text="❌ Сталася помилка під час масового сканування.")
 
-def handle_text_menu(update, context):
-    chat_id = update.message.chat_id
+def stats_command(update, context):
+    try:
+        stats = database.get_overall_stats()
+        text = (
+            f"📈 **Загальна статистика бота:**\n\n"
+            f"• Всього угод: `{stats.get('total', 0)}`\n"
+            f"• Успішних (WIN): `{stats.get('wins', 0)}` ✅\n"
+            f"• Збиткових (LOSS): `{stats.get('losses', 0)}` ❌\n"
+            f"• Нейтральних: `{stats.get('neutral', 0)}` ➖\n"
+            f"• В обробці (PENDING): `{stats.get('pending', 0)}` ⏳\n"
+            f"• Прохідність (WinRate): **{stats.get('winrate', 0.0)}%**"
+        )
+        update.message.reply_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.exception(f"Помилка статистики: {e}")
+        update.message.reply_text("⚠️ Не вдалося отримати статистику.")
+
+def handle_message(update, context):
     text = update.message.text
-    
-    if text == "💵 Пари":
-        pairs = list(PAIRS_MAP.items())
-        keyboard = []
-        for i in range(0, len(pairs), 2):
-            row = [InlineKeyboardButton(pairs[i][0], callback_data=f"scan_{pairs[i][1]}")]
-            if i + 1 < len(pairs): 
-                row.append(InlineKeyboardButton(pairs[i+1][0], callback_data=f"scan_{pairs[i+1][1]}"))
-            keyboard.append(row)
-        update.message.reply_text("📌 Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(keyboard))
-        
-    elif text == "📊 Аналіз усіх пар":
-        if is_news_blackout_window():
-            update.message.reply_text("⚠️ Увага: Зараз період підвищеної новинної волатильності. Сканування тимчасово призупинено.")
-            return
+    chat_id = update.message.chat_id
+    database.register_user(chat_id, update.message.from_user.username)
 
-        update.message.reply_text("🔄 Глибоке сканування запущено у фоновому режимі...")
+    if text == "📊 Аналіз усіх пар":
+        update.message.reply_text("🔍 Запускаю масове сканування ринку...")
         threading.Thread(target=run_full_scan_background, args=(chat_id,)).start()
-        
+    elif text == "💵 Пари":
+        keyboard = [[InlineKeyboardButton(name, callback_data=f"pair_{ticker}")] for name, ticker in PAIRS_MAP.items()]
+        update.message.reply_text("Виберіть валютну пару для аналізу:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif text == "📈 Статистика":
-        update.message.reply_text("🔄 Розрахунок правдивої статистики...")
-        try:
-            stats = database.get_overall_stats()
-            ml_filter.train_model()
-            stats_text = (
-                f"📈 Правдива статистика трейдингу:\n"
-                f"• Успішних угод (WIN): {stats.get('wins', 0)}\n"
-                f"• Нейтральних угод (BE): {stats.get('neutral', 0)}\n"
-                f"• Збиткових угод (LOSS): {stats.get('losses', 0)}\n"
-                f"• Усього перевірених угод: {stats.get('total', 0)}\n"
-                f"• Реальний вінрейт: {stats.get('winrate', 0.0)}%\n"
-                f"🧠 ML-фільтр перенавчено на актуальній базі!"
-            )
-            update.message.reply_text(stats_text)
-        except Exception as e:
-            logger.exception(f"Помилка отримання статистики: {e}")
-            update.message.reply_text("❌ Помилка при отриманні статистики.")
+        stats_command(update, context)
 
-def button_callback(update, context):
+def handle_callback(update, context):
     query = update.callback_query
     query.answer()
     data = query.data
     chat_id = query.message.chat_id
 
-    if data == "show_filtered_log":
-        logs = get_filtered_logs(chat_id)
-        text = "🛡 Останні відсіяні сигнали:\n\n" + "\n".join(logs[:15]) if logs else "ℹ️ Немає відсіяних сигналів за останню годину."
-        if len(text) > 4096: text = text[:4096]
-        query.message.reply_text(text)
-    elif data.startswith("scan_"):
-        ticker = data.replace("scan_", "")
-        pair_name = next((name for name, t in PAIRS_MAP.items() if t == ticker), ticker)
-        query.message.reply_text(f"🔄 Запуск аналізу для {pair_name} ({ticker})...")
-        threading.Thread(target=process_single_pair, args=(chat_id, pair_name, ticker)).start()
+    if data.startswith("pair_"):
+        ticker = data.replace("pair_", "")
+        name = next((n for n, t in PAIRS_MAP.items() if t == ticker), ticker)
+        query.edit_message_text(text=f"🔍 Аналізую пару {name}...")
+        threading.Thread(target=process_single_pair, args=(chat_id, name, ticker)).start()
 
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("train", train_ml_command))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_menu))
-dispatcher.add_handler(CallbackQueryHandler(button_callback))
+dispatcher.add_handler(CommandHandler("stats", stats_command))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+dispatcher.add_handler(CallbackQueryHandler(handle_callback))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
