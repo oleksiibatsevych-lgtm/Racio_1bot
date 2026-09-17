@@ -1,4 +1,3 @@
-# bot.py
 import os
 import io
 import time
@@ -288,8 +287,7 @@ def process_single_pair(chat_id, name, ticker):
         mid_trend = analyzer.get_trend(df_mid, span_val=50)
         pivots = analyzer.calculate_pivots(df_daily if not df_daily.empty else df_macro)
         
-        # Виклик оновленого аналізатора сигналів (враховує матрицю стратегій, пріоритети та Hard Veto)
-        sig_data = analyzer.generate_signal(df_micro, df_fast, df_macro)
+        sig_data = analyzer.generate_signal(df_micro, df_fast, global_trend, mid_trend, df_daily)
         
         signal_type = sig_data.get('signal')
         if signal_type not in ['CALL', 'PUT']:
@@ -304,7 +302,6 @@ def process_single_pair(chat_id, name, ticker):
         wick_ratio = sig_data.get('wick_ratio', 0.0)
         ema_dist = sig_data.get('ema_dist', 0.0)
         
-        # Отримання стратегії, пріоритету та часу експірації з оновленого індикаторного модуля
         strategy_name = sig_data.get('strategy', 'Технічний сигнал')
         strategy_priority = sig_data.get('priority', 3)
         calculated_expiration = sig_data.get('expiration_minutes', 5)
@@ -334,7 +331,8 @@ def process_single_pair(chat_id, name, ticker):
                 'signal': signal_type, 'adx': adx, 'global_trend': global_trend,
                 'mid_trend': mid_trend, 'reason': sig_data.get('reason'),
                 'rsi': rsi, 'atr': sig_data.get('atr'), 'suggested_exp': calculated_expiration,
-                'strategy': strategy_name, 'priority': strategy_priority
+                'strategy': strategy_name, 'priority': strategy_priority,
+                'wick_ratio': wick_ratio, 'ema_dist': ema_dist, 'volatility_ratio': volatility_ratio
             }
 
             ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -375,6 +373,7 @@ def process_single_pair(chat_id, name, ticker):
             f"🎯 Ціна входу: {current_price:.5f}\n"
             f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
             f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
+            f"📊 Волатильність: {volatility_ratio} | Тінь: {wick_ratio} | Відх. EMA: {ema_dist}%\n"
             f"🌐 Сесія: {session_str}\n"
             f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
             f"💡 Причина: {str(sig_data.get('reason'))}\n"
@@ -422,7 +421,7 @@ def run_full_scan_background(chat_id):
                 mid_trend = analyzer.get_trend(df_mid, span_val=50)
                 pivots = analyzer.calculate_pivots(df_daily if not df_daily.empty else df_macro)
                 
-                sig_data = analyzer.generate_signal(df_micro, df_fast, df_macro)
+                sig_data = analyzer.generate_signal(df_micro, df_fast, global_trend, mid_trend, df_daily)
                 
                 signal_type = sig_data.get('signal')
                 if signal_type not in ['CALL', 'PUT']:
@@ -466,7 +465,8 @@ def run_full_scan_background(chat_id):
                         'signal': signal_type, 'adx': adx, 'global_trend': global_trend,
                         'mid_trend': mid_trend, 'reason': sig_data.get('reason'),
                         'rsi': rsi, 'atr': sig_data.get('atr'), 'suggested_exp': calculated_expiration,
-                        'strategy': strategy_name, 'priority': strategy_priority
+                        'strategy': strategy_name, 'priority': strategy_priority,
+                        'wick_ratio': wick_ratio, 'ema_dist': ema_dist, 'volatility_ratio': volatility_ratio
                     }
 
                     ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
@@ -511,6 +511,7 @@ def run_full_scan_background(chat_id):
                     f"🎯 Ціна входу: {current_price:.5f}\n"
                     f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
                     f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
+                    f"📊 Волатильність: {volatility_ratio} | Тінь: {wick_ratio} | Відх. EMA: {ema_dist}%\n"
                     f"🌐 Сесія: {session_str}\n"
                     f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
                     f"💡 Причина: {str(sig_data.get('reason'))}\n"
