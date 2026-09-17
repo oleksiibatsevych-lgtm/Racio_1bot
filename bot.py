@@ -41,7 +41,7 @@ ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
 
-# Ініціалізація PostgreSQL
+# Ініціалізація бази даних
 database.init_db()
 
 def init_logs_db():
@@ -190,7 +190,6 @@ def process_signal_expiration(sig_id):
     try:
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
-            # Округлюємо пункти до цілого числа
             pips_val = int(round(float(res_data['pips'])))
             pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
             
@@ -310,11 +309,12 @@ def process_single_pair(chat_id, name, ticker):
         current_price = float(df_fast['close'].iloc[-2]) if len(df_fast) >= 2 else float(df_fast['close'].iloc[-1])
         dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
         
+        # Пом'якшений поріг ML-фільтра (0.48) для збільшення потоку якісних сигналів
         win_probability = ml_filter.predict_signal_probability(
             rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
             volatility_ratio, wick_ratio, ema_dist
         )
-        if win_probability < 0.52:
+        if win_probability < 0.48:
             log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
             save_filtered_log(chat_id, log_msg)
             bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно фільтром.")
@@ -367,18 +367,26 @@ def process_single_pair(chat_id, name, ticker):
         icon = "🟢" if signal_type == "CALL" else "🔴"
         action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
         
+        # Покращений шаблон з повним розбором та прозорістю показників
         msg_text = (
-            f"📊 {name} ({ticker})\n"
-            f"{icon} {action_text} | ⏱ {expiration} хв (Candle Clock)\n"
-            f"🎯 Стратегія: **{strategy_name}** (Пріоритет {strategy_priority})\n"
-            f"🎯 Ціна входу: {current_price:.5f}\n"
-            f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-            f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
-            f"📊 Волатильність: {volatility_ratio} | Тінь: {wick_ratio} | Відх. EMA: {ema_dist}%\n"
-            f"🌐 Сесія: {session_str}\n"
-            f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
-            f"💡 Причина: {str(sig_data.get('reason'))}\n"
-            f"🤖 Вердикт ШІ: {ai_reason}"
+            f"📊 **{name} ({ticker})**\n"
+            f"{icon} **{action_text}** | ⏱ Експірація: {expiration} хв (Динамічна ATR)\n"
+            f"🎯 Стратегія: `{strategy_name}` (Пріоритет {strategy_priority})\n"
+            f"----------------------------------\n"
+            f"📈 **Метрики сигналу:**\n"
+            f"• Ціна входу: `{current_price:.5f}`\n"
+            f"• Тренд (Глобальний / Середній): `{global_trend} / {mid_trend}`\n"
+            f"• RSI (5m): `{rsi}` | ADX: `{adx}` | %B (1m): `{pct_b_1m:.2f}`\n"
+            f"• Дивергенція: `{divergence_str}`\n"
+            f"• Волатильність (ATR ratio): `{volatility_ratio}`\n"
+            f"• Тінь свічки: `{wick_ratio}` | Відхилення EMA: `{ema_dist}%`\n"
+            f"🌐 Сесія: `{session_str}`\n"
+            f"----------------------------------\n"
+            f"🤖 **Аналітика моделей:**\n"
+            f"• ML-ймовірність успіху: `{round(win_probability * 100, 1)}%`\n"
+            f"• ШІ-впевненість: `{ai_confidence}/10`\n"
+            f"💡 **Обґрунтування:** _{str(sig_data.get('reason'))}_\n"
+            f"🛡 **Вердикт ШІ:** _{ai_reason}_"
         )
         sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
         
@@ -443,11 +451,12 @@ def run_full_scan_background(chat_id):
                 current_price = float(df_fast['close'].iloc[-2]) if len(df_fast) >= 2 else float(df_fast['close'].iloc[-1])
                 dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
                 
+                # Пом'якшений поріг ML-фільтра (0.48)
                 win_probability = ml_filter.predict_signal_probability(
                     rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot,
                     volatility_ratio, wick_ratio, ema_dist
                 )
-                if win_probability < 0.52:
+                if win_probability < 0.48:
                     filtered_count += 1
                     log_msg = f"❌ {name}: ML відхилив (Ймовірність {round(win_probability * 100, 1)}%)"
                     save_filtered_log(chat_id, log_msg)
@@ -506,17 +515,24 @@ def run_full_scan_background(chat_id):
                 action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
                 
                 msg_text = (
-                    f"📊 {name} ({ticker})\n"
-                    f"{icon} {action_text} | ⏱ {expiration} хв (Candle Clock)\n"
-                    f"🎯 Стратегія: **{strategy_name}** (Пріоритет {strategy_priority})\n"
-                    f"🎯 Ціна входу: {current_price:.5f}\n"
-                    f"📈 Тренд (гл/сер): {global_trend} / {mid_trend}\n"
-                    f"📉 RSI: {rsi} | ADX: {adx} | Дивергенція: {divergence_str}\n"
-                    f"📊 Волатильність: {volatility_ratio} | Тінь: {wick_ratio} | Відх. EMA: {ema_dist}%\n"
-                    f"🌐 Сесія: {session_str}\n"
-                    f"🧠 ШІ-успіх (ML): {round(win_probability * 100, 1)}% | ШІ-впевненість: {ai_confidence}/10\n"
-                    f"💡 Причина: {str(sig_data.get('reason'))}\n"
-                    f"🤖 Вердикт ШІ: {ai_reason}"
+                    f"📊 **{name} ({ticker})**\n"
+                    f"{icon} **{action_text}** | ⏱ Експірація: {expiration} хв (Динамічна ATR)\n"
+                    f"🎯 Стратегія: `{strategy_name}` (Пріоритет {strategy_priority})\n"
+                    f"----------------------------------\n"
+                    f"📈 **Метрики сигналу:**\n"
+                    f"• Ціна входу: `{current_price:.5f}`\n"
+                    f"• Тренд (Глобальний / Середній): `{global_trend} / {mid_trend}`\n"
+                    f"• RSI (5m): `{rsi}` | ADX: `{adx}` | %B (1m): `{pct_b_1m:.2f}`\n"
+                    f"• Дивергенція: `{divergence_str}`\n"
+                    f"• Волатильність (ATR ratio): `{volatility_ratio}`\n"
+                    f"• Тінь свічки: `{wick_ratio}` | Відхилення EMA: `{ema_dist}%`\n"
+                    f"🌐 Сесія: `{session_str}`\n"
+                    f"----------------------------------\n"
+                    f"🤖 **Аналітика моделей:**\n"
+                    f"• ML-ймовірність успіху: `{round(win_probability * 100, 1)}%`\n"
+                    f"• ШІ-впевненість: `{ai_confidence}/10`\n"
+                    f"💡 **Обґрунтування:** _{str(sig_data.get('reason'))}_\n"
+                    f"🛡 **Вердикт ШІ:** _{ai_reason}_"
                 )
                 sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
                 
