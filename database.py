@@ -175,7 +175,7 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
                     return None
                 
                 sig_id, pair, signal_type, entry_price, expiration, chat_id, message_id, message_text = row
-                entry_price = float(entry_price)
+                entry_price = float(entry_price) if entry_price is not None else 0.0
                 
                 if fetch_yahoo_data_func:
                     df = fetch_yahoo_data_func(pair, interval="1m", range_period="1d")
