@@ -9,7 +9,8 @@ class AdaptiveTechnicalAnalysis:
         return series.ewm(alpha=1/period, adjust=False).mean()
 
     def calculate_indicators(self, df, rsi_period=14, bb_period=20, ema_periods=(9, 21, 50)):
-        if df is None or df.empty or len(df) < max(bb_period, max(ema_periods)) + 10:
+        """Обчислення технічних індикаторів для довільного таймфрейму"""
+        if df is None or df.empty or len(df) < max(bb_period, max(ema_periods)) + 5:
             return df
 
         df = df.copy()
@@ -103,7 +104,8 @@ class AdaptiveTechnicalAnalysis:
         return df
 
     def get_trend(self, df, span_val=50):
-        if df.empty or 'close' not in df.columns or len(df) < span_val:
+        """Визначення напрямку тренду за заданим періодом EMA"""
+        if df is None or df.empty or 'close' not in df.columns or len(df) < span_val:
             return "NEUTRAL"
         ema = df['close'].ewm(span=span_val, adjust=False).mean()
         current_price = df['close'].iloc[-2] if len(df) >= 2 else df['close'].iloc[-1]
@@ -117,7 +119,8 @@ class AdaptiveTechnicalAnalysis:
         return "NEUTRAL"
 
     def calculate_pivots(self, df_daily):
-        if df_daily.empty or 'high' not in df_daily.columns or len(df_daily) < 2:
+        """Розрахунок рівнів Півот на основі денних даних"""
+        if df_daily is None or df_daily.empty or 'high' not in df_daily.columns or len(df_daily) < 2:
             return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
         last_day = df_daily.iloc[-2] if len(df_daily) >= 2 else df_daily.iloc[-1]
         high, low, close = float(last_day['high']), float(last_day['low']), float(last_day['close'])
@@ -125,7 +128,8 @@ class AdaptiveTechnicalAnalysis:
         return {"P": p, "R1": (2 * p) - low, "S1": (2 * p) - high, "R2": p + (high - low), "S2": p - (high - low)}
 
     def detect_divergence(self, df, window=30):
-        if df.empty or 'rsi' not in df.columns or 'macd' not in df.columns or len(df) < window:
+        """Детекція бычої чи ведмежої дивергенції"""
+        if df is None or df.empty or 'rsi' not in df.columns or 'macd' not in df.columns or len(df) < window:
             return "NONE"
         sub = df.tail(window).copy().reset_index(drop=True)
         prices, rsi_vals, macd_vals = sub['close'].values, sub['rsi'].values, sub['macd'].values
@@ -145,142 +149,253 @@ class AdaptiveTechnicalAnalysis:
 
         return "NONE"
 
-    def generate_signal(self, df_1m, df_5m, global_trend="NEUTRAL", mid_trend="NEUTRAL", df_daily=None):
+    def score_single_timeframe(self, df_tf, tf_name, global_trend="NEUTRAL", pivots=None):
+        """
+        Оцінює один таймфрейм і повертає бальну оцінку для CALL та PUT (від 0 до 100),
+        а також ключові параметри для аналізу.
+        """
+        if df_tf is None or df_tf.empty or len(df_tf) < 20:
+            return {'call_score': 0, 'put_score': 0, 'reasons_call': [], 'reasons_put': []}
+
+        df_tf = self.calculate_indicators(df_tf, rsi_period=9 if tf_name == '1m' else 14)
+        last = df_tf.iloc[-2] if len(df_tf) >= 2 else df_tf.iloc[-1]
+
+        rsi = float(last.get('rsi', 50))
+        stoch_k = float(last.get('stoch_k', 50))
+        stoch_d = float(last.get('stoch_d', 50))
+        adx = float(last.get('adx', 20))
+        atr = float(last.get('atr', 0.001))
+        pct_b = float(last.get('pct_b', 0.5))
+        close = float(last['close'])
+        ema_9 = float(last.get('ema_9', close))
+        ema_21 = float(last.get('ema_21', close))
+        vwap_20 = float(last.get('vwap_20', close))
+        macd_hist = float(last.get('macd_hist', 0.0))
+        lower_wick = float(last.get('lower_wick_ratio', 0.0))
+        upper_wick = float(last.get('upper_wick_ratio', 0.0))
+        
+        div = self.detect_divergence(df_tf, window=25)
+
+        call_score = 0
+        put_score = 0
+        reasons_call = []
+        reasons_put = []
+
+        # 1. ТРЕНД ТА СТРУКТУРА (EMA, VWAP, MACD)
+        if ema_9 > ema_21:
+            call_score += 15
+            reasons_call.append(f"EMA9 > EMA21 на {tf_name}")
+        elif ema_9 < ema_21:
+            put_score += 15
+            reasons_put.append(f"EMA9 < EMA21 на {tf_name}")
+
+        if close > vwap_20:
+            call_score += 10
+            reasons_call.append(f"Ціна вище VWAP на {tf_name}")
+        elif close < vwap_20:
+            put_score += 10
+            reasons_put.append(f"Ціна нижче VWAP на {tf_name}")
+
+        if macd_hist > 0:
+            call_score += 10
+            reasons_call.append(f"MACD гістограма (+) на {tf_name}")
+        elif macd_hist < 0:
+            put_score += 10
+            reasons_put.append(f"MACD гістограма (-) на {tf_name}")
+
+        if global_trend == "BULLISH":
+            call_score += 15
+        elif global_trend == "BEARISH":
+            put_score += 15
+
+        # 2. ОСЦИЛЯТОРИ (RSI, Stochastic)
+        if rsi <= 30:
+            call_score += 25
+            reasons_call.append(f"Глибока перепроданість RSI ({rsi:.1f})")
+        elif rsi <= 42:
+            call_score += 15
+            reasons_call.append(f"М'яка перепроданість RSI ({rsi:.1f})")
+        elif rsi >= 70:
+            put_score += 25
+            reasons_put.append(f"Глибока перекупленість RSI ({rsi:.1f})")
+        elif rsi >= 58:
+            put_score += 15
+            reasons_put.append(f"М'яка перекупленість RSI ({rsi:.1f})")
+
+        if stoch_k <= 20 and stoch_k > stoch_d:
+            call_score += 15
+            reasons_call.append(f"Бычий перетин Стохастика внизу")
+        elif stoch_k >= 80 and stoch_k < stoch_d:
+            put_score += 15
+            reasons_put.append(f"Ведмежий перетин Стохастика вгорі")
+
+        # 3. ВОЛАТИЛЬНІСТЬ ТА КАНАЛИ (%B, Wicks)
+        if pct_b <= 0.15:
+            call_score += 20
+            reasons_call.append(f"Торкання нижньої смуги Боллінджера (%B: {pct_b:.2f})")
+        elif pct_b >= 0.85:
+            put_score += 20
+            reasons_put.append(f"Торкання верхньої смуги Боллінджера (%B: {pct_b:.2f})")
+
+        if lower_wick >= 0.4:
+            call_score += 10
+            reasons_call.append(f"Відбиття нижньою тінню свічки ({lower_wick:.2f})")
+        elif upper_wick >= 0.4:
+            put_score += 10
+            reasons_put.append(f"Відбиття верхньою тінню свічки ({upper_wick:.2f})")
+
+        # 4. ДИВЕРГЕНЦІЯ ТА РІВНІ PIVOT
+        if div == 'BULLISH_DIV':
+            call_score += 25
+            reasons_call.append(f"Быча дивергенція на {tf_name}")
+        elif div == 'BEARISH_DIV':
+            put_score += 25
+            reasons_put.append(f"Ведмежа дивергенція на {tf_name}")
+
+        if pivots:
+            s1, s2 = pivots.get('S1', 0), pivots.get('S2', 0)
+            r1, r2 = pivots.get('R1', 0), pivots.get('R2', 0)
+            if (s1 > 0 and close <= s1 * 1.002) or (s2 > 0 and close <= s2 * 1.002):
+                call_score += 15
+                reasons_call.append(f"Підтримка біля рівня Pivot S1/S2")
+            elif (r1 > 0 and close >= r1 * 0.998) or (r2 > 0 and close >= r2 * 0.998):
+                put_score += 15
+                reasons_put.append(f"Опір біля рівня Pivot R1/R2")
+
+        return {
+            'tf_name': tf_name,
+            'call_score': call_score,
+            'put_score': put_score,
+            'rsi': rsi,
+            'adx': adx,
+            'atr': atr,
+            'pct_b': pct_b,
+            'divergence': div,
+            'lower_wick': lower_wick,
+            'upper_wick': upper_wick,
+            'reasons_call': reasons_call,
+            'reasons_put': reasons_put
+        }
+
+    def generate_signal(self, df_1m=None, df_5m=None, global_trend="NEUTRAL", mid_trend="NEUTRAL", df_daily=None, tf_dict=None):
+        """
+        Глибокий мульти-таймфреймовий аналіз. Примусово формує чіткий сигнал (CALL/PUT)
+        із точним розрахунком часу експірації та підсумковим балом (Signal Score).
+        """
+        # Збір усіх доступних таймфреймів
+        frames = {}
+        if isinstance(tf_dict, dict):
+            frames = tf_dict
+        else:
+            if df_1m is not None and not df_1m.empty:
+                frames['1m'] = df_1m
+            if df_5m is not None and not df_5m.empty:
+                frames['5m'] = df_5m
+
         if isinstance(global_trend, pd.DataFrame):
             df_macro = global_trend
             global_trend = self.get_trend(df_macro, span_val=200)
-            mid_trend = self.get_trend(df_5m, span_val=50)
             if df_daily is None:
                 df_daily = df_macro
 
-        df_1m = self.calculate_indicators(df_1m, rsi_period=9)
-        df_5m = self.calculate_indicators(df_5m, rsi_period=14)
-
-        if df_5m.empty or len(df_5m) < 20 or df_1m.empty or len(df_1m) < 20:
-            return {'signal': 'HOLD', 'reason': 'Мало даних', 'priority': 4, 'strategy': 'HOLD', 'suggested_exp': 5}
-
-        last_5m = df_5m.iloc[-2] if len(df_5m) >= 2 else df_5m.iloc[-1]
-        last_1m = df_1m.iloc[-2] if len(df_1m) >= 2 else df_1m.iloc[-1]
-
-        rsi_5m, rsi_1m = float(last_5m.get('rsi', 50)), float(last_1m.get('rsi', 50))
-        stoch_k_5m, stoch_d_5m = float(last_5m.get('stoch_k', 50)), float(last_5m.get('stoch_d', 50))
-        stoch_k_1m = float(last_1m.get('stoch_k', 50))
-        
-        adx, atr = float(last_5m.get('adx', 20)), float(last_5m.get('atr', 0.001))
-        pct_b_1m = float(last_1m.get('pct_b', 0.5))
-        close_5m = float(last_5m['close'])
-        
-        ema_9, ema_21 = float(last_5m.get('ema_9', close_5m)), float(last_5m.get('ema_21', close_5m))
-        ema_dist_val = float(last_5m.get('ema_dist', 0.0))
-        vwap_20 = float(last_5m.get('vwap_20', close_5m))
-        macd_hist = float(last_5m.get('macd_hist', 0.0))
-        
-        atr_ma = df_5m['atr'].rolling(20).mean().iloc[-2] if len(df_5m) >= 20 else atr
-        volatility_ratio = float(atr / (atr_ma + 1e-10))
-        div_5m = self.detect_divergence(df_5m, window=30)
-        
         pivots = self.calculate_pivots(df_daily) if df_daily is not None else {}
-        r1, s1 = pivots.get('R1', 0), pivots.get('S1', 0)
-        r2, s2 = pivots.get('R2', 0), pivots.get('S2', 0)
 
-        signal, reason, strategy_name = 'HOLD', '', 'HOLD'
-        priority, suggested_exp = 4, 5
-        wick_ratio_final = 0.0
+        if not frames:
+            return {
+                'signal': 'CALL',
+                'score': 50,
+                'confidence_level': 'LOW_DATA',
+                'suggested_exp': 5,
+                'expiration_minutes': 5,
+                'strategy': 'Базовий аналіз',
+                'priority': 4,
+                'reason': 'Недостатньо історичних даних для глибокого обчислення'
+            }
 
-        # --- ДИНАМІЧНИЙ РОЗРАХУНОК ЕКСПІРАЦІЇ НА ОСНОВІ ATR / ВОЛАТИЛЬНОСТІ ---
-        if volatility_ratio > 1.3:
-            base_exp = 3  # Висока волатильність — швидкий імпульс
-        elif volatility_ratio < 0.8:
-            base_exp = 10 # Низька волатильність — повільний рух
+        # Оцінка кожного таймфрейму
+        evaluated_tfs = []
+        for tf_name, df_tf in frames.items():
+            tf_res = self.score_single_timeframe(df_tf, tf_name, global_trend=global_trend, pivots=pivots)
+            evaluated_tfs.append(tf_res)
+
+        # Агрегація балів по всіх таймфреймах
+        total_call = sum(t['call_score'] for t in evaluated_tfs)
+        total_put = sum(t['put_score'] for t in evaluated_tfs)
+
+        # Визначення напрямку
+        if total_call >= total_put:
+            direction = 'CALL'
+            raw_score = total_call
+            best_tf_res = max(evaluated_tfs, key=lambda x: x['call_score'])
+            selected_reasons = best_tf_res['reasons_call']
+            wick_ratio_final = best_tf_res['lower_wick']
         else:
-            base_exp = 5  # Стандарт
+            direction = 'PUT'
+            raw_score = total_put
+            best_tf_res = max(evaluated_tfs, key=lambda x: x['put_score'])
+            selected_reasons = best_tf_res['reasons_put']
+            wick_ratio_final = best_tf_res['upper_wick']
 
-        # ПРІОРИТЕТ 1: Трендовий Імпульс (з перевіркою обсягу по VWAP)
-        if adx >= 25 and volatility_ratio >= 1.15 and ema_9 > ema_21 and close_5m > vwap_20 and macd_hist > 0:
-            signal = 'CALL'
-            strategy_name = 'Трендовий Імпульс (BUY)'
-            priority = 1
-            suggested_exp = max(3, base_exp)
-            wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
-            reason = f"Волатильність + VWAP об'єм (ADX: {adx:.1f}, MACD+)"
-        elif adx >= 25 and volatility_ratio >= 1.15 and ema_9 < ema_21 and close_5m < vwap_20 and macd_hist < 0:
-            signal = 'PUT'
-            strategy_name = 'Трендовий Імпульс (SELL)'
-            priority = 1
-            suggested_exp = max(3, base_exp)
-            wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
-            reason = f"Волатильність + VWAP об'єм (ADX: {adx:.1f}, MACD-)"
+        # Нормалізація балів до шкали 0-100
+        max_possible = max(len(evaluated_tfs) * 110, 100)
+        final_score = int(min(100, max(45, (raw_score / max_possible) * 100 + 35)))
 
-        # ПРІОРИТЕТ 2: HTF Макро-Тренд / Дивергенції
-        elif 'BULLISH_DIV' in div_5m or (global_trend == 'BULLISH' and s2 > 0 and close_5m <= s2 * 1.002):
-            signal = 'CALL'
-            strategy_name = 'HTF Макро / Розворот'
-            priority = 2
-            suggested_exp = 15 if base_exp < 10 else 20
-            wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
-            reason = f"Макро-сигнал / Дивергенція ({div_5m})"
-        elif 'BEARISH_DIV' in div_5m or (global_trend == 'BEARISH' and r2 > 0 and close_5m >= r2 * 0.998):
-            signal = 'PUT'
-            strategy_name = 'HTF Макро / Розворот'
-            priority = 2
-            suggested_exp = 15 if base_exp < 10 else 20
-            wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
-            reason = f"Макро-сигнал / Дивергенція ({div_5m})"
+        primary_tf = best_tf_res['tf_name']
+        atr = best_tf_res['atr']
+        adx = best_tf_res['adx']
+        rsi = best_tf_res['rsi']
+        div = best_tf_res['divergence']
 
-        # ПРІОРИТЕТ 3: M5 Конфлюентність (розширені зони RSI 30/70 та Стохастик)
-        elif adx < 25 and ((s1 > 0 and close_5m <= s1 * 1.003) or (rsi_5m <= 45 and stoch_k_5m < 30)):
-            signal = 'CALL'
-            strategy_name = 'M5 Конфлюентність (Гнучка)'
-            priority = 3
+        # --- ДИНАМІЧНИЙ РОЗРАХУНОК ЧАСУ ЕКСПІРАЦІЇ ---
+        # 1. Базова експірація залежно від ключового таймфрейму
+        if primary_tf == '1m':
+            base_exp = 3
+        elif primary_tf in ['3m', '5m']:
+            base_exp = 5
+        elif primary_tf == '15m':
+            base_exp = 15
+        else:
+            base_exp = 5
+
+        # 2. Коригування на основі імпульсу та волатильності
+        atr_ma = frames[primary_tf]['atr'].rolling(20).mean().iloc[-2] if len(frames[primary_tf]) >= 20 else atr
+        volatility_ratio = float(atr / (atr_ma + 1e-10))
+
+        if volatility_ratio > 1.35 or adx > 32:
+            suggested_exp = max(2, base_exp - 2)  # Висока волатильність / швидкий імпульс
+        elif volatility_ratio < 0.75:
+            suggested_exp = base_exp + 3         # Повільний флет / тривалий накопичувальний рух
+        else:
             suggested_exp = base_exp
-            wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
-            reason = f"S1 / М'яка перепроданість (RSI: {rsi_5m:.1f}, Stoch: {stoch_k_5m:.1f})"
-        elif adx < 25 and ((r1 > 0 and close_5m >= r1 * 0.997) or (rsi_5m >= 55 and stoch_k_5m > 70)):
-            signal = 'PUT'
-            strategy_name = 'M5 Конфлюентність (Гнучка)'
-            priority = 3
-            suggested_exp = base_exp
-            wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
-            reason = f"R1 / М'яка перекупленість (RSI: {rsi_5m:.1f}, Stoch: {stoch_k_5m:.1f})"
 
-        # ПРІОРИТЕТ 4: M1 Скальпінг (з підтвердженням Стохастиком)
-        elif pct_b_1m <= 0.15 and rsi_1m <= 35 and stoch_k_1m <= 20:
-            signal = 'CALL'
-            strategy_name = 'M1 Скальпінг (Відбиття)'
-            priority = 4
-            suggested_exp = 2
-            wick_ratio_final = float(last_1m.get('lower_wick_ratio', 0.0))
-            reason = f"%B ({pct_b_1m:.2f}), RSI M1 ({rsi_1m:.1f}), Stoch ({stoch_k_1m:.1f})"
-        elif pct_b_1m >= 0.85 and rsi_1m >= 65 and stoch_k_1m >= 80:
-            signal = 'PUT'
-            strategy_name = 'M1 Скальпінг (Відбиття)'
-            priority = 4
-            suggested_exp = 2
-            wick_ratio_final = float(last_1m.get('upper_wick_ratio', 0.0))
-            reason = f"%B ({pct_b_1m:.2f}), RSI M1 ({rsi_1m:.1f}), Stoch ({stoch_k_1m:.1f})"
+        # Формування стратегії та рівня впевненості
+        if final_score >= 75:
+            confidence_level = "HIGH"
+            strategy_name = f"Мульти-ТФ {direction} (Висока точність)"
+        elif final_score >= 58:
+            confidence_level = "MEDIUM"
+            strategy_name = f"Локальний імпульс {primary_tf}"
+        else:
+            confidence_level = "LOW_RISK"
+            strategy_name = f"Спекулятивний {direction} (Флет)"
 
-        # --- ЗАХИСНИЙ ФІЛЬТР ТРЕНДУ ---
-        if global_trend == 'BULLISH' and signal == 'PUT':
-            signal = 'HOLD'
-            reason = f"Фільтр тренду: відхилено PUT проти BULLISH тренду"
-            strategy_name = 'HOLD (Фільтр тренду)'
-        elif global_trend == 'BEARISH' and signal == 'CALL':
-            signal = 'HOLD'
-            reason = f"Фільтр тренду: відхилено CALL проти BEARISH тренду"
-            strategy_name = 'HOLD (Фільтр тренду)'
+        reason_str = ", ".join(selected_reasons[:3]) if selected_reasons else f"Базовий пріоритет напрямку {direction} за EMA/RSI"
 
         return {
-            'signal': signal,
-            'rsi': round(rsi_5m, 1),
+            'signal': direction,
+            'score': final_score,
+            'confidence_level': confidence_level,
+            'rsi': round(rsi, 1),
             'adx': round(adx, 1),
             'atr': atr,
-            'divergence': div_5m,
+            'divergence': div,
             'suggested_exp': suggested_exp,
             'expiration_minutes': suggested_exp,
+            'primary_tf': primary_tf,
             'strategy': strategy_name,
-            'priority': priority,
-            'reason': reason if reason else 'Очікування ринкових умов',
+            'priority': 1 if final_score >= 75 else (2 if final_score >= 58 else 3),
+            'reason': reason_str,
             'volatility_ratio': round(volatility_ratio, 3),
             'wick_ratio': round(wick_ratio_final, 3),
-            'ema_dist': round(ema_dist_val, 3)
+            'ema_dist': round(float(frames[primary_tf].get('ema_dist', pd.Series([0])).iloc[-1]), 3)
         }
