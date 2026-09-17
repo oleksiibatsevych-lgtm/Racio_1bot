@@ -183,7 +183,7 @@ class AdaptiveTechnicalAnalysis:
             signal = 'CALL'
             strategy_name = 'Трендовий Імпульс (BUY)'
             priority = 1
-            suggested_exp = int(7) # Знято обмеження, чисте значення
+            suggested_exp = int(7)
             wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
             reason = f"Волатильність + Об'єм (ADX: {adx:.1f}, Ціна вище VWAP, MACD+)"
         elif adx >= 25 and volatility_ratio >= 1.15 and ema_9 < ema_21 and close_5m < vwap_20 and macd_hist < 0:
@@ -241,6 +241,18 @@ class AdaptiveTechnicalAnalysis:
             suggested_exp = int(2)
             wick_ratio_final = float(last_1m.get('upper_wick_ratio', 0.0))
             reason = f"%B ({pct_b_1m:.2f}) та RSI M1 ({rsi_1m:.1f})"
+
+        # --- ЗАХИСНИЙ ФІЛЬТР ТРЕНДУ (Фільтрація контррендових угод) ---
+        if global_trend == 'BULLISH' and signal == 'PUT':
+            # Якщо тренд висхідний, а бот хоче продати — скасовуємо або переводимо в HOLD
+            signal = 'HOLD'
+            reason = f"Фільтр тренду: відхилено PUT проти BULLISH тренду (RSI був {rsi_5m:.1f})"
+            strategy_name = 'HOLD (Фільтр тренду)'
+        elif global_trend == 'BEARISH' and signal == 'CALL':
+            # Якщо тренд спадний, а бот хоче купити — скасовуємо
+            signal = 'HOLD'
+            reason = f"Фільтр тренду: відхилено CALL проти BEARISH тренду (RSI був {rsi_5m:.1f})"
+            strategy_name = 'HOLD (Фільтр тренду)'
 
         return {
             'signal': signal,
