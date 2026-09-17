@@ -63,7 +63,6 @@ class AdaptiveTechnicalAnalysis:
         for span in ema_periods:
             df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
             
-        # Обчислення відстані до ключової EMA
         ema_main = f'ema_{ema_periods[-1]}'
         df['ema_dist'] = ((df['close'] - df[ema_main]) / (df[ema_main] + 1e-10)) * 100
 
@@ -74,14 +73,25 @@ class AdaptiveTechnicalAnalysis:
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
 
-        # 7. Об'єм (VWAP - зважена за об'ємом ціна)
+        # 7. Стохастик (Stochastic Oscillator 14, 3, 3)
+        if 'high' in df.columns and 'low' in df.columns:
+            lowest_low = df['low'].rolling(window=14).min()
+            highest_high = df['high'].rolling(window=14).max()
+            df['stoch_k'] = ((df['close'] - lowest_low) / (highest_high - lowest_low + 1e-10)) * 100
+            df['stoch_k'] = df['stoch_k'].fillna(50)
+            df['stoch_d'] = df['stoch_k'].rolling(window=3).mean().fillna(50)
+        else:
+            df['stoch_k'] = 50
+            df['stoch_d'] = 50
+
+        # 8. Об'єм (VWAP)
         if 'volume' in df.columns and df['volume'].sum() > 0:
             typical_price = (df['high'] + df['low'] + df['close']) / 3
             df['vwap_20'] = (typical_price * df['volume']).rolling(20).sum() / (df['volume'].rolling(20).sum() + 1e-10)
         else:
             df['vwap_20'] = df['close']
 
-        # 8. Wick Ratio (Аналіз тіней свічки)
+        # 9. Wick Ratio
         if 'high' in df.columns and 'low' in df.columns and 'open' in df.columns:
             candle_range = df['high'] - df['low'] + 1e-10
             df['upper_wick_ratio'] = (df['high'] - df[['open', 'close']].max(axis=1)) / candle_range
@@ -127,15 +137,11 @@ class AdaptiveTechnicalAnalysis:
             p1, p2 = low_pivots[-2], low_pivots[-1]
             if prices[p2] < prices[p1] and (rsi_vals[p2] > rsi_vals[p1] + 1.5 or macd_vals[p2] > macd_vals[p1]):
                 return "BULLISH_DIV"
-            if prices[p2] > prices[p1] and rsi_vals[p2] < rsi_vals[p1] - 1.5:
-                return "HIDDEN_BULLISH_DIV"
 
         if len(high_pivots) >= 2:
             p1, p2 = high_pivots[-2], high_pivots[-1]
             if prices[p2] > prices[p1] and (rsi_vals[p2] < rsi_vals[p1] - 1.5 or macd_vals[p2] < macd_vals[p1]):
                 return "BEARISH_DIV"
-            if prices[p2] < prices[p1] and rsi_vals[p2] > rsi_vals[p1] + 1.5:
-                return "HIDDEN_BEARISH_DIV"
 
         return "NONE"
 
@@ -157,9 +163,12 @@ class AdaptiveTechnicalAnalysis:
         last_1m = df_1m.iloc[-2] if len(df_1m) >= 2 else df_1m.iloc[-1]
 
         rsi_5m, rsi_1m = float(last_5m.get('rsi', 50)), float(last_1m.get('rsi', 50))
+        stoch_k_5m, stoch_d_5m = float(last_5m.get('stoch_k', 50)), float(last_5m.get('stoch_d', 50))
+        stoch_k_1m = float(last_1m.get('stoch_k', 50))
+        
         adx, atr = float(last_5m.get('adx', 20)), float(last_5m.get('atr', 0.001))
         pct_b_1m = float(last_1m.get('pct_b', 0.5))
-        close_5m, close_1m = float(last_5m['close']), float(last_1m['close'])
+        close_5m = float(last_5m['close'])
         
         ema_9, ema_21 = float(last_5m.get('ema_9', close_5m)), float(last_5m.get('ema_21', close_5m))
         ema_dist_val = float(last_5m.get('ema_dist', 0.0))
@@ -185,14 +194,14 @@ class AdaptiveTechnicalAnalysis:
             priority = 1
             suggested_exp = int(7)
             wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
-            reason = f"Волатильність + Об'єм (ADX: {adx:.1f}, Ціна вище VWAP, MACD+)"
+            reason = f"Волатильність + Об'єм (ADX: {adx:.1f}, MACD+)"
         elif adx >= 25 and volatility_ratio >= 1.15 and ema_9 < ema_21 and close_5m < vwap_20 and macd_hist < 0:
             signal = 'PUT'
             strategy_name = 'Трендовий Імпульс (SELL)'
             priority = 1
             suggested_exp = int(7)
             wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
-            reason = f"Волатильність + Об'єм (ADX: {adx:.1f}, Ціна нижче VWAP, MACD-)"
+            reason = f"Волатильність + Об'єм (ADX: {adx:.1f}, MACD-)"
 
         # ПРІОРИТЕТ 2: HTF Макро-Тренд / Дивергенції
         elif 'BULLISH_DIV' in div_5m or (global_trend == 'BULLISH' and s2 > 0 and close_5m <= s2 * 1.002):
@@ -210,48 +219,46 @@ class AdaptiveTechnicalAnalysis:
             wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
             reason = f"Макро-сигнал / Дивергенція ({div_5m})"
 
-        # ПРІОРИТЕТ 3: M5 Конфлюентність
-        elif adx < 25 and ((s1 > 0 and close_5m <= s1 * 1.002) or rsi_5m <= 40):
+        # ПРІОРИТЕТ 3: M5 Конфлюентність (з додаванням Стохастика)
+        elif adx < 25 and ((s1 > 0 and close_5m <= s1 * 1.002) or (rsi_5m <= 42 and stoch_k_5m < 25)):
             signal = 'CALL'
             strategy_name = 'M5 Конфлюентність'
             priority = 3
             suggested_exp = int(5)
             wick_ratio_final = float(last_5m.get('lower_wick_ratio', 0.0))
-            reason = f"S1 / RSI перепроданість ({rsi_5m:.1f})"
-        elif adx < 25 and ((r1 > 0 and close_5m >= r1 * 0.998) or rsi_5m >= 60):
+            reason = f"S1 / Перепроданість (RSI: {rsi_5m:.1f}, Stoch: {stoch_k_5m:.1f})"
+        elif adx < 25 and ((r1 > 0 and close_5m >= r1 * 0.998) or (rsi_5m >= 58 and stoch_k_5m > 75)):
             signal = 'PUT'
             strategy_name = 'M5 Конфлюентність'
             priority = 3
             suggested_exp = int(5)
             wick_ratio_final = float(last_5m.get('upper_wick_ratio', 0.0))
-            reason = f"R1 / RSI перекупленість ({rsi_5m:.1f})"
+            reason = f"R1 / Перекупленість (RSI: {rsi_5m:.1f}, Stoch: {stoch_k_5m:.1f})"
 
-        # ПРІОРИТЕТ 4: M1 Скальпінг
-        elif pct_b_1m <= 0.15 and rsi_1m <= 32:
+        # ПРІОРИТЕТ 4: M1 Скальпінг (з підтвердженням Стохастиком)
+        elif pct_b_1m <= 0.15 and rsi_1m <= 35 and stoch_k_1m <= 20:
             signal = 'CALL'
             strategy_name = 'M1 Скальпінг (Відбиття)'
             priority = 4
             suggested_exp = int(2)
             wick_ratio_final = float(last_1m.get('lower_wick_ratio', 0.0))
-            reason = f"%B ({pct_b_1m:.2f}) та RSI M1 ({rsi_1m:.1f})"
-        elif pct_b_1m >= 0.85 and rsi_1m >= 68:
+            reason = f"%B ({pct_b_1m:.2f}), RSI M1 ({rsi_1m:.1f}), Stoch ({stoch_k_1m:.1f})"
+        elif pct_b_1m >= 0.85 and rsi_1m >= 65 and stoch_k_1m >= 80:
             signal = 'PUT'
             strategy_name = 'M1 Скальпінг (Відбиття)'
             priority = 4
             suggested_exp = int(2)
             wick_ratio_final = float(last_1m.get('upper_wick_ratio', 0.0))
-            reason = f"%B ({pct_b_1m:.2f}) та RSI M1 ({rsi_1m:.1f})"
+            reason = f"%B ({pct_b_1m:.2f}), RSI M1 ({rsi_1m:.1f}), Stoch ({stoch_k_1m:.1f})"
 
-        # --- ЗАХИСНИЙ ФІЛЬТР ТРЕНДУ (Фільтрація контррендових угод) ---
+        # --- ЗАХИСНИЙ ФІЛЬТР ТРЕНДУ ---
         if global_trend == 'BULLISH' and signal == 'PUT':
-            # Якщо тренд висхідний, а бот хоче продати — скасовуємо або переводимо в HOLD
             signal = 'HOLD'
-            reason = f"Фільтр тренду: відхилено PUT проти BULLISH тренду (RSI був {rsi_5m:.1f})"
+            reason = f"Фільтр тренду: відхилено PUT проти BULLISH тренду"
             strategy_name = 'HOLD (Фільтр тренду)'
         elif global_trend == 'BEARISH' and signal == 'CALL':
-            # Якщо тренд спадний, а бот хоче купити — скасовуємо
             signal = 'HOLD'
-            reason = f"Фільтр тренду: відхилено CALL проти BEARISH тренду (RSI був {rsi_5m:.1f})"
+            reason = f"Фільтр тренду: відхилено CALL проти BEARISH тренду"
             strategy_name = 'HOLD (Фільтр тренду)'
 
         return {
