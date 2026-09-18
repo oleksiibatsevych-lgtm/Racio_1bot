@@ -3,6 +3,7 @@ import os
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+FINNHUB_TOKEN = os.environ.get("FINNHUB_TOKEN", "")
 
 # Обробка та очищення DATABASE_URL
 raw_db_url = os.environ.get("DATABASE_URL", "")
