@@ -278,3 +278,15 @@ def get_overall_stats():
         'winrate': 0.0,
         'win_rate': 0.0
     }
+
+def get_stats_summary():
+    """Форматування загальної статистики у тексту для відправки телеграм ботом"""
+    stats = get_overall_stats()
+    return (
+        f"📊 **Всього сигналів:** `{stats['total']}`\n"
+        f"✅ **Успішних (WIN):** `{stats['wins']}`\n"
+        f"❌ **Неуспішних (LOSS):** `{stats['losses']}`\n"
+        f"➖ **Нейтральних:** `{stats['neutral']}`\n"
+        f"⏳ **В очікуванні:** `{stats['pending']}`\n"
+        f"🎯 **Вінрейт:** `{stats['winrate']}%`"
+    )
