@@ -262,7 +262,6 @@ def start(update, context):
 def show_pairs_menu(chat_id):
     buttons = []
     row = []
-    # Розподіл 21 пари по 3 кнопки у рядку для компактного вигляду
     for name in PAIRS_MAP.keys():
         row.append(InlineKeyboardButton(name, callback_data=f"pair_{name}"))
         if len(row) == 3:
@@ -476,14 +475,19 @@ def button_handler(update, context):
             bot.send_message(chat_id=query.message.chat_id, text=f"⏳ Запущено аналіз для **{pair_name}**...", parse_mode="Markdown")
             threading.Thread(target=process_single_pair, args=(query.message.chat_id, pair_name, ticker), daemon=True).start()
 
+# Реєстрація обробників
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("train_ml", train_ml_command))
 dispatcher.add_handler(CallbackQueryHandler(button_handler))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
+# Запуск фонового сокета Finnhub WebSocket
+try:
+    threading.Thread(target=start_finnhub_ws, daemon=True).start()
+    logger.info("🌐 Фоновий потік Finnhub WebSocket успішно запущено.")
+except Exception as e:
+    logger.error(f"⚠️ Не вдалося запустити Finnhub WebSocket: {e}")
+
 if __name__ == "__main__":
-    start_finnhub_ws()
-    
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Запуск сервера на порту {port}")
     app.run(host="0.0.0.0", port=port)
