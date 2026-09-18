@@ -250,6 +250,9 @@ def webhook():
     return "ok", 200
 
 def start(update, context):
+    user = update.effective_user
+    database.register_user(user.id, user.username)
+    
     keyboard = [
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
         [KeyboardButton("📈 Статистика"), KeyboardButton("📋 Логи фільтру")]
@@ -293,7 +296,6 @@ def process_single_pair(chat_id, name, ticker):
             bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}")
             return
 
-        # Обчислюємо технічні індикатори для всіх датафреймів перед аналізом
         if not df_daily.empty:
             df_daily = analyzer.calculate_indicators(df_daily)
         df_macro = analyzer.calculate_indicators(df_macro)
@@ -359,7 +361,7 @@ def process_single_pair(chat_id, name, ticker):
                 'divergence': divergence_str
             }
 
-            ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
+            ai_audit = ai_advisor.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart) or {}
             ai_confidence = int(ai_audit.get("confidence", 7))
             ai_reason = str(ai_audit.get("reason", "Підтверджено ШІ-консультантом"))
             optimal_tf_final = str(ai_audit.get("optimal_tf", primary_tf))
@@ -407,7 +409,8 @@ def process_single_pair(chat_id, name, ticker):
             dist_pivot=dist_pivot, message_text=msg_text,
             volatility_ratio=volatility_ratio, wick_ratio=wick_ratio, ema_dist=ema_dist
         )
-        schedule_signal_timer(sig_id, timestamp_str, expiration)
+        if sig_id:
+            schedule_signal_timer(sig_id, timestamp_str, expiration)
     except Exception as e:
         logger.exception(f"Помилка обробки пари {ticker}: {e}")
         bot.send_message(chat_id=chat_id, text=f"❌ Сталася помилка при аналізі {ticker}.")
@@ -443,6 +446,8 @@ def show_logs(chat_id):
 def handle_message(update, context):
     text = update.message.text
     chat_id = update.effective_chat.id
+    user = update.effective_user
+    database.register_user(chat_id, user.username if user else None)
 
     if text == "📊 Аналіз усіх пар":
         run_full_scan_background(chat_id)
