@@ -28,7 +28,7 @@ class TradingMLFilter:
 
     def extract_features(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0,
                          volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
-        div_encoded = 1 if divergence and divergence != "NONE" else 0
+        div_encoded = 1 if divergence and str(divergence) != "NONE" else 0
         return [[
             float(rsi), float(adx), float(bb_width), int(session_code), int(hour), 
             int(div_encoded), float(dist_pivot), float(volatility_ratio), float(wick_ratio), float(ema_dist)
@@ -40,12 +40,11 @@ class TradingMLFilter:
             base = 0.58
             if rsi < 35 or rsi > 65: base += 0.06
             if adx > 25: base += 0.05
-            if divergence and divergence != "NONE": base += 0.08
+            if divergence and str(divergence) != "NONE": base += 0.08
             if wick_ratio >= 0.40: base += 0.05
             return min(round(base, 2), 0.95)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist)
-            # Перевіряємо, чи є у моделі метод predict_proba і чи відповідає кількість фіч
             proba = self.model.predict_proba(X)[0][1]
             return float(proba)
         except Exception:
@@ -53,22 +52,21 @@ class TradingMLFilter:
 
     def train_model(self):
         try:
-            conn = database.get_connection()
-            query = """
-                SELECT rsi, adx, bb_width, 
-                       COALESCE(session_code, 1) as session_code, 
-                       COALESCE(hour, 12) as hour, 
-                       COALESCE(divergence, 'NONE') as divergence, 
-                       COALESCE(dist_pivot, 0.0) as dist_pivot,
-                       COALESCE(volatility_ratio, 1.0) as volatility_ratio,
-                       COALESCE(wick_ratio, 0.0) as wick_ratio,
-                       COALESCE(ema_dist, 0.0) as ema_dist,
-                       result 
-                FROM signals 
-                WHERE result IS NOT NULL AND result != 'NEUTRAL'
-            """
-            df = pd.read_sql(query, conn)
-            conn.close()
+            with database.get_connection() as conn:
+                query = """
+                    SELECT rsi, adx, bb_width, 
+                           COALESCE(session_code, 1) as session_code, 
+                           COALESCE(hour, 12) as hour, 
+                           COALESCE(divergence, 'NONE') as divergence, 
+                           COALESCE(dist_pivot, 0.0) as dist_pivot,
+                           COALESCE(volatility_ratio, 1.0) as volatility_ratio,
+                           COALESCE(wick_ratio, 0.0) as wick_ratio,
+                           COALESCE(ema_dist, 0.0) as ema_dist,
+                           result 
+                    FROM signals 
+                    WHERE result IS NOT NULL AND result != 'NEUTRAL'
+                """
+                df = pd.read_sql(query, conn)
 
             if len(df) < 10:
                 return False, "⚠️ Замало завершених угод для навчання ШІ (мінімум 10)."
