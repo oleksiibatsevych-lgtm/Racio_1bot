@@ -161,6 +161,14 @@ def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
 
     return pd.DataFrame()
 
+def fetch_realtime_data(ticker, interval="1m", range_period="7d"):
+    """Завантажує дані з Yahoo та накладає найновішу live-ціну з Finnhub WebSocket."""
+    df = fetch_yahoo_data(ticker, interval=interval, range_period=range_period)
+    live_p = get_live_price(ticker)
+    if live_p and not df.empty:
+        df.iloc[-1, df.columns.get_loc('close')] = live_p
+    return df
+
 def get_current_session_info():
     now_utc = datetime.utcnow()
     hour = now_utc.hour
@@ -183,13 +191,61 @@ def get_current_session_info():
     return session_str, session_code, hour
 
 def process_signal_expiration(sig_id):
+    """Обробка підсумку угоди за живими даними з Finnhub WebSocket."""
     try:
-        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=fetch_yahoo_data)
+        # 1. Пряма перевірка через детальні дані сигналу (якщо реалізовано в database.py)
+        if hasattr(database, "get_signal_by_id") and callable(getattr(database, "get_signal_by_id", None)):
+            sig_data = database.get_signal_by_id(sig_id)
+            if sig_data:
+                ticker = sig_data['ticker']
+                entry_price = float(sig_data['entry_price'])
+                signal_type = sig_data['signal_type']
+
+                # Отримуємо точну ціну експірації з WebSocket
+                exit_price = get_live_price(ticker)
+                if not exit_price:
+                    df_check = fetch_yahoo_data(ticker, interval="1m", range_period="1d")
+                    if not df_check.empty:
+                        exit_price = float(df_check['close'].iloc[-1])
+
+                if exit_price:
+                    multiplier = 1000 if "JPY" in ticker else 100000
+                    pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
+
+                    if signal_type == "CALL":
+                        result = "WIN" if exit_price > entry_price else ("LOSS" if exit_price < entry_price else "NEUTRAL")
+                    else:
+                        result = "WIN" if exit_price < entry_price else ("LOSS" if exit_price > entry_price else "NEUTRAL")
+
+                    if hasattr(database, "update_signal_result"):
+                        database.update_signal_result(sig_id, result, exit_price, pips)
+
+                    res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
+                    pips_str = f"+{pips:.1f}" if pips > 0 else f"{pips:.1f}"
+
+                    report_str = (
+                        f"\n----------------------------------\n"
+                        f"🏁 **Результат:** {res_icon} (`{pips_str}` п.)\n"
+                        f"📍 Вхід: `{entry_price:.5f}` ➔ Вихід: `{exit_price:.5f}`"
+                    )
+
+                    orig_txt = sig_data.get("message_text", "")
+                    if orig_txt and "🏁 Результат" not in orig_txt:
+                        bot.edit_message_text(
+                            chat_id=sig_data["chat_id"], 
+                            message_id=sig_data["message_id"], 
+                            text=f"{orig_txt}\n{report_str}",
+                            parse_mode="Markdown"
+                        )
+                    return
+
+        # 2. Фолбек на стандартизований розрахунок у базі даних
+        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=fetch_realtime_data)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
-            pips_val = int(round(float(res_data['pips'])))
-            pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
-            
-            res_result = res_data['result']
+            pips_val = float(res_data.get('pips', 0))
+            pips_str = f"+{pips_val:.1f}" if pips_val > 0 else f"{pips_val:.1f}"
+
+            res_result = res_data.get('result', 'NEUTRAL')
             if res_result == 'WIN':
                 res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
             elif res_result == 'NEUTRAL':
@@ -197,9 +253,14 @@ def process_signal_expiration(sig_id):
             else:
                 res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
 
-            orig_txt = res_data["message_text"]
+            orig_txt = res_data.get("message_text", "")
             if orig_txt and "🏁 Результат" not in orig_txt:
-                bot.edit_message_text(chat_id=res_data["chat_id"], message_id=res_data["message_id"], text=f"{orig_txt}\n{res_icon}")
+                bot.edit_message_text(
+                    chat_id=res_data["chat_id"], 
+                    message_id=res_data["message_id"], 
+                    text=f"{orig_txt}\n{res_icon}",
+                    parse_mode="Markdown"
+                )
     except Exception as e:
         logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
 
@@ -286,20 +347,17 @@ def process_single_pair(chat_id, name, ticker):
             bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні (зачекайте 3 хвилини).")
             return
 
-        df_daily = fetch_yahoo_data(ticker, interval="1d", range_period="30d")
-        df_macro = fetch_yahoo_data(ticker, interval="1h", range_period="60d")
-        df_mid = fetch_yahoo_data(ticker, interval="15m", range_period="10d")
-        df_fast = fetch_yahoo_data(ticker, interval="5m", range_period="5d")
-        df_micro = fetch_yahoo_data(ticker, interval="1m", range_period="7d")
+        df_daily = fetch_realtime_data(ticker, interval="1d", range_period="30d")
+        df_macro = fetch_realtime_data(ticker, interval="1h", range_period="60d")
+        df_mid = fetch_realtime_data(ticker, interval="15m", range_period="10d")
+        df_fast = fetch_realtime_data(ticker, interval="5m", range_period="5d")
+        df_micro = fetch_realtime_data(ticker, interval="1m", range_period="7d")
         
         if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
             bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}")
             return
 
         ws_price = get_live_price(ticker)
-        if ws_price:
-            df_micro.iloc[-1, df_micro.columns.get_loc('close')] = ws_price
-            df_fast.iloc[-1, df_fast.columns.get_loc('close')] = ws_price
 
         if not df_daily.empty:
             df_daily = analyzer.calculate_indicators(df_daily)
