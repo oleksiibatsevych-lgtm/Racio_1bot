@@ -23,6 +23,7 @@ import database
 from ml_model import TradingMLFilter
 from ai_advisor import AITradingAdvisor
 from charts import create_chart_image
+from finnhub_ws import start_finnhub_ws, get_live_price
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -41,7 +42,6 @@ ai_advisor = AITradingAdvisor()
 
 last_sent_signals = {}
 
-# Ініціалізація бази даних
 database.init_db()
 
 def init_logs_db():
@@ -184,7 +184,7 @@ def get_current_session_info():
 
 def process_signal_expiration(sig_id):
     try:
-        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data)
+        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=fetch_yahoo_data)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
             pips_val = int(round(float(res_data['pips'])))
             pips_str = f"+{pips_val}" if pips_val > 0 else str(pips_val)
@@ -241,7 +241,7 @@ restore_pending_timers()
 
 @app.route("/")
 def index():
-    return "Racio_1bot is running!"
+    return "Racio_1bot is running with Finnhub WebSocket!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -262,9 +262,10 @@ def start(update, context):
 def show_pairs_menu(chat_id):
     buttons = []
     row = []
+    # Розподіл 21 пари по 3 кнопки у рядку для компактного вигляду
     for name in PAIRS_MAP.keys():
         row.append(InlineKeyboardButton(name, callback_data=f"pair_{name}"))
-        if len(row) == 2:
+        if len(row) == 3:
             buttons.append(row)
             row = []
     if row:
@@ -295,6 +296,11 @@ def process_single_pair(chat_id, name, ticker):
         if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
             bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}")
             return
+
+        ws_price = get_live_price(ticker)
+        if ws_price:
+            df_micro.iloc[-1, df_micro.columns.get_loc('close')] = ws_price
+            df_fast.iloc[-1, df_fast.columns.get_loc('close')] = ws_price
 
         if not df_daily.empty:
             df_daily = analyzer.calculate_indicators(df_daily)
@@ -334,7 +340,7 @@ def process_single_pair(chat_id, name, ticker):
         strategy_priority = sig_data.get('priority', 2)
         calculated_expiration = sig_data.get('expiration_minutes', 5)
         
-        current_price = float(df_fast['close'].iloc[-2]) if len(df_fast) >= 2 else float(df_fast['close'].iloc[-1])
+        current_price = ws_price if ws_price else (float(df_fast['close'].iloc[-2]) if len(df_fast) >= 2 else float(df_fast['close'].iloc[-1]))
         dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
         
         win_probability = ml_filter.predict_signal_probability(
@@ -384,7 +390,7 @@ def process_single_pair(chat_id, name, ticker):
             f"🎯 Стратегія: `{strategy_name}`\n"
             f"----------------------------------\n"
             f"📈 **Параметри ринку:**\n"
-            f"• Ціна входу: `{current_price:.5f}`\n"
+            f"• Ціна входу: `{current_price:.5f}` {'⚡ (Realtime)' if ws_price else ''}\n"
             f"• Тренди (1h / 15m): `{global_trend} / {mid_trend}`\n"
             f"• RSI: `{rsi}` | ADX: `{adx}` | %B: `{pct_b_val:.2f}`\n"
             f"• Дивергенція: `{divergence_str}`\n"
@@ -417,7 +423,7 @@ def process_single_pair(chat_id, name, ticker):
 
 def run_full_scan_background(chat_id):
     clear_filtered_logs(chat_id)
-    bot.send_message(chat_id=chat_id, text="🔍 Розпочато повний аналіз усіх валютних пар...")
+    bot.send_message(chat_id=chat_id, text="🔍 Розпочато повний аналіз усіх 21 валютних пар...")
     
     def worker():
         for name, ticker in PAIRS_MAP.items():
@@ -470,13 +476,14 @@ def button_handler(update, context):
             bot.send_message(chat_id=query.message.chat_id, text=f"⏳ Запущено аналіз для **{pair_name}**...", parse_mode="Markdown")
             threading.Thread(target=process_single_pair, args=(query.message.chat_id, pair_name, ticker), daemon=True).start()
 
-# Реєстрація хендлерів
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("train_ml", train_ml_command))
 dispatcher.add_handler(CallbackQueryHandler(button_handler))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
 if __name__ == "__main__":
+    start_finnhub_ws()
+    
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🚀 Запуск сервера на порту {port}")
     app.run(host="0.0.0.0", port=port)
