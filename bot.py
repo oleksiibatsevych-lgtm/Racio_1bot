@@ -5,6 +5,10 @@ import threading
 import requests
 import logging
 import html
+import gc
+import matplotlib
+matplotlib.use('Agg')  # Фоновый рендеринг без GUI для сохранения RAM
+import matplotlib.pyplot as plt
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
@@ -40,7 +44,7 @@ last_sent_signals = {}
 
 database.init_db()
 
-# Автозапуск WebSocket при старті модуля
+# Автозапуск WebSocket при старте модуля
 start_finnhub_ws()
 
 def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
@@ -454,6 +458,22 @@ def process_single_pair(chat_id, name, ticker):
     except Exception as e:
         logger.exception(f"Помилка обробки сигналу для {name}: {e}")
         bot.send_message(chat_id=chat_id, text=f"❌ Сталася помилка під час аналізу {name}.")
+    finally:
+        plt.close('all')
+        gc.collect()
+
+def process_all_pairs_background(chat_id):
+    """Фонова обробка всіх пар у окремому потоці"""
+    bot.send_message(chat_id=chat_id, text="🔎 Розпочато сканування всіх доступних пар...")
+    for pair_name, pair_ticker in PAIRS_MAP.items():
+        try:
+            process_single_pair(chat_id, pair_name, pair_ticker)
+        except Exception as e:
+            logger.error(f"Помилка при фоновій обробці {pair_name}: {e}")
+        
+        plt.close('all')
+        gc.collect()
+        time.sleep(1.5)
 
 def handle_text_message(update, context):
     text = update.message.text
@@ -463,10 +483,10 @@ def handle_text_message(update, context):
     if text == "💵 Пари":
         show_pairs_menu(chat_id)
     elif text == "📊 Аналіз усіх пар":
-        bot.send_message(chat_id=chat_id, text="🔎 Розпочато сканування всіх доступних пар...")
-        for pair_name, pair_ticker in PAIRS_MAP.items():
-            process_single_pair(chat_id, pair_name, pair_ticker)
-            time.sleep(1)
+        # Запуск фонового потока, чтобы вебхук не зависал и Render не завершал процесс по OOM
+        thread = threading.Thread(target=process_all_pairs_background, args=(chat_id,))
+        thread.daemon = True
+        thread.start()
     elif text == "📈 Статистика":
         stats_msg = database.get_stats_summary()
         bot.send_message(chat_id=chat_id, text=f"📊 <b>Статистика роботи бота:</b>\n\n{stats_msg}", parse_mode="HTML")
