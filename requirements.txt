@@ -4,8 +4,8 @@ gunicorn==22.0.0
 requests==2.32.3
 urllib3<2.0
 setuptools==69.5.1
-pandas>=2.0.0,<2.3.0
-pandas-ta
+pandas==1.5.3
+pandas-ta==0.3.14b0
 yfinance>=0.2.52
 curl_cffi>=0.7.0
 google-generativeai
