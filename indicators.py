@@ -1,15 +1,12 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
 
 class AdaptiveTechnicalAnalysis:
     
     def get_rma(self, series, period):
-        """Згладжування Вайлдера (Running Moving Average) для точного ATR та ADX"""
         return series.ewm(alpha=1/period, adjust=False).mean()
 
     def calculate_indicators(self, df, rsi_period=14, bb_period=20, ema_periods=(9, 21, 50)):
-        """Обчислення технічних індикаторів для довільного таймфрейму"""
         if df is None or df.empty or len(df) < max(bb_period, max(ema_periods)) + 5:
             return df
 
@@ -19,7 +16,6 @@ class AdaptiveTechnicalAnalysis:
         if 'close' not in df.columns:
             return df
 
-        # 1. RSI
         delta = df['close'].diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
@@ -28,7 +24,6 @@ class AdaptiveTechnicalAnalysis:
         rs = avg_gain / (avg_loss + 1e-10)
         df['rsi'] = (100 - (100 / (1 + rs))).clip(0, 100).fillna(50)
 
-        # 2. Bollinger Bands & %B
         sma = df['close'].rolling(window=bb_period).mean()
         std = df['close'].rolling(window=bb_period).std()
         df['bb_upper'] = sma + (std * 2)
@@ -40,7 +35,6 @@ class AdaptiveTechnicalAnalysis:
         df['pct_b'] = np.where(bb_range > 0, (df['close'] - df['bb_lower']) / bb_range, 0.5)
         df['pct_b'] = df['pct_b'].clip(0.0, 1.0)
 
-        # 3. ATR (за методом Вайлдера)
         if 'high' in df.columns and 'low' in df.columns:
             high, low, close_prev = df['high'], df['low'], df['close'].shift(1)
             tr = pd.concat([high - low, (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
@@ -48,7 +42,6 @@ class AdaptiveTechnicalAnalysis:
         else:
             df['atr'] = 0.0010
 
-        # 4. ADX (Захищений та стабілізований розрахунок)
         if 'high' in df.columns and 'low' in df.columns:
             up_move = df['high'] - df['high'].shift(1)
             down_move = df['low'].shift(1) - df['low']
@@ -70,21 +63,18 @@ class AdaptiveTechnicalAnalysis:
         else:
             df['adx'] = 20.0
 
-        # 5. EMA Віяло
         for span in ema_periods:
             df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
             
         ema_main = f'ema_{ema_periods[-1]}'
         df['ema_dist'] = ((df['close'] - df[ema_main]) / (df[ema_main] + 1e-10)) * 100
 
-        # 6. MACD
         ema12 = df['close'].ewm(span=12, adjust=False).mean()
         ema26 = df['close'].ewm(span=26, adjust=False).mean()
         df['macd'] = ema12 - ema26
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
 
-        # 7. Стохастик (Stochastic Oscillator 14, 3, 3)
         if 'high' in df.columns and 'low' in df.columns:
             lowest_low = df['low'].rolling(window=14).min()
             highest_high = df['high'].rolling(window=14).max()
@@ -96,14 +86,12 @@ class AdaptiveTechnicalAnalysis:
             df['stoch_k'] = 50.0
             df['stoch_d'] = 50.0
 
-        # 8. VWAP
         if 'volume' in df.columns and df['volume'].sum() > 0:
             typical_price = (df['high'] + df['low'] + df['close']) / 3
             df['vwap_20'] = (typical_price * df['volume']).rolling(20).sum() / (df['volume'].rolling(20).sum() + 1e-10)
         else:
             df['vwap_20'] = df['close']
 
-        # 9. Wick Ratio
         if 'high' in df.columns and 'low' in df.columns and 'open' in df.columns:
             candle_range = df['high'] - df['low'] + 1e-10
             df['upper_wick_ratio'] = (df['high'] - df[['open', 'close']].max(axis=1)) / candle_range
@@ -117,7 +105,6 @@ class AdaptiveTechnicalAnalysis:
         return df
 
     def get_trend(self, df, span_val=50):
-        """Визначення напрямку тренду за заданим періодом EMA"""
         if df is None or df.empty or 'close' not in df.columns or len(df) < span_val:
             return "NEUTRAL"
         ema = df['close'].ewm(span=span_val, adjust=False).mean()
@@ -132,7 +119,6 @@ class AdaptiveTechnicalAnalysis:
         return "NEUTRAL"
 
     def calculate_pivots(self, df_daily):
-        """Розрахунок рівнів Півот на основі денних даних"""
         if df_daily is None or df_daily.empty or 'high' not in df_daily.columns or len(df_daily) < 2:
             return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
         last_day = df_daily.iloc[-2] if len(df_daily) >= 2 else df_daily.iloc[-1]
@@ -141,7 +127,6 @@ class AdaptiveTechnicalAnalysis:
         return {"P": p, "R1": (2 * p) - low, "S1": (2 * p) - high, "R2": p + (high - low), "S2": p - (high - low)}
 
     def detect_divergence(self, df, window=25):
-        """Детекція бичачої чи ведмежої дивергенції"""
         if df is None or df.empty or 'rsi' not in df.columns or 'macd' not in df.columns or len(df) < window:
             return "NONE"
         sub = df.tail(window).copy().reset_index(drop=True)
@@ -163,10 +148,6 @@ class AdaptiveTechnicalAnalysis:
         return "NONE"
 
     def score_single_timeframe(self, df_tf, tf_name, global_trend="NEUTRAL", pivots=None):
-        """
-        Оцінює один таймфрейм із динамічною вагою. 
-        У тренді пріоритет за трендовими формаціями, у флеті - за відбиттям від рівнів.
-        """
         if df_tf is None or df_tf.empty or len(df_tf) < 20:
             return {'tf_name': tf_name, 'call_score': 0, 'put_score': 0, 'rsi': 50, 'adx': 20, 'atr': 0.001, 'pct_b': 0.5, 'divergence': 'NONE', 'lower_wick': 0.0, 'upper_wick': 0.0, 'reasons_call': [], 'reasons_put': []}
 
@@ -197,7 +178,6 @@ class AdaptiveTechnicalAnalysis:
         is_trending = adx >= 25
         is_strong_trend = adx >= 35
 
-        # 1. ТРЕНД ТА СТРУКТУРА
         trend_base_weight = 20 if is_trending else 10
         
         if ema_9 > ema_21:
@@ -226,7 +206,6 @@ class AdaptiveTechnicalAnalysis:
         elif macd_hist < 0:
             put_score += 10
 
-        # 2. ОСЦИЛЯТОРИ ТА ВІДКАТИ
         osc_weight_deep = 15 if is_trending else 25
         
         if rsi <= 30:
@@ -245,7 +224,6 @@ class AdaptiveTechnicalAnalysis:
             put_score += 15
             reasons_put.append("Низхідний перетин Stochastic")
 
-        # 3. ВОЛАТИЛЬНІСТЬ ТА ФЛЕТОВІ МЕЖІ
         bb_weight = 10 if is_trending else 25
         if pct_b <= 0.15:
             if not (is_strong_trend and global_trend == "BEARISH"):
@@ -263,7 +241,6 @@ class AdaptiveTechnicalAnalysis:
             put_score += 15
             reasons_put.append(f"Пінбар/Тінь продажів ({upper_wick:.2f})")
 
-        # 4. ДИВЕРГЕНЦІЯ ТА РІВНІ PIVOT
         if div == 'BULLISH_DIV':
             call_score += 30
             reasons_call.append(f"Бича дивергенція на {tf_name}")
@@ -298,10 +275,6 @@ class AdaptiveTechnicalAnalysis:
         }
 
     def generate_signal(self, df_1m=None, df_5m=None, global_trend="NEUTRAL", mid_trend="NEUTRAL", df_daily=None, tf_dict=None):
-        """
-        Глибокий мульти-таймфреймовий аналіз. Формує сигнал CALL/PUT
-        із точним розрахунком часу експірації та підсумковим балом.
-        """
         frames = {}
         if isinstance(tf_dict, dict):
             frames = tf_dict
@@ -389,7 +362,7 @@ class AdaptiveTechnicalAnalysis:
             strategy_name = f"Локальний імпульс {primary_tf}"
         else:
             confidence_level = "LOW_RISK"
-            strategy_name = f"Канальний відклик (Флет)"
+            strategy_name = "Канальний відклик (Флет)"
 
         reason_str = ", ".join(selected_reasons[:3]) if selected_reasons else f"Пріоритет напрямку {direction}"
 
