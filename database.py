@@ -216,7 +216,6 @@ def get_pending_signals():
             with conn.cursor() as cur:
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
             conn.commit()
-        # Повторна спроба виконати вибірку
         with get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(query)
