@@ -4,6 +4,7 @@ import time
 import threading
 import requests
 import logging
+import html
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
@@ -56,7 +57,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
+    url = "https://finnhub.io/api/v1/forex/candle"
     params = {
         "symbol": symbol,
         "resolution": resolution,
@@ -193,8 +194,8 @@ def process_signal_expiration(sig_id):
 
                 report_str = (
                     f"\n----------------------------------\n"
-                    f"🏁 **Результат:** {res_icon} (`{pips_str}` п.)\n"
-                    f"📍 Вхід: `{entry_price:.5f}` ➔ Вихід: `{exit_price:.5f}`"
+                    f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
+                    f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ Вихід: <code>{exit_price:.5f}</code>"
                 )
 
                 orig_txt = sig_data.get("message_text", "")
@@ -203,7 +204,7 @@ def process_signal_expiration(sig_id):
                         chat_id=sig_data["chat_id"], 
                         message_id=sig_data["message_id"], 
                         text=f"{orig_txt}\n{report_str}",
-                        parse_mode="Markdown"
+                        parse_mode="HTML"
                     )
                 return
 
@@ -223,7 +224,7 @@ def process_signal_expiration(sig_id):
                     chat_id=res_data["chat_id"], 
                     message_id=res_data["message_id"], 
                     text=f"{orig_txt}\n{res_icon}",
-                    parse_mode="Markdown"
+                    parse_mode="HTML"
                 )
     except Exception as e:
         logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
@@ -246,7 +247,9 @@ def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
 def restore_pending_timers():
     pending = database.get_pending_signals()
     for i, row in enumerate(pending):
-        sig_id, _, _, _, expiration_mins, timestamp_str, _, _, _ = row
+        sig_id = row[0]
+        expiration_mins = row[4]
+        timestamp_str = row[5]
         try:
             if isinstance(timestamp_str, datetime):
                 signal_time = timestamp_str
@@ -398,27 +401,27 @@ def process_single_pair(chat_id, name, ticker):
         action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
         
         msg_text = (
-            f"📊 **{name} ({ticker})**\n"
-            f"{icon} **{action_text}** | ⏱ Експірація: **{expiration} хв**\n"
-            f"⚡ **Signal Score:** `{signal_score}/100` | 📐 ТФ: `{optimal_tf_final}`\n"
-            f"🎯 Стратегія: `{strategy_name}`\n"
+            f"📊 <b>{html.escape(name)} ({html.escape(ticker)})</b>\n"
+            f"{icon} <b>{action_text}</b> | ⏱ Експірація: <b>{expiration} хв</b>\n"
+            f"⚡ <b>Signal Score:</b> <code>{signal_score}/100</code> | 📐 ТФ: <code>{html.escape(str(optimal_tf_final))}</code>\n"
+            f"🎯 Стратегія: <code>{html.escape(str(strategy_name))}</code>\n"
             f"----------------------------------\n"
-            f"📈 **Параметри ринку:**\n"
-            f"• Ціна входу: `{current_price:.5f}` {'⚡ (Realtime)' if ws_price else ''}\n"
-            f"• Тренди (1h / 15m): `{global_trend} / {mid_trend}`\n"
-            f"• RSI: `{rsi}` | ADX: `{adx}` | %B: `{pct_b_val:.2f}`\n"
-            f"• Дивергенція: `{divergence_str}`\n"
-            f"• ATR Ratio: `{volatility_ratio}` | Відхилення EMA: `{ema_dist}%`\n"
-            f"🌐 Сесія: `{session_str}`\n"
+            f"📈 <b>Параметри ринку:</b>\n"
+            f"• Ціна входу: <code>{current_price:.5f}</code> {'⚡ (Realtime)' if ws_price else ''}\n"
+            f"• Тренди (1h / 15m): <code>{html.escape(str(global_trend))} / {html.escape(str(mid_trend))}</code>\n"
+            f"• RSI: <code>{rsi}</code> | ADX: <code>{adx}</code> | %B: <code>{pct_b_val:.2f}</code>\n"
+            f"• Дивергенція: <code>{html.escape(str(divergence_str))}</code>\n"
+            f"• ATR Ratio: <code>{volatility_ratio}</code> | Відхилення EMA: <code>{ema_dist}%</code>\n"
+            f"🌐 Сесія: <code>{html.escape(str(session_str))}</code>\n"
             f"----------------------------------\n"
-            f"🤖 **Аналітика моделей:**\n"
-            f"• ML-ймовірність: `{round(win_probability * 100, 1)}%`\n"
-            f"• ШІ-впевненість: `{ai_confidence}/10`\n"
-            f"💡 **Обґрунтування:** _{str(sig_data.get('reason'))}_\n"
-            f"🛡 **Висновок ШІ:** _{ai_reason}_"
+            f"🤖 <b>Аналітика моделей:</b>\n"
+            f"• ML-ймовірність: <code>{round(win_probability * 100, 1)}%</code>\n"
+            f"• ШІ-впевненість: <code>{ai_confidence}/10</code>\n"
+            f"💡 <b>Обґрунтування:</b> <i>{html.escape(str(sig_data.get('reason', '')))}</i>\n"
+            f"🛡 <b>Висновок ШІ:</b> <i>{html.escape(str(ai_reason))}</i>"
         )
         
-        sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
+        sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
         
         timestamp_dt = datetime.utcnow()
         timestamp_str = timestamp_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -455,12 +458,12 @@ def handle_text_message(update, context):
             time.sleep(1)
     elif text == "📈 Статистика":
         stats_msg = database.get_stats_summary()
-        bot.send_message(chat_id=chat_id, text=f"📊 **Статистика роботи бота:**\n\n{stats_msg}", parse_mode="Markdown")
+        bot.send_message(chat_id=chat_id, text=f"📊 <b>Статистика роботи бота:</b>\n\n{stats_msg}", parse_mode="HTML")
     elif text == "📋 Логи фільтру":
         logs = database.get_filtered_logs(chat_id)
         if logs:
-            log_text = "\n".join(logs[:15])
-            bot.send_message(chat_id=chat_id, text=f"📋 **Останні логи:**\n\n{log_text}", parse_mode="Markdown")
+            log_text = html.escape("\n".join(logs[:15]))
+            bot.send_message(chat_id=chat_id, text=f"📋 <b>Останні логи:</b>\n\n{log_text}", parse_mode="HTML")
         else:
             bot.send_message(chat_id=chat_id, text="📋 Логи відсутні або застаріли.")
 
