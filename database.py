@@ -1,5 +1,6 @@
 import time
 import psycopg2
+from psycopg2 import errors
 from config import DATABASE_URL
 
 def get_connection():
@@ -40,6 +41,7 @@ def init_db():
     """
     
     columns_to_add = [
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS pair TEXT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS signal_type TEXT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS entry_price NUMERIC;",
@@ -208,6 +210,17 @@ def get_pending_signals():
             with conn.cursor() as cur:
                 cur.execute(query)
                 return cur.fetchall()
+    except errors.UndefinedColumn:
+        print("⚠️ Колонка created_at відсутня в БД. Виконуємо авто-створення...")
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;")
+            conn.commit()
+        # Повторна спроба виконати вибірку
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                return cur.fetchall()
     except Exception as e:
         print(f"⚠️ Помилка отримання pending сигналів: {e}")
         return []
@@ -328,12 +341,12 @@ def get_overall_stats():
 def get_stats_summary():
     stats = get_overall_stats()
     return (
-        f"📊 **Всього сигналів:** `{stats['total']}`\n"
-        f"✅ **Успішних (WIN):** `{stats['wins']}`\n"
-        f"❌ **Неуспішних (LOSS):** `{stats['losses']}`\n"
-        f"➖ **Нейтральних:** `{stats['neutral']}`\n"
-        f"⏳ **В очікуванні:** `{stats['pending']}`\n"
-        f"🎯 **Вінрейт:** `{stats['winrate']}%`"
+        f"📊 <b>Всього сигналів:</b> <code>{stats['total']}</code>\n"
+        f"✅ <b>Успішних (WIN):</b> <code>{stats['wins']}</code>\n"
+        f"❌ <b>Неуспішних (LOSS):</b> <code>{stats['losses']}</code>\n"
+        f"➖ <b>Нейтральних:</b> <code>{stats['neutral']}</code>\n"
+        f"⏳ <b>В очікуванні:</b> <code>{stats['pending']}</code>\n"
+        f"🎯 <b>Вінрейт:</b> <code>{stats['winrate']}%</code>"
     )
 
 def clear_filtered_logs(chat_id):
