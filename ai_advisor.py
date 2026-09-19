@@ -18,7 +18,7 @@ class AITradingAdvisor:
         self.gemini_models = [
             "gemini-1.5-flash",
             "gemini-1.5-pro",
-            "gemini-2.0-flash-exp"
+            "gemini-2.0-flash"
         ]
 
     def _evaluate_with_openrouter(self, prompt):
