@@ -7,10 +7,8 @@ from config import FINNHUB_TOKEN
 
 logger = logging.getLogger(__name__)
 
-# КЕШ ПОТОЧНИХ ЦІН У РЕАЛЬНОМУ ЧАСІ { "EURUSD=X": 1.08542, ... }
 LIVE_PRICES = {}
 
-# Мапінг усіх 21 тикерів yfinance на символи Finnhub Forex (OANDA)
 FINNHUB_SYMBOL_MAP = {
     "EURUSD=X": "OANDA:EUR_USD",
     "GBPUSD=X": "OANDA:GBP_USD",
@@ -42,10 +40,12 @@ def on_message(ws, message):
             for item in data.get("data", []):
                 symbol = item.get("s")
                 price = item.get("p")
-                
-                for yf_ticker, fh_symbol in FINNHUB_SYMBOL_MAP.items():
-                    if fh_symbol == symbol and price:
-                        LIVE_PRICES[yf_ticker] = float(price)
+                if symbol and price is not None:
+                    fl_price = float(price)
+                    LIVE_PRICES[symbol] = fl_price
+                    for yf_ticker, fh_symbol in FINNHUB_SYMBOL_MAP.items():
+                        if fh_symbol == symbol:
+                            LIVE_PRICES[yf_ticker] = fl_price
     except Exception as e:
         logger.error(f"⚠️ Помилка обробки WebSocket Finnhub: {e}")
 
@@ -64,9 +64,14 @@ def on_open(ws):
         ws.send(subscribe_msg)
         logger.info(f"📡 Підписано на символ Finnhub: {fh_symbol}")
 
+_ws_thread_started = False
+
 def start_finnhub_ws():
+    global _ws_thread_started
+    if _ws_thread_started:
+        return
     if not FINNHUB_TOKEN:
-        logger.error("❌ FINNHUB_TOKEN відсутній у config.py або змінних оточення!")
+        logger.error("❌ FINNHUB_TOKEN відсутній у змінних оточення!")
         return
 
     ws_url = f"wss://ws.finnhub.io?token={FINNHUB_TOKEN}"
@@ -80,7 +85,7 @@ def start_finnhub_ws():
     
     wst = threading.Thread(target=ws.run_forever, daemon=True)
     wst.start()
+    _ws_thread_started = True
 
 def get_live_price(ticker):
-    """Повертає актуальну ціну з WebSocket або None, якщо дані ще не надійшли."""
     return LIVE_PRICES.get(ticker)
