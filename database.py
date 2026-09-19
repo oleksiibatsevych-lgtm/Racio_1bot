@@ -21,6 +21,7 @@ def init_db():
         pair TEXT,
         signal_type TEXT,
         entry_price NUMERIC,
+        exit_price NUMERIC,
         expiration INT,
         ai_decision TEXT,
         ai_confidence INT,
@@ -34,6 +35,7 @@ def init_db():
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS pair TEXT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS signal_type TEXT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS entry_price NUMERIC;",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_price NUMERIC;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS expiration INT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_decision TEXT;",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_confidence INT;",
@@ -98,10 +100,10 @@ def get_all_users():
 
 def save_signal(*args, **kwargs):
     """Універсальне збереження сигналу в БД зі збереженням усіх метрик та параметрів повідомлення"""
-    pair = kwargs.get('pair') or (args[0] if len(args) > 0 else "UNKNOWN")
+    pair = kwargs.get('ticker') or kwargs.get('pair') or (args[0] if len(args) > 0 else "UNKNOWN")
     signal_type = kwargs.get('signal_type') or (args[1] if len(args) > 1 else "HOLD")
     entry_price = kwargs.get('entry_price') or (args[2] if len(args) > 2 else 0.0)
-    expiration = kwargs.get('expiration') or (args[3] if len(args) > 3 else 5)
+    expiration = kwargs.get('expiration_mins') or kwargs.get('expiration') or (args[3] if len(args) > 3 else 5)
     chat_id = kwargs.get('chat_id') or (args[4] if len(args) > 4 else None)
     message_id = kwargs.get('message_id') or (args[5] if len(args) > 5 else None)
 
@@ -146,6 +148,50 @@ def save_signal(*args, **kwargs):
         print(f"⚠️ Помилка збереження сигналу для {pair}: {e}")
         return None
 
+def get_signal_by_id(sig_id):
+    """Отримання даних сигналу за його ID"""
+    query = """
+    SELECT id, pair, signal_type, entry_price, expiration, chat_id, message_id, message_text, status, result 
+    FROM signals WHERE id = %s;
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (sig_id,))
+                row = cur.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'ticker': row[1],
+                        'pair': row[1],
+                        'signal_type': row[2],
+                        'entry_price': row[3],
+                        'expiration': row[4],
+                        'chat_id': row[5],
+                        'message_id': row[6],
+                        'message_text': row[7],
+                        'status': row[8],
+                        'result': row[9]
+                    }
+    except Exception as e:
+        print(f"⚠️ Помилка отримання сигналу {sig_id}: {e}")
+    return None
+
+def update_signal_result(sig_id, result, exit_price=None, pips=None):
+    """Оновлення результату сигналу (WIN / LOSS / NEUTRAL)"""
+    query = """
+    UPDATE signals 
+    SET result = %s, status = %s, exit_price = %s, pips = %s 
+    WHERE id = %s;
+    """
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (result, result, exit_price, pips, sig_id))
+            conn.commit()
+    except Exception as e:
+        print(f"⚠️ Помилка оновлення результату сигналу {sig_id}: {e}")
+
 def get_pending_signals():
     """Отримання незавершених сигналів з повним набором полів для таймера"""
     query = """
@@ -179,14 +225,14 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
                 
                 if fetch_yahoo_data_func:
                     df = fetch_yahoo_data_func(pair, interval="1m", range_period="1d")
-                    if not df.empty and 'close' in df.columns:
+                    if df is not None and not df.empty and 'close' in df.columns:
                         exit_price = float(df['close'].iloc[-1])
                     else:
                         exit_price = entry_price
                 else:
                     exit_price = entry_price
 
-                pips_multiplier = 100.0 if "JPY" in str(pair) else 10000.0
+                pips_multiplier = 1000.0 if "JPY" in str(pair) else 100000.0
                 raw_diff = exit_price - entry_price
 
                 if signal_type == "CALL":
@@ -197,7 +243,7 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
                         res = "LOSS"
                     else:
                         res = "NEUTRAL"
-                elif signal_type == "PUT":
+                elif signal_type in ["PUT", "PRODAZH"]:
                     pips = round(-raw_diff * pips_multiplier, 1)
                     if exit_price < entry_price:
                         res = "WIN"
@@ -209,8 +255,8 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
                     pips = 0.0
                     res = "NEUTRAL"
 
-                update_query = "UPDATE signals SET result = %s, status = %s, pips = %s WHERE id = %s;"
-                cur.execute(update_query, (res, res, pips, sig_id))
+                update_query = "UPDATE signals SET result = %s, status = %s, exit_price = %s, pips = %s WHERE id = %s;"
+                cur.execute(update_query, (res, res, exit_price, pips, sig_id))
             conn.commit()
 
         return {
