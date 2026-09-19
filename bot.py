@@ -2,7 +2,6 @@ import os
 import io
 import time
 import threading
-import sqlite3
 import requests
 import logging
 import yfinance as yf
@@ -12,12 +11,7 @@ from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
 
-try:
-    from curl_cffi import requests as curl_requests
-except ImportError:
-    curl_requests = None
-
-from config import TELEGRAM_TOKEN, PAIRS_MAP, FINNHUB_TOKEN, FINNHUB_API_KEY
+from config import TELEGRAM_TOKEN, PAIRS_MAP, YAHOO_PAIRS_MAP, FINNHUB_TOKEN, FINNHUB_API_KEY
 from indicators import AdaptiveTechnicalAnalysis
 import database
 from ml_model import TradingMLFilter
@@ -44,68 +38,15 @@ last_sent_signals = {}
 
 database.init_db()
 
-def init_logs_db():
-    try:
-        conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS filtered_logs (
-                chat_id INTEGER,
-                log_text TEXT,
-                timestamp REAL
-            )
-        ''')
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.exception(f"Помилка ініціалізації БД логів: {e}")
-
-init_logs_db()
-
-def clear_filtered_logs(chat_id):
-    try:
-        conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM filtered_logs WHERE chat_id = ?", (chat_id,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.exception(f"Помилка очищення логів: {e}")
-
-def save_filtered_log(chat_id, log_text):
-    try:
-        conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO filtered_logs (chat_id, log_text, timestamp) VALUES (?, ?, ?)", 
-                       (chat_id, log_text, time.time()))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.exception(f"Помилка збереження логу: {e}")
-
-def get_filtered_logs(chat_id):
-    try:
-        conn = sqlite3.connect("filtered_logs.db", check_same_thread=False)
-        cursor = conn.cursor()
-        cutoff = time.time() - 3600
-        cursor.execute("SELECT log_text FROM filtered_logs WHERE chat_id = ? AND timestamp > ? ORDER BY timestamp DESC", (chat_id, cutoff))
-        rows = cursor.fetchall()
-        conn.close()
-        return [row[0] for row in rows]
-    except Exception as e:
-        logger.exception(f"Помилка читання логів: {e}")
-        return []
-
-# --- FINNHUB REST API & RESAMPLING ---
+# Автозапуск WebSocket при старті модуля
+start_finnhub_ws()
 
 def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
-    """Отримання свічок безпосередньо з Finnhub REST API."""
     token = FINNHUB_API_KEY or FINNHUB_TOKEN
     if not token:
         return pd.DataFrame()
 
     end_time = int(time.time())
-    # Розрахунок часового вікна
     if resolution == "1":
         start_time = end_time - (count_candles * 60)
     elif resolution == "60":
@@ -115,7 +56,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "https://finnhub.io/api/v1/forex/candle"
+    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
     params = {
         "symbol": symbol,
         "resolution": resolution,
@@ -144,7 +85,6 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     return pd.DataFrame()
 
 def fetch_yahoo_fallback(ticker, interval="1m", range_period="7d"):
-    """Фолбек на yfinance, якщо Finnhub недоступний."""
     try:
         df_yf = yf.download(tickers=ticker, period=range_period, interval=interval, progress=False, auto_adjust=True)
         if not df_yf.empty:
@@ -161,7 +101,6 @@ def fetch_yahoo_fallback(ticker, interval="1m", range_period="7d"):
     return pd.DataFrame()
 
 def resample_candles(df_1m, rule):
-    """Ресемплінг 1m свічок у 5m, 15m без додаткових мережевих запитів."""
     if df_1m.empty:
         return pd.DataFrame()
     resampled = df_1m.resample(rule).agg({
@@ -174,25 +113,17 @@ def resample_candles(df_1m, rule):
     return resampled
 
 def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
-    """
-    Завантажує 1m, 1h та D свічки з Finnhub і генерує 5m/15m через Resampling.
-    Заощаджує лиміти запитів API.
-    """
-    # 1. Завантажуємо 1m свічки (достатньо 600 свічок для 1m, 5m, 15m)
     df_1m = fetch_finnhub_candles(ticker_finnhub, resolution="1", count_candles=600)
     
-    # Фолбек на Yahoo, якщо Finnhub порожній
     if df_1m.empty and ticker_yahoo:
         df_1m = fetch_yahoo_fallback(ticker_yahoo, interval="1m", range_period="5d")
 
     if df_1m.empty:
         return None, None, None, None, None
 
-    # Ресемплінг 1m -> 5m та 15m
     df_5m = resample_candles(df_1m, "5min")
     df_15m = resample_candles(df_1m, "15min")
 
-    # 2. Старші таймфрейми (1h та Daily)
     df_1h = fetch_finnhub_candles(ticker_finnhub, resolution="60", count_candles=200)
     if df_1h.empty and ticker_yahoo:
         df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
@@ -201,8 +132,7 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
     if df_daily.empty and ticker_yahoo:
         df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
 
-    # Накладаємо останні живі дані з WebSocket на свічку
-    live_p = get_live_price(ticker_finnhub)
+    live_p = get_live_price(ticker_finnhub) or (get_live_price(ticker_yahoo) if ticker_yahoo else None)
     if live_p and not df_1m.empty:
         df_1m.iloc[-1, df_1m.columns.get_loc('close')] = live_p
         if not df_5m.empty:
@@ -234,53 +164,49 @@ def get_current_session_info():
     return session_str, session_code, hour
 
 def process_signal_expiration(sig_id):
-    """Обробка підсумку угоди за живими даними з Finnhub WebSocket."""
     try:
-        if hasattr(database, "get_signal_by_id") and callable(getattr(database, "get_signal_by_id", None)):
-            sig_data = database.get_signal_by_id(sig_id)
-            if sig_data:
-                ticker = sig_data['ticker']
-                entry_price = float(sig_data['entry_price'])
-                signal_type = sig_data['signal_type']
+        sig_data = database.get_signal_by_id(sig_id)
+        if sig_data:
+            ticker = sig_data['ticker']
+            entry_price = float(sig_data['entry_price'])
+            signal_type = sig_data['signal_type']
 
-                exit_price = get_live_price(ticker)
-                if not exit_price:
-                    df_check = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
-                    if not df_check.empty:
-                        exit_price = float(df_check['close'].iloc[-1])
+            exit_price = get_live_price(ticker)
+            if not exit_price:
+                df_check = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
+                if not df_check.empty:
+                    exit_price = float(df_check['close'].iloc[-1])
 
-                if exit_price:
-                    multiplier = 1000 if "JPY" in ticker else 100000
-                    pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
+            if exit_price:
+                multiplier = 1000 if "JPY" in ticker else 100000
+                pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
 
-                    if signal_type == "CALL":
-                        result = "WIN" if exit_price > entry_price else ("LOSS" if exit_price < entry_price else "NEUTRAL")
-                    else:
-                        result = "WIN" if exit_price < entry_price else ("LOSS" if exit_price > entry_price else "NEUTRAL")
+                if signal_type == "CALL":
+                    result = "WIN" if exit_price > entry_price else ("LOSS" if exit_price < entry_price else "NEUTRAL")
+                else:
+                    result = "WIN" if exit_price < entry_price else ("LOSS" if exit_price > entry_price else "NEUTRAL")
 
-                    if hasattr(database, "update_signal_result"):
-                        database.update_signal_result(sig_id, result, exit_price, pips)
+                database.update_signal_result(sig_id, result, exit_price, pips)
 
-                    res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
-                    pips_str = f"+{pips:.1f}" if pips > 0 else f"{pips:.1f}"
+                res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
+                pips_str = f"+{pips:.1f}" if pips > 0 else f"{pips:.1f}"
 
-                    report_str = (
-                        f"\n----------------------------------\n"
-                        f"🏁 **Результат:** {res_icon} (`{pips_str}` п.)\n"
-                        f"📍 Вхід: `{entry_price:.5f}` ➔ Вихід: `{exit_price:.5f}`"
+                report_str = (
+                    f"\n----------------------------------\n"
+                    f"🏁 **Результат:** {res_icon} (`{pips_str}` п.)\n"
+                    f"📍 Вхід: `{entry_price:.5f}` ➔ Вихід: `{exit_price:.5f}`"
+                )
+
+                orig_txt = sig_data.get("message_text", "")
+                if orig_txt and "🏁 Результат" not in orig_txt:
+                    bot.edit_message_text(
+                        chat_id=sig_data["chat_id"], 
+                        message_id=sig_data["message_id"], 
+                        text=f"{orig_txt}\n{report_str}",
+                        parse_mode="Markdown"
                     )
+                return
 
-                    orig_txt = sig_data.get("message_text", "")
-                    if orig_txt and "🏁 Результат" not in orig_txt:
-                        bot.edit_message_text(
-                            chat_id=sig_data["chat_id"], 
-                            message_id=sig_data["message_id"], 
-                            text=f"{orig_txt}\n{report_str}",
-                            parse_mode="Markdown"
-                        )
-                    return
-
-        # Фолбек перевірка
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=None)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
             pips_val = float(res_data.get('pips', 0))
@@ -381,16 +307,15 @@ def process_single_pair(chat_id, name, ticker):
             bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні (зачекайте 3 хвилини).")
             return
 
-        # 1. Завантаження даних із підтримкою Finnhub та Resampling
-        df_daily, df_macro, df_mid, df_fast, df_micro = fetch_all_timeframes(ticker)
+        ticker_yahoo = YAHOO_PAIRS_MAP.get(name, "")
+        df_daily, df_macro, df_mid, df_fast, df_micro = fetch_all_timeframes(ticker, ticker_yahoo)
         
         if df_macro is None or df_macro.empty or df_fast is None or df_fast.empty:
             bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}")
             return
 
-        ws_price = get_live_price(ticker)
+        ws_price = get_live_price(ticker) or (get_live_price(ticker_yahoo) if ticker_yahoo else None)
 
-        # 2. Обчислення індикаторів
         if df_daily is not None and not df_daily.empty:
             df_daily = analyzer.calculate_indicators(df_daily)
         df_macro = analyzer.calculate_indicators(df_macro)
@@ -498,7 +423,6 @@ def process_single_pair(chat_id, name, ticker):
         timestamp_dt = datetime.utcnow()
         timestamp_str = timestamp_dt.strftime("%Y-%m-%d %H:%M:%S")
         
-        # 3. Збереження в БД та запуск таймера
         sig_id = database.save_signal(
             chat_id=chat_id,
             message_id=sent_msg.message_id,
@@ -516,3 +440,43 @@ def process_single_pair(chat_id, name, ticker):
     except Exception as e:
         logger.exception(f"Помилка обробки сигналу для {name}: {e}")
         bot.send_message(chat_id=chat_id, text=f"❌ Сталася помилка під час аналізу {name}.")
+
+def handle_text_message(update, context):
+    text = update.message.text
+    chat_id = update.effective_chat.id
+    database.register_user(update.effective_user.id, update.effective_user.username)
+
+    if text == "💵 Пари":
+        show_pairs_menu(chat_id)
+    elif text == "📊 Аналіз усіх пар":
+        bot.send_message(chat_id=chat_id, text="🔎 Розпочато сканування всіх доступних пар...")
+        for pair_name, pair_ticker in PAIRS_MAP.items():
+            process_single_pair(chat_id, pair_name, pair_ticker)
+            time.sleep(1)
+    elif text == "📈 Статистика":
+        stats_msg = database.get_stats_summary()
+        bot.send_message(chat_id=chat_id, text=f"📊 **Статистика роботи бота:**\n\n{stats_msg}", parse_mode="Markdown")
+    elif text == "📋 Логи фільтру":
+        logs = database.get_filtered_logs(chat_id)
+        if logs:
+            log_text = "\n".join(logs[:15])
+            bot.send_message(chat_id=chat_id, text=f"📋 **Останні логи:**\n\n{log_text}", parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id=chat_id, text="📋 Логи відсутні або застаріли.")
+
+def handle_callback_query(update, context):
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    query.answer()
+
+    data = query.data
+    if data.startswith("pair_"):
+        pair_name = data.replace("pair_", "")
+        if pair_name in PAIRS_MAP:
+            bot.send_message(chat_id=chat_id, text=f"⏳ Виконується мульти-ТФ аналіз пара {pair_name}...")
+            process_single_pair(chat_id, pair_name, PAIRS_MAP[pair_name])
+
+# --- Реєстрація обробників подій Telegram ---
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CallbackQueryHandler(handle_callback_query))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_message))
