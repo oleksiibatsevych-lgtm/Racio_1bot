@@ -250,7 +250,7 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
                 raw_diff = exit_price - entry_price
 
                 if signal_type == "CALL":
-                    pips = round(raw_diff * pips_multiplier, 1)
+                    pips = int(round(raw_diff * pips_multiplier))
                     if exit_price > entry_price:
                         res = "WIN"
                     elif exit_price < entry_price:
@@ -258,7 +258,7 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
                     else:
                         res = "NEUTRAL"
                 elif signal_type in ["PUT", "PRODAZH"]:
-                    pips = round(-raw_diff * pips_multiplier, 1)
+                    pips = int(round(-raw_diff * pips_multiplier))
                     if exit_price < entry_price:
                         res = "WIN"
                     elif exit_price > entry_price:
@@ -266,7 +266,7 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
                     else:
                         res = "NEUTRAL"
                 else:
-                    pips = 0.0
+                    pips = 0
                     res = "NEUTRAL"
 
                 update_query = "UPDATE signals SET result = %s, status = %s, exit_price = %s, pips = %s WHERE id = %s;"
@@ -278,6 +278,8 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
             "message_id": message_id,
             "pips": pips,
             "result": res,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
             "message_text": message_text
         }
     except Exception as e:
