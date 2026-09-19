@@ -25,8 +25,8 @@ def create_chart_image(df: pd.DataFrame, asset_name: str, tf_label="5m") -> io.B
         ax.vlines(i, lo, hi, color=color, linewidth=1, alpha=0.9)
         ax.bar(i, abs(cl - op), bottom=min(op, cl), color=color, width=0.6, alpha=0.9)
 
-    if 'ema_10' in plot_df.columns:
-        ax.plot(plot_df.index, plot_df['ema_10'], color="#2962FF", linestyle="-", linewidth=1.5, alpha=0.7, label="EMA 10")
+    if 'ema_9' in plot_df.columns:
+        ax.plot(plot_df.index, plot_df['ema_9'], color="#2962FF", linestyle="-", linewidth=1.5, alpha=0.7, label="EMA 9")
 
     if 'bb_upper' in plot_df.columns and 'bb_lower' in plot_df.columns:
         ax.plot(plot_df.index, plot_df['bb_upper'], color="#ab47bc", linestyle="--", linewidth=1, alpha=0.6, label="BB Upper")
