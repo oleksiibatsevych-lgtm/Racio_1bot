@@ -10,7 +10,10 @@ class AITradingAdvisor:
         self.openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         
         if self.gemini_key:
-            genai.configure(api_key=self.gemini_key)
+            try:
+                genai.configure(api_key=self.gemini_key)
+            except Exception as e:
+                print(f"⚠️ Помилка ініціалізації Gemini API: {e}")
             
         self.gemini_models = [
             "gemini-1.5-flash",
@@ -19,7 +22,6 @@ class AITradingAdvisor:
         ]
 
     def _evaluate_with_openrouter(self, prompt):
-        """Резервний аналіз через OpenRouter (DeepSeek / Llama)"""
         if not self.openrouter_key:
             return None
             
@@ -53,11 +55,6 @@ class AITradingAdvisor:
         return None
 
     def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
-        """
-        Аналіз та коригування сигналу від ШІ-радника.
-        ШІ виконує роль консультанта: обирає кращий ТФ, коригує експірацію та надає аналітичний висновок.
-        Він не блокує сигнал veto-відмовою, а допомагає точніше увійти в угоду.
-        """
         calculated_signal = payload.get('signal', 'CALL')
         calculated_exp = payload.get('suggested_exp', 5)
         primary_tf = payload.get('primary_tf', '5m')
@@ -97,7 +94,6 @@ class AITradingAdvisor:
 
         response_text = None
 
-        # 1. Основна спроба: Gemini
         if self.gemini_key:
             content_parts = [prompt]
             for chart in [macro_chart, mid_chart, micro_chart]:
@@ -118,12 +114,10 @@ class AITradingAdvisor:
                 except Exception as e:
                     print(f"⚠️ Збій Gemini ({model_name}): {e}")
 
-        # 2. Резервна спроба: OpenRouter
         if not response_text and self.openrouter_key:
             print("🔄 Gemini недоступна. Перемикаємося на резервний OpenRouter...")
             response_text = self._evaluate_with_openrouter(prompt)
 
-        # 3. Резервна відповідь (якщо ШІ-сервіси тимчасово недоступні)
         if not response_text:
             return {
                 "decision": "YES",
