@@ -26,7 +26,7 @@ class AdaptiveTechnicalAnalysis:
         avg_gain = self.get_rma(gain, rsi_period)
         avg_loss = self.get_rma(loss, rsi_period)
         rs = avg_gain / (avg_loss + 1e-10)
-        df['rsi'] = (100 - (100 / (1 + rs))).fillna(50)
+        df['rsi'] = (100 - (100 / (1 + rs))).clip(0, 100).fillna(50)
 
         # 2. Bollinger Bands & %B
         sma = df['close'].rolling(window=bb_period).mean()
@@ -34,9 +34,11 @@ class AdaptiveTechnicalAnalysis:
         df['bb_upper'] = sma + (std * 2)
         df['bb_lower'] = sma - (std * 2)
         df['bb_middle'] = sma
-        df['bb_width'] = ((df['bb_upper'] - df['bb_lower']) / (sma + 1e-10)).fillna(0.001)
+        
         bb_range = df['bb_upper'] - df['bb_lower']
+        df['bb_width'] = (bb_range / (sma + 1e-10)).fillna(0.001)
         df['pct_b'] = np.where(bb_range > 0, (df['close'] - df['bb_lower']) / bb_range, 0.5)
+        df['pct_b'] = df['pct_b'].clip(0.0, 1.0)
 
         # 3. ATR (за методом Вайлдера)
         if 'high' in df.columns and 'low' in df.columns:
@@ -46,19 +48,27 @@ class AdaptiveTechnicalAnalysis:
         else:
             df['atr'] = 0.0010
 
-        # 4. ADX (за методом Вайлдера)
-        if 'high' in df.columns and 'low' in df.columns and 'atr' in df.columns:
+        # 4. ADX (Захищений та стабілізований розрахунок)
+        if 'high' in df.columns and 'low' in df.columns:
             up_move = df['high'] - df['high'].shift(1)
             down_move = df['low'].shift(1) - df['low']
+            
             plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
             minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
             
-            plus_di = 100 * (self.get_rma(pd.Series(plus_dm, index=df.index), 14) / (df['atr'] + 1e-10))
-            minus_di = 100 * (self.get_rma(pd.Series(minus_dm, index=df.index), 14) / (df['atr'] + 1e-10))
-            dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)) * 100
-            df['adx'] = self.get_rma(dx, 14).fillna(20)
+            plus_dm_rma = self.get_rma(pd.Series(plus_dm, index=df.index), 14)
+            minus_dm_rma = self.get_rma(pd.Series(minus_dm, index=df.index), 14)
+            
+            plus_di = 100 * (plus_dm_rma / (df['atr'] + 1e-10))
+            minus_di = 100 * (minus_dm_rma / (df['atr'] + 1e-10))
+            
+            di_sum = plus_di + minus_di
+            di_diff = (plus_di - minus_di).abs()
+            
+            dx = np.where(di_sum > 0, (di_diff / di_sum) * 100, 0)
+            df['adx'] = self.get_rma(pd.Series(dx, index=df.index), 14).clip(0, 100).fillna(20)
         else:
-            df['adx'] = 20
+            df['adx'] = 20.0
 
         # 5. EMA Віяло
         for span in ema_periods:
@@ -78,14 +88,15 @@ class AdaptiveTechnicalAnalysis:
         if 'high' in df.columns and 'low' in df.columns:
             lowest_low = df['low'].rolling(window=14).min()
             highest_high = df['high'].rolling(window=14).max()
-            df['stoch_k'] = ((df['close'] - lowest_low) / (highest_high - lowest_low + 1e-10)) * 100
-            df['stoch_k'] = df['stoch_k'].fillna(50)
-            df['stoch_d'] = df['stoch_k'].rolling(window=3).mean().fillna(50)
+            stoch_range = highest_high - lowest_low
+            df['stoch_k'] = np.where(stoch_range > 0, ((df['close'] - lowest_low) / (stoch_range + 1e-10)) * 100, 50)
+            df['stoch_k'] = pd.Series(df['stoch_k'], index=df.index).clip(0, 100).fillna(50)
+            df['stoch_d'] = df['stoch_k'].rolling(window=3).mean().clip(0, 100).fillna(50)
         else:
-            df['stoch_k'] = 50
-            df['stoch_d'] = 50
+            df['stoch_k'] = 50.0
+            df['stoch_d'] = 50.0
 
-        # 8. Об'єм (VWAP)
+        # 8. VWAP
         if 'volume' in df.columns and df['volume'].sum() > 0:
             typical_price = (df['high'] + df['low'] + df['close']) / 3
             df['vwap_20'] = (typical_price * df['volume']).rolling(20).sum() / (df['volume'].rolling(20).sum() + 1e-10)
@@ -97,6 +108,8 @@ class AdaptiveTechnicalAnalysis:
             candle_range = df['high'] - df['low'] + 1e-10
             df['upper_wick_ratio'] = (df['high'] - df[['open', 'close']].max(axis=1)) / candle_range
             df['lower_wick_ratio'] = (df[['open', 'close']].min(axis=1) - df['low']) / candle_range
+            df['upper_wick_ratio'] = df['upper_wick_ratio'].clip(0, 1).fillna(0.0)
+            df['lower_wick_ratio'] = df['lower_wick_ratio'].clip(0, 1).fillna(0.0)
         else:
             df['upper_wick_ratio'] = 0.0
             df['lower_wick_ratio'] = 0.0
@@ -108,8 +121,8 @@ class AdaptiveTechnicalAnalysis:
         if df is None or df.empty or 'close' not in df.columns or len(df) < span_val:
             return "NEUTRAL"
         ema = df['close'].ewm(span=span_val, adjust=False).mean()
-        current_price = df['close'].iloc[-2] if len(df) >= 2 else df['close'].iloc[-1]
-        current_ema = ema.iloc[-2] if len(df) >= 2 else ema.iloc[-1]
+        current_price = float(df['close'].iloc[-1])
+        current_ema = float(ema.iloc[-1])
         threshold = current_ema * 0.0003
         
         if current_price - current_ema > threshold:
@@ -155,10 +168,10 @@ class AdaptiveTechnicalAnalysis:
         У тренді пріоритет за трендовими формаціями, у флеті - за відбиттям від рівнів.
         """
         if df_tf is None or df_tf.empty or len(df_tf) < 20:
-            return {'call_score': 0, 'put_score': 0, 'reasons_call': [], 'reasons_put': []}
+            return {'tf_name': tf_name, 'call_score': 0, 'put_score': 0, 'rsi': 50, 'adx': 20, 'atr': 0.001, 'pct_b': 0.5, 'divergence': 'NONE', 'lower_wick': 0.0, 'upper_wick': 0.0, 'reasons_call': [], 'reasons_put': []}
 
         df_tf = self.calculate_indicators(df_tf, rsi_period=9 if tf_name == '1m' else 14)
-        last = df_tf.iloc[-2] if len(df_tf) >= 2 else df_tf.iloc[-1]
+        last = df_tf.iloc[-1]
 
         rsi = float(last.get('rsi', 50))
         stoch_k = float(last.get('stoch_k', 50))
@@ -181,7 +194,6 @@ class AdaptiveTechnicalAnalysis:
         reasons_call = []
         reasons_put = []
 
-        # Визначення фази ринку
         is_trending = adx >= 25
         is_strong_trend = adx >= 35
 
@@ -358,7 +370,8 @@ class AdaptiveTechnicalAnalysis:
         else:
             base_exp = 5
 
-        atr_ma = frames[primary_tf]['atr'].rolling(20).mean().iloc[-2] if len(frames[primary_tf]) >= 20 else atr
+        atr_series = frames[primary_tf].get('atr', pd.Series([atr]))
+        atr_ma = atr_series.rolling(20).mean().iloc[-1] if len(atr_series) >= 20 else atr
         volatility_ratio = float(atr / (atr_ma + 1e-10))
 
         if volatility_ratio > 1.35 or adx > 32:
@@ -380,6 +393,8 @@ class AdaptiveTechnicalAnalysis:
 
         reason_str = ", ".join(selected_reasons[:3]) if selected_reasons else f"Пріоритет напрямку {direction}"
 
+        ema_dist_val = float(frames[primary_tf].get('ema_dist', pd.Series([0])).iloc[-1])
+
         return {
             'signal': direction,
             'score': final_score,
@@ -396,5 +411,5 @@ class AdaptiveTechnicalAnalysis:
             'reason': reason_str,
             'volatility_ratio': round(volatility_ratio, 3),
             'wick_ratio': round(wick_ratio_final, 3),
-            'ema_dist': round(float(frames[primary_tf].get('ema_dist', pd.Series([0])).iloc[-1]), 3)
+            'ema_dist': round(ema_dist_val, 3)
         }
