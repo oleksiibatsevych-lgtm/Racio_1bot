@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Dispatcher, CallbackQueryHandler, CommandHandler, MessageHandler, Filters
+from telegram.error import BadRequest, TelegramError
 
 from config import TELEGRAM_TOKEN, PAIRS_MAP, YAHOO_PAIRS_MAP, FINNHUB_TOKEN, FINNHUB_API_KEY
 from indicators import AdaptiveTechnicalAnalysis
@@ -200,12 +201,17 @@ def process_signal_expiration(sig_id):
 
                 orig_txt = sig_data.get("message_text", "")
                 if orig_txt and "🏁 Результат" not in orig_txt:
-                    bot.edit_message_text(
-                        chat_id=sig_data["chat_id"], 
-                        message_id=sig_data["message_id"], 
-                        text=f"{orig_txt}\n{report_str}",
-                        parse_mode="HTML"
-                    )
+                    try:
+                        bot.edit_message_text(
+                            chat_id=sig_data["chat_id"], 
+                            message_id=sig_data["message_id"], 
+                            text=f"{orig_txt}\n{report_str}",
+                            parse_mode="HTML"
+                        )
+                    except BadRequest:
+                        logger.warning(f"⚠️ Повідомлення {sig_data['message_id']} в чаті {sig_data['chat_id']} видалено або недоступне.")
+                    except TelegramError as te:
+                        logger.warning(f"⚠️ Помилка Telegram API при оновленні сигналу {sig_id}: {te}")
                 return
 
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=None)
@@ -220,12 +226,17 @@ def process_signal_expiration(sig_id):
 
             orig_txt = res_data.get("message_text", "")
             if orig_txt and "🏁 Результат" not in orig_txt:
-                bot.edit_message_text(
-                    chat_id=res_data["chat_id"], 
-                    message_id=res_data["message_id"], 
-                    text=f"{orig_txt}\n{res_icon}",
-                    parse_mode="HTML"
-                )
+                try:
+                    bot.edit_message_text(
+                        chat_id=res_data["chat_id"], 
+                        message_id=res_data["message_id"], 
+                        text=f"{orig_txt}\n{res_icon}",
+                        parse_mode="HTML"
+                    )
+                except BadRequest:
+                    logger.warning(f"⚠️ Повідомлення {res_data['message_id']} в чаті {res_data['chat_id']} видалено або недоступне.")
+                except TelegramError as te:
+                    logger.warning(f"⚠️ Помилка Telegram API при оновленні сигналу {sig_id}: {te}")
     except Exception as e:
         logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
 
