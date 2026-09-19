@@ -17,7 +17,7 @@ try:
 except ImportError:
     curl_requests = None
 
-from config import TELEGRAM_TOKEN, PAIRS_MAP
+from config import TELEGRAM_TOKEN, PAIRS_MAP, FINNHUB_TOKEN, FINNHUB_API_KEY
 from indicators import AdaptiveTechnicalAnalysis
 import database
 from ml_model import TradingMLFilter
@@ -96,78 +96,121 @@ def get_filtered_logs(chat_id):
         logger.exception(f"Помилка читання логів: {e}")
         return []
 
-def fetch_yahoo_data(ticker, interval="1m", range_period="7d"):
-    """Завантаження котирувань через yfinance з обходом обмежень."""
-    try:
-        df_yf = yf.download(
-            tickers=ticker,
-            period=range_period,
-            interval=interval,
-            progress=False,
-            auto_adjust=True
-        )
-        if not df_yf.empty:
-            if isinstance(df_yf.columns, pd.MultiIndex):
-                df_yf.columns = df_yf.columns.get_level_values(0)
-            
-            df_yf = df_yf.rename(columns={
-                "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"
-            })
-            df_yf = df_yf[["open", "high", "low", "close", "volume"]].copy()
-            df_yf.dropna(subset=["open", "high", "low", "close"], inplace=True)
-            if not df_yf.empty:
-                if df_yf.index.tz is not None:
-                    df_yf.index = df_yf.index.tz_localize(None)
-                return df_yf
-    except Exception as e:
-        logger.warning(f"yf.download failed for {ticker}: {e}")
+# --- FINNHUB REST API & RESAMPLING ---
+
+def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
+    """Отримання свічок безпосередньо з Finnhub REST API."""
+    token = FINNHUB_API_KEY or FINNHUB_TOKEN
+    if not token:
+        return pd.DataFrame()
+
+    end_time = int(time.time())
+    # Розрахунок часового вікна
+    if resolution == "1":
+        start_time = end_time - (count_candles * 60)
+    elif resolution == "60":
+        start_time = end_time - (count_candles * 3600)
+    elif resolution == "D":
+        start_time = end_time - (count_candles * 86400)
+    else:
+        start_time = end_time - (count_candles * 300)
+
+    url = "https://finnhub.io/api/v1/forex/candle"
+    params = {
+        "symbol": symbol,
+        "resolution": resolution,
+        "from": start_time,
+        "to": end_time,
+        "token": token
+    }
 
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
-        }
-        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}"
-        params = {"interval": interval, "range": range_period}
-        
-        if curl_requests:
-            response = curl_requests.get(url, headers=headers, params=params, timeout=7, impersonate="chrome120")
-        else:
-            response = requests.get(url, headers=headers, params=params, timeout=7)
-
-        if response.status_code == 200:
-            data = response.json()
-            result = data.get("chart", {}).get("result")
-            if result:
-                res = result[0]
-                timestamps = res.get("timestamp", [])
-                quotes = res.get("indicators", {}).get("quote", [{}])[0]
-                if timestamps and quotes and quotes.get("close"):
-                    df = pd.DataFrame({
-                        "open": quotes.get("open", []),
-                        "high": quotes.get("high", []),
-                        "low": quotes.get("low", []),
-                        "close": quotes.get("close", []),
-                        "volume": quotes.get("volume", [0] * len(timestamps))
-                    }, index=pd.to_datetime(timestamps, unit="s"))
-                    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
-                    df["volume"] = df["volume"].fillna(0)
-                    if not df.empty:
-                        if df.index.tz is not None:
-                            df.index = df.index.tz_localize(None)
-                        return df
+        resp = requests.get(url, params=params, timeout=6)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("s") == "ok":
+                df = pd.DataFrame({
+                    "open": data["o"],
+                    "high": data["h"],
+                    "low": data["l"],
+                    "close": data["c"],
+                    "volume": data["v"]
+                }, index=pd.to_datetime(data["t"], unit="s"))
+                df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+                return df
     except Exception as e:
-        logger.warning(f"Direct Yahoo query failed for {ticker}: {e}")
+        logger.warning(f"Finnhub REST API error for {symbol}: {e}")
 
     return pd.DataFrame()
 
-def fetch_realtime_data(ticker, interval="1m", range_period="7d"):
-    """Завантажує дані з Yahoo та накладає найновішу live-ціну з Finnhub WebSocket."""
-    df = fetch_yahoo_data(ticker, interval=interval, range_period=range_period)
-    live_p = get_live_price(ticker)
-    if live_p and not df.empty:
-        df.iloc[-1, df.columns.get_loc('close')] = live_p
-    return df
+def fetch_yahoo_fallback(ticker, interval="1m", range_period="7d"):
+    """Фолбек на yfinance, якщо Finnhub недоступний."""
+    try:
+        df_yf = yf.download(tickers=ticker, period=range_period, interval=interval, progress=False, auto_adjust=True)
+        if not df_yf.empty:
+            if isinstance(df_yf.columns, pd.MultiIndex):
+                df_yf.columns = df_yf.columns.get_level_values(0)
+            df_yf = df_yf.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+            df_yf = df_yf[["open", "high", "low", "close", "volume"]].copy()
+            df_yf.dropna(subset=["open", "high", "low", "close"], inplace=True)
+            if df_yf.index.tz is not None:
+                df_yf.index = df_yf.index.tz_localize(None)
+            return df_yf
+    except Exception as e:
+        logger.warning(f"Yahoo fallback failed for {ticker}: {e}")
+    return pd.DataFrame()
+
+def resample_candles(df_1m, rule):
+    """Ресемплінг 1m свічок у 5m, 15m без додаткових мережевих запитів."""
+    if df_1m.empty:
+        return pd.DataFrame()
+    resampled = df_1m.resample(rule).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum"
+    }).dropna()
+    return resampled
+
+def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
+    """
+    Завантажує 1m, 1h та D свічки з Finnhub і генерує 5m/15m через Resampling.
+    Заощаджує лиміти запитів API.
+    """
+    # 1. Завантажуємо 1m свічки (достатньо 600 свічок для 1m, 5m, 15m)
+    df_1m = fetch_finnhub_candles(ticker_finnhub, resolution="1", count_candles=600)
+    
+    # Фолбек на Yahoo, якщо Finnhub порожній
+    if df_1m.empty and ticker_yahoo:
+        df_1m = fetch_yahoo_fallback(ticker_yahoo, interval="1m", range_period="5d")
+
+    if df_1m.empty:
+        return None, None, None, None, None
+
+    # Ресемплінг 1m -> 5m та 15m
+    df_5m = resample_candles(df_1m, "5min")
+    df_15m = resample_candles(df_1m, "15min")
+
+    # 2. Старші таймфрейми (1h та Daily)
+    df_1h = fetch_finnhub_candles(ticker_finnhub, resolution="60", count_candles=200)
+    if df_1h.empty and ticker_yahoo:
+        df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
+
+    df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
+    if df_daily.empty and ticker_yahoo:
+        df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
+
+    # Накладаємо останні живі дані з WebSocket на свічку
+    live_p = get_live_price(ticker_finnhub)
+    if live_p and not df_1m.empty:
+        df_1m.iloc[-1, df_1m.columns.get_loc('close')] = live_p
+        if not df_5m.empty:
+            df_5m.iloc[-1, df_5m.columns.get_loc('close')] = live_p
+        if not df_15m.empty:
+            df_15m.iloc[-1, df_15m.columns.get_loc('close')] = live_p
+
+    return df_daily, df_1h, df_15m, df_5m, df_1m
 
 def get_current_session_info():
     now_utc = datetime.utcnow()
@@ -193,7 +236,6 @@ def get_current_session_info():
 def process_signal_expiration(sig_id):
     """Обробка підсумку угоди за живими даними з Finnhub WebSocket."""
     try:
-        # 1. Пряма перевірка через детальні дані сигналу (якщо реалізовано в database.py)
         if hasattr(database, "get_signal_by_id") and callable(getattr(database, "get_signal_by_id", None)):
             sig_data = database.get_signal_by_id(sig_id)
             if sig_data:
@@ -201,10 +243,9 @@ def process_signal_expiration(sig_id):
                 entry_price = float(sig_data['entry_price'])
                 signal_type = sig_data['signal_type']
 
-                # Отримуємо точну ціну експірації з WebSocket
                 exit_price = get_live_price(ticker)
                 if not exit_price:
-                    df_check = fetch_yahoo_data(ticker, interval="1m", range_period="1d")
+                    df_check = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
                     if not df_check.empty:
                         exit_price = float(df_check['close'].iloc[-1])
 
@@ -239,19 +280,16 @@ def process_signal_expiration(sig_id):
                         )
                     return
 
-        # 2. Фолбек на стандартизований розрахунок у базі даних
-        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=fetch_realtime_data)
+        # Фолбек перевірка
+        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=None)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
             pips_val = float(res_data.get('pips', 0))
             pips_str = f"+{pips_val:.1f}" if pips_val > 0 else f"{pips_val:.1f}"
-
             res_result = res_data.get('result', 'NEUTRAL')
-            if res_result == 'WIN':
-                res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)"
-            elif res_result == 'NEUTRAL':
-                res_icon = f"🏁 Результат: NEUTRAL ➖ ({pips_str} п.)"
-            else:
-                res_icon = f"🏁 Результат: LOSS ❌ ({pips_str} п.)"
+            
+            res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)" if res_result == 'WIN' else (
+                f"🏁 Результат: LOSS ❌ ({pips_str} п.)" if res_result == 'LOSS' else f"🏁 Результат: NEUTRAL ➖ ({pips_str} п.)"
+            )
 
             orig_txt = res_data.get("message_text", "")
             if orig_txt and "🏁 Результат" not in orig_txt:
@@ -302,7 +340,7 @@ restore_pending_timers()
 
 @app.route("/")
 def index():
-    return "Racio_1bot is running with Finnhub WebSocket!"
+    return "Racio_1bot is running with Finnhub REST & WebSocket!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -334,10 +372,6 @@ def show_pairs_menu(chat_id):
     reply_markup = InlineKeyboardMarkup(buttons)
     bot.send_message(chat_id=chat_id, text="Оберіть валютну пару для миттєвого мульти-ТФ аналізу:", reply_markup=reply_markup)
 
-def train_ml_command(update, context):
-    _, msg = ml_filter.train_model()
-    update.message.reply_text(msg)
-
 def process_single_pair(chat_id, name, ticker):
     try:
         session_str, session_code, hour = get_current_session_info()
@@ -347,19 +381,17 @@ def process_single_pair(chat_id, name, ticker):
             bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні (зачекайте 3 хвилини).")
             return
 
-        df_daily = fetch_realtime_data(ticker, interval="1d", range_period="30d")
-        df_macro = fetch_realtime_data(ticker, interval="1h", range_period="60d")
-        df_mid = fetch_realtime_data(ticker, interval="15m", range_period="10d")
-        df_fast = fetch_realtime_data(ticker, interval="5m", range_period="5d")
-        df_micro = fetch_realtime_data(ticker, interval="1m", range_period="7d")
+        # 1. Завантаження даних із підтримкою Finnhub та Resampling
+        df_daily, df_macro, df_mid, df_fast, df_micro = fetch_all_timeframes(ticker)
         
-        if df_macro.empty or df_mid.empty or df_fast.empty or df_micro.empty:
+        if df_macro is None or df_macro.empty or df_fast is None or df_fast.empty:
             bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}")
             return
 
         ws_price = get_live_price(ticker)
 
-        if not df_daily.empty:
+        # 2. Обчислення індикаторів
+        if df_daily is not None and not df_daily.empty:
             df_daily = analyzer.calculate_indicators(df_daily)
         df_macro = analyzer.calculate_indicators(df_macro)
         df_mid = analyzer.calculate_indicators(df_mid)
@@ -368,7 +400,7 @@ def process_single_pair(chat_id, name, ticker):
 
         global_trend = analyzer.get_trend(df_macro, span_val=200)
         mid_trend = analyzer.get_trend(df_mid, span_val=50)
-        pivots = analyzer.calculate_pivots(df_daily if not df_daily.empty else df_macro)
+        pivots = analyzer.calculate_pivots(df_daily if (df_daily is not None and not df_daily.empty) else df_macro)
         
         tf_dict = {'1m': df_micro, '5m': df_fast, '15m': df_mid, '1h': df_macro}
         sig_data = analyzer.generate_signal(
@@ -397,7 +429,7 @@ def process_single_pair(chat_id, name, ticker):
         strategy_priority = sig_data.get('priority', 2)
         calculated_expiration = sig_data.get('expiration_minutes', 5)
         
-        current_price = ws_price if ws_price else (float(df_fast['close'].iloc[-2]) if len(df_fast) >= 2 else float(df_fast['close'].iloc[-1]))
+        current_price = ws_price if ws_price else (float(df_fast['close'].iloc[-1]) if not df_fast.empty else 0.0)
         dist_pivot = (current_price - pivots['P']) / pivots['P'] if pivots['P'] > 0 else 0.0
         
         win_probability = ml_filter.predict_signal_probability(
@@ -463,89 +495,24 @@ def process_single_pair(chat_id, name, ticker):
         
         sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="Markdown")
         
-        timestamp_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp_dt = datetime.utcnow()
+        timestamp_str = timestamp_dt.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 3. Збереження в БД та запуск таймера
         sig_id = database.save_signal(
-            ticker, signal_type, current_price, expiration, chat_id, sent_msg.message_id,
-            ai_decision="YES", ai_confidence=ai_confidence, ai_reason=ai_reason,
-            rsi=rsi, adx=adx, bb_width=bb_width,
-            session_code=session_code, hour=hour, divergence=divergence_str,
-            dist_pivot=dist_pivot, message_text=msg_text,
-            volatility_ratio=volatility_ratio, wick_ratio=wick_ratio, ema_dist=ema_dist
+            chat_id=chat_id,
+            message_id=sent_msg.message_id,
+            ticker=ticker,
+            signal_type=signal_type,
+            entry_price=current_price,
+            expiration_mins=expiration,
+            timestamp_str=timestamp_str,
+            message_text=msg_text
         )
+
         if sig_id:
-            schedule_signal_timer(sig_id, timestamp_str, expiration)
+            schedule_signal_timer(sig_id, timestamp_dt, expiration)
+
     except Exception as e:
-        logger.exception(f"Помилка обробки пари {ticker}: {e}")
-        bot.send_message(chat_id=chat_id, text=f"❌ Сталася помилка при аналізі {ticker}.")
-
-def run_full_scan_background(chat_id):
-    clear_filtered_logs(chat_id)
-    bot.send_message(chat_id=chat_id, text="🔍 Розпочато повний аналіз усіх 21 валютних пар...")
-    
-    def worker():
-        for name, ticker in PAIRS_MAP.items():
-            process_single_pair(chat_id, name, ticker)
-            time.sleep(2)
-        bot.send_message(chat_id=chat_id, text="✅ Повний сканер завершив перевірку всіх пар!")
-
-    threading.Thread(target=worker, daemon=True).start()
-
-def show_stats(chat_id):
-    try:
-        stats_text = database.get_stats_summary()
-        bot.send_message(chat_id=chat_id, text=f"📈 **Статистика сигналів:**\n\n{stats_text}", parse_mode="Markdown")
-    except Exception as e:
-        logger.exception(f"Помилка отримання статистики: {e}")
-        bot.send_message(chat_id=chat_id, text="⚠️ Помилка зчитування статистики з бази даних.")
-
-def show_logs(chat_id):
-    logs = get_filtered_logs(chat_id)
-    if not logs:
-        bot.send_message(chat_id=chat_id, text="📋 Логи порожні або застаріли.")
-    else:
-        text = "📋 **Останні записи логів:**\n\n" + "\n".join(logs[:15])
-        bot.send_message(chat_id=chat_id, text=text)
-
-def handle_message(update, context):
-    text = update.message.text
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    database.register_user(chat_id, user.username if user else None)
-
-    if text == "📊 Аналіз усіх пар":
-        run_full_scan_background(chat_id)
-    elif text == "💵 Пари":
-        show_pairs_menu(chat_id)
-    elif text == "📈 Статистика":
-        show_stats(chat_id)
-    elif text == "📋 Логи фільтру":
-        show_logs(chat_id)
-
-def button_handler(update, context):
-    query = update.callback_query
-    query.answer()
-    data = query.data
-
-    if data.startswith("pair_"):
-        pair_name = data.replace("pair_", "")
-        ticker = PAIRS_MAP.get(pair_name)
-        if ticker:
-            bot.send_message(chat_id=query.message.chat_id, text=f"⏳ Запущено аналіз для **{pair_name}**...", parse_mode="Markdown")
-            threading.Thread(target=process_single_pair, args=(query.message.chat_id, pair_name, ticker), daemon=True).start()
-
-# Реєстрація обробників
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("train_ml", train_ml_command))
-dispatcher.add_handler(CallbackQueryHandler(button_handler))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-# Запуск фонового сокета Finnhub WebSocket
-try:
-    threading.Thread(target=start_finnhub_ws, daemon=True).start()
-    logger.info("🌐 Фоновий потік Finnhub WebSocket успішно запущено.")
-except Exception as e:
-    logger.error(f"⚠️ Не вдалося запустити Finnhub WebSocket: {e}")
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+        logger.exception(f"Помилка обробки сигналу для {name}: {e}")
+        bot.send_message(chat_id=chat_id, text=f"❌ Сталася помилка під час аналізу {name}.")
