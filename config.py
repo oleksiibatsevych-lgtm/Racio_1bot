@@ -4,9 +4,8 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 FINNHUB_TOKEN = os.environ.get("FINNHUB_TOKEN", "")
-FINNHUB_API_KEY = FINNHUB_TOKEN  # Для уніфікації викликів в усіх модулях
+FINNHUB_API_KEY = FINNHUB_TOKEN
 
-# Обробка та очищення DATABASE_URL
 raw_db_url = os.environ.get("DATABASE_URL", "")
 
 if raw_db_url.startswith("postgres://"):
@@ -14,7 +13,6 @@ if raw_db_url.startswith("postgres://"):
 
 DATABASE_URL = raw_db_url.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
 
-# Основний мапінг пар для Finnhub (формат OANDA)
 PAIRS_MAP = {
     "EUR/USD": "OANDA:EUR_USD",
     "GBP/USD": "OANDA:GBP_USD",
@@ -39,7 +37,6 @@ PAIRS_MAP = {
     "CAD/CHF": "OANDA:CAD_CHF"
 }
 
-# Резервний мапінг для Yahoo Finance (якщо знадобиться як fallback)
 YAHOO_PAIRS_MAP = {
     "EUR/USD": "EURUSD=X",
     "GBP/USD": "GBPUSD=X",
