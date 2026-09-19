@@ -306,7 +306,9 @@ class AdaptiveTechnicalAnalysis:
 
         evaluated_tfs = []
         for tf_name, df_tf in frames.items():
-            tf_res = self.score_single_timeframe(df_tf, tf_name, global_trend=global_trend, pivots=pivots)
+            df_tf_calc = self.calculate_indicators(df_tf, rsi_period=9 if tf_name == '1m' else 14)
+            frames[tf_name] = df_tf_calc
+            tf_res = self.score_single_timeframe(df_tf_calc, tf_name, global_trend=global_trend, pivots=pivots)
             evaluated_tfs.append(tf_res)
 
         total_call = sum(t['call_score'] for t in evaluated_tfs)
