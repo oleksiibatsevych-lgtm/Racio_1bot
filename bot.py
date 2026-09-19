@@ -7,7 +7,7 @@ import logging
 import html
 import gc
 import matplotlib
-matplotlib.use('Agg')  # Фоновый рендеринг без GUI для сохранения RAM
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import yfinance as yf
 import pandas as pd
@@ -44,7 +44,6 @@ last_sent_signals = {}
 
 database.init_db()
 
-# Автозапуск WebSocket при старте модуля
 start_finnhub_ws()
 
 def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
@@ -185,7 +184,8 @@ def process_signal_expiration(sig_id):
 
             if exit_price:
                 multiplier = 1000 if "JPY" in ticker else 100000
-                pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
+                raw_pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
+                pips = int(round(raw_pips))
 
                 if signal_type == "CALL":
                     result = "WIN" if exit_price > entry_price else ("LOSS" if exit_price < entry_price else "NEUTRAL")
@@ -195,12 +195,12 @@ def process_signal_expiration(sig_id):
                 database.update_signal_result(sig_id, result, exit_price, pips)
 
                 res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
-                pips_str = f"+{pips:.1f}" if pips > 0 else f"{pips:.1f}"
+                pips_str = f"+{pips}" if pips > 0 else f"{pips}"
 
                 report_str = (
                     f"\n----------------------------------\n"
                     f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
-                    f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ Вихід: <code>{exit_price:.5f}</code>"
+                    f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>"
                 )
 
                 orig_txt = sig_data.get("message_text", "")
@@ -220,12 +220,18 @@ def process_signal_expiration(sig_id):
 
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=None)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
-            pips_val = float(res_data.get('pips', 0))
-            pips_str = f"+{pips_val:.1f}" if pips_val > 0 else f"{pips_val:.1f}"
+            pips_val = int(res_data.get('pips', 0))
+            pips_str = f"+{pips_val}" if pips_val > 0 else f"{pips_val}"
             res_result = res_data.get('result', 'NEUTRAL')
+            entry_p = float(res_data.get('entry_price', 0.0))
+            exit_p = float(res_data.get('exit_price', 0.0))
             
-            res_icon = f"🏁 Результат: WIN ✅ ({pips_str} п.)" if res_result == 'WIN' else (
-                f"🏁 Результат: LOSS ❌ ({pips_str} п.)" if res_result == 'LOSS' else f"🏁 Результат: NEUTRAL ➖ ({pips_str} п.)"
+            res_icon = "✅ WIN" if res_result == "WIN" else ("❌ LOSS" if res_result == "LOSS" else "➖ NEUTRAL")
+
+            report_str = (
+                f"\n----------------------------------\n"
+                f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
+                f"📍 Вхід: <code>{entry_p:.5f}</code> ➔ 🏁 Закриття: <code>{exit_p:.5f}</code>"
             )
 
             orig_txt = res_data.get("message_text", "")
@@ -234,7 +240,7 @@ def process_signal_expiration(sig_id):
                     bot.edit_message_text(
                         chat_id=res_data["chat_id"], 
                         message_id=res_data["message_id"], 
-                        text=f"{orig_txt}\n{res_icon}",
+                        text=f"{orig_txt}\n{report_str}",
                         parse_mode="HTML"
                     )
                 except BadRequest:
@@ -463,7 +469,6 @@ def process_single_pair(chat_id, name, ticker):
         gc.collect()
 
 def process_all_pairs_background(chat_id):
-    """Фонова обробка всіх пар у окремому потоці"""
     bot.send_message(chat_id=chat_id, text="🔎 Розпочато сканування всіх доступних пар...")
     for pair_name, pair_ticker in PAIRS_MAP.items():
         try:
@@ -483,7 +488,6 @@ def handle_text_message(update, context):
     if text == "💵 Пари":
         show_pairs_menu(chat_id)
     elif text == "📊 Аналіз усіх пар":
-        # Запуск фонового потока, чтобы вебхук не зависал и Render не завершал процесс по OOM
         thread = threading.Thread(target=process_all_pairs_background, args=(chat_id,))
         thread.daemon = True
         thread.start()
@@ -510,7 +514,6 @@ def handle_callback_query(update, context):
             bot.send_message(chat_id=chat_id, text=f"⏳ Виконується мульти-ТФ аналіз пара {pair_name}...")
             process_single_pair(chat_id, pair_name, PAIRS_MAP[pair_name])
 
-# --- Реєстрація обробників подій Telegram ---
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CallbackQueryHandler(handle_callback_query))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_message))
