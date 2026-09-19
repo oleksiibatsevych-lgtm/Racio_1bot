@@ -1,3 +1,4 @@
+import time
 import psycopg2
 from config import DATABASE_URL
 
@@ -7,7 +8,6 @@ def get_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    """Створення та оновлення таблиць при запуску бота"""
     query_users = """
     CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
@@ -28,6 +28,14 @@ def init_db():
         ai_reason TEXT,
         status TEXT DEFAULT 'PENDING',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+    query_logs = """
+    CREATE TABLE IF NOT EXISTS filtered_logs (
+        id SERIAL PRIMARY KEY,
+        chat_id BIGINT,
+        log_text TEXT,
+        timestamp DOUBLE PRECISION
     );
     """
     
@@ -63,6 +71,7 @@ def init_db():
             with conn.cursor() as cur:
                 cur.execute(query_users)
                 cur.execute(query_signals)
+                cur.execute(query_logs)
                 for col_query in columns_to_add:
                     cur.execute(col_query)
             conn.commit()
@@ -71,7 +80,6 @@ def init_db():
         print(f"⚠️ Помилка ініціалізації бази даних: {e}")
 
 def register_user(user_id, username=None):
-    """Збереження або оновлення користувача"""
     query = """
     INSERT INTO users (user_id, username) 
     VALUES (%s, %s) 
@@ -86,7 +94,6 @@ def register_user(user_id, username=None):
         print(f"⚠️ Помилка реєстрації користувача {user_id}: {e}")
 
 def get_all_users():
-    """Отримання списку всіх користувачів"""
     query = "SELECT user_id FROM users;"
     try:
         with get_connection() as conn:
@@ -99,7 +106,6 @@ def get_all_users():
         return []
 
 def save_signal(*args, **kwargs):
-    """Універсальне збереження сигналу в БД зі збереженням усіх метрик та параметрів повідомлення"""
     pair = kwargs.get('ticker') or kwargs.get('pair') or (args[0] if len(args) > 0 else "UNKNOWN")
     signal_type = kwargs.get('signal_type') or (args[1] if len(args) > 1 else "HOLD")
     entry_price = kwargs.get('entry_price') or (args[2] if len(args) > 2 else 0.0)
@@ -149,7 +155,6 @@ def save_signal(*args, **kwargs):
         return None
 
 def get_signal_by_id(sig_id):
-    """Отримання даних сигналу за його ID"""
     query = """
     SELECT id, pair, signal_type, entry_price, expiration, chat_id, message_id, message_text, status, result 
     FROM signals WHERE id = %s;
@@ -178,7 +183,6 @@ def get_signal_by_id(sig_id):
     return None
 
 def update_signal_result(sig_id, result, exit_price=None, pips=None):
-    """Оновлення результату сигналу (WIN / LOSS / NEUTRAL)"""
     query = """
     UPDATE signals 
     SET result = %s, status = %s, exit_price = %s, pips = %s 
@@ -193,7 +197,6 @@ def update_signal_result(sig_id, result, exit_price=None, pips=None):
         print(f"⚠️ Помилка оновлення результату сигналу {sig_id}: {e}")
 
 def get_pending_signals():
-    """Отримання незавершених сигналів з повним набором полів для таймера"""
     query = """
     SELECT id, pair, signal_type, entry_price, expiration, 
            TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI:SS') as created_at_str, 
@@ -210,7 +213,6 @@ def get_pending_signals():
         return []
 
 def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
-    """Перевірка результату угоди після завершення терміну експірації"""
     query = "SELECT id, pair, signal_type, entry_price, expiration, chat_id, message_id, message_text FROM signals WHERE id = %s;"
     try:
         with get_connection() as conn:
@@ -271,7 +273,6 @@ def evaluate_single_signal(sig_id, fetch_yahoo_data_func=None):
         return None
 
 def update_signal_status(signal_id, status):
-    """Оновлення статусу сигналу (WIN / LOSS / EXPIRED)"""
     query = "UPDATE signals SET status = %s WHERE id = %s;"
     try:
         with get_connection() as conn:
@@ -282,7 +283,6 @@ def update_signal_status(signal_id, status):
         print(f"⚠️ Помилка оновлення статусу сигналу {signal_id}: {e}")
 
 def get_overall_stats():
-    """Розрахунок загальної статистики угод з бази даних"""
     query = """
     SELECT 
         COUNT(*) as total,
@@ -326,7 +326,6 @@ def get_overall_stats():
     }
 
 def get_stats_summary():
-    """Форматування загальної статистики у тексту для відправки телеграм ботом"""
     stats = get_overall_stats()
     return (
         f"📊 **Всього сигналів:** `{stats['total']}`\n"
@@ -336,3 +335,36 @@ def get_stats_summary():
         f"⏳ **В очікуванні:** `{stats['pending']}`\n"
         f"🎯 **Вінрейт:** `{stats['winrate']}%`"
     )
+
+def clear_filtered_logs(chat_id):
+    query = "DELETE FROM filtered_logs WHERE chat_id = %s;"
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (chat_id,))
+            conn.commit()
+    except Exception as e:
+        print(f"⚠️ Помилка очищення логів: {e}")
+
+def save_filtered_log(chat_id, log_text):
+    query = "INSERT INTO filtered_logs (chat_id, log_text, timestamp) VALUES (%s, %s, %s);"
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (chat_id, log_text, time.time()))
+            conn.commit()
+    except Exception as e:
+        print(f"⚠️ Помилка збереження логу: {e}")
+
+def get_filtered_logs(chat_id):
+    cutoff = time.time() - 3600
+    query = "SELECT log_text FROM filtered_logs WHERE chat_id = %s AND timestamp > %s ORDER BY timestamp DESC;"
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (chat_id, cutoff))
+                rows = cur.fetchall()
+                return [row[0] for row in rows]
+    except Exception as e:
+        print(f"⚠️ Помилка читання логів: {e}")
+        return []
