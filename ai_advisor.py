@@ -15,10 +15,10 @@ class AITradingAdvisor:
             except Exception as e:
                 print(f"⚠️ Помилка ініціалізації Gemini API: {e}")
             
+        # Оновлено на актуальні версії моделей Gemini 2.5
         self.gemini_models = [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-2.0-flash"
+            "gemini-2.5-flash",
+            "gemini-2.5-pro"
         ]
 
     def _evaluate_with_openrouter(self, prompt):
@@ -32,9 +32,10 @@ class AITradingAdvisor:
         }
 
         models_to_try = [
-            "deepseek/deepseek-r1:free",
+            "google/gemini-2.5-flash:free",
             "meta-llama/llama-3.3-70b-instruct:free",
-            "google/gemini-2.0-flash-exp:free"
+            "deepseek/deepseek-chat",
+            "openrouter/auto"
         ]
 
         for model_slug in models_to_try:
@@ -46,9 +47,10 @@ class AITradingAdvisor:
                 response = requests.post(url, headers=headers, json=payload, timeout=12)
                 if response.status_code == 200:
                     data = response.json()
-                    res_text = data["choices"][0]["message"]["content"]
-                    if res_text:
-                        return res_text
+                    if "choices" in data and len(data["choices"]) > 0:
+                        res_text = data["choices"][0]["message"]["content"]
+                        if res_text:
+                            return res_text
             except Exception as e:
                 print(f"⚠️ Помилка OpenRouter ({model_slug}): {e}")
 
