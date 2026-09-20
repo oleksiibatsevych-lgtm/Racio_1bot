@@ -3,11 +3,13 @@ import os
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-FINNHUB_TOKEN = os.environ.get("FINNHUB_TOKEN", "")
+
+# Перевіряємо обидві можливі назви ключа Finnhub у змінних оточення Render
+FINNHUB_TOKEN = os.environ.get("FINNHUB_TOKEN") or os.environ.get("FINNHUB_API_KEY", "")
 FINNHUB_API_KEY = FINNHUB_TOKEN
 
+# Безпечне коригування URL бази даних PostgreSQL
 raw_db_url = os.environ.get("DATABASE_URL", "")
-
 if raw_db_url.startswith("postgres://"):
     raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
 
