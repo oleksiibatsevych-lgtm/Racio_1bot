@@ -36,6 +36,16 @@ app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
+# Автоматичне оновлення Webhook при запуску на Render
+RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+if RENDER_URL:
+    webhook_url = f"{RENDER_URL}/webhook"
+    try:
+        bot.set_webhook(url=webhook_url, allowed_updates=["message", "callback_query"])
+        logger.info(f"✅ Webhook успішно оновлено: {webhook_url}")
+    except Exception as e:
+        logger.error(f"⚠️ Помилка встановлення Webhook при запуску: {e}")
+
 analyzer = AdaptiveTechnicalAnalysis()
 ml_filter = TradingMLFilter()
 ai_advisor = AITradingAdvisor()
@@ -90,11 +100,9 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
 
 def fetch_yahoo_fallback(ticker, interval="1m", range_period="5d"):
     try:
-        # Спосіб 1: Спроба через об'єкт Ticker (краще обходить блокування облачних IP)
         tk = yf.Ticker(ticker)
         df_yf = tk.history(period=range_period, interval=interval, auto_adjust=True)
         
-        # Спосіб 2: Резервний через yf.download
         if df_yf is None or df_yf.empty:
             df_yf = yf.download(tickers=ticker, period=range_period, interval=interval, progress=False, auto_adjust=True)
             
@@ -301,8 +309,15 @@ def index():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), bot)
-        dispatcher.process_update(update)
+        data = request.get_json(force=True)
+        if data:
+            if "callback_query" in data:
+                logger.info(f"🔔 Отримано callback_query: {data['callback_query'].get('data')}")
+            elif "message" in data:
+                logger.info(f"✉️ Отримано message: {data['message'].get('text')}")
+
+            update = Update.de_json(data, bot)
+            dispatcher.process_update(update)
     except Exception as e:
         logger.error(f"Помилка обробки вебхука: {e}")
     return "ok", 200
@@ -474,7 +489,6 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
         logger.exception(f"Помилка обробки сигналу для {name}: {e}")
         bot.send_message(chat_id=chat_id, text=f"❌ Сталася помилка під час аналізу {name}.")
     finally:
-        plt.close('all')
         gc.collect()
 
 def process_all_pairs_background(chat_id):
@@ -485,7 +499,6 @@ def process_all_pairs_background(chat_id):
         except Exception as e:
             logger.error(f"Помилка при фоновій обробці {pair_name}: {e}")
         
-        plt.close('all')
         gc.collect()
         time.sleep(1.5)
 
@@ -510,6 +523,15 @@ def handle_text_message(update, context):
             bot.send_message(chat_id=chat_id, text=f"📋 <b>Останні логи:</b>\n\n{log_text}", parse_mode="HTML")
         else:
             bot.send_message(chat_id=chat_id, text="📋 Логи відсутні або застаріли.")
+    elif text in PAIRS_MAP:
+        bot.send_message(chat_id=chat_id, text=f"⏳ Виконується мульти-ТФ аналіз для пари {text}...")
+        thread = threading.Thread(
+            target=process_single_pair,
+            args=(chat_id, text, PAIRS_MAP[text]),
+            kwargs={"ignore_cooldown": True},
+            daemon=True
+        )
+        thread.start()
 
 def handle_callback_query(update, context):
     query = update.callback_query
