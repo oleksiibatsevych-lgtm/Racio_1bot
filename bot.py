@@ -43,7 +43,6 @@ ai_advisor = AITradingAdvisor()
 last_sent_signals = {}
 
 database.init_db()
-
 start_finnhub_ws()
 
 def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
@@ -61,7 +60,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
+    url = "https://finnhub.io/api/v1/forex/candle"
     params = {
         "symbol": symbol,
         "resolution": resolution,
@@ -89,9 +88,16 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
 
     return pd.DataFrame()
 
-def fetch_yahoo_fallback(ticker, interval="1m", range_period="7d"):
+def fetch_yahoo_fallback(ticker, interval="1m", range_period="5d"):
     try:
-        df_yf = yf.download(tickers=ticker, period=range_period, interval=interval, progress=False, auto_adjust=True)
+        # Спосіб 1: Спроба через об'єкт Ticker (краще обходить блокування облачних IP)
+        tk = yf.Ticker(ticker)
+        df_yf = tk.history(period=range_period, interval=interval, auto_adjust=True)
+        
+        # Спосіб 2: Резервний через yf.download
+        if df_yf is None or df_yf.empty:
+            df_yf = yf.download(tickers=ticker, period=range_period, interval=interval, progress=False, auto_adjust=True)
+            
         if not df_yf.empty:
             if isinstance(df_yf.columns, pd.MultiIndex):
                 df_yf.columns = df_yf.columns.get_level_values(0)
@@ -294,8 +300,11 @@ def index():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
+    try:
+        update = Update.de_json(request.get_json(force=True), bot)
+        dispatcher.process_update(update)
+    except Exception as e:
+        logger.error(f"Помилка обробки вебхука: {e}")
     return "ok", 200
 
 def start(update, context):
@@ -335,7 +344,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
         df_daily, df_macro, df_mid, df_fast, df_micro = fetch_all_timeframes(ticker, ticker_yahoo)
         
         if df_macro is None or df_macro.empty or df_fast is None or df_fast.empty:
-            bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}")
+            bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}. Спробуйте пізніше або іншу пару.")
             return
 
         ws_price = get_live_price(ticker) or (get_live_price(ticker_yahoo) if ticker_yahoo else None)
@@ -526,7 +535,6 @@ def handle_callback_query(update, context):
         if pair_name in PAIRS_MAP:
             bot.send_message(chat_id=chat_id, text=f"⏳ Виконується мульти-ТФ аналіз для пари {pair_name}...")
             
-            # Ігноруємо кулдаун (ignore_cooldown=True) для ручних викликів з кнопок
             thread = threading.Thread(
                 target=process_single_pair,
                 args=(chat_id, pair_name, PAIRS_MAP[pair_name]),
