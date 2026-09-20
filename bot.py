@@ -61,7 +61,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "https://finnhub.io/api/v1/forex/candle"
+    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
     params = {
         "symbol": symbol,
         "resolution": resolution,
@@ -322,12 +322,12 @@ def show_pairs_menu(chat_id):
     reply_markup = InlineKeyboardMarkup(buttons)
     bot.send_message(chat_id=chat_id, text="Оберіть валютну пару для миттєвого мульти-ТФ аналізу:", reply_markup=reply_markup)
 
-def process_single_pair(chat_id, name, ticker):
+def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
     try:
         session_str, session_code, hour = get_current_session_info()
         current_time = time.time()
         
-        if ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 180:
+        if not ignore_cooldown and ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 180:
             bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні (зачекайте 3 хвилини).")
             return
 
@@ -422,7 +422,7 @@ def process_single_pair(chat_id, name, ticker):
         action_text = "КУПІВЛЯ (CALL)" if signal_type == "CALL" else "ПРОДАЖ (PUT)"
         
         msg_text = (
-            f"📊 <b>{html.escape(name)} ({html.escape(ticker)})</b>\n"
+            f"📊 <b>{html.escape(str(name))} ({html.escape(str(ticker))})</b>\n"
             f"{icon} <b>{action_text}</b> | ⏱ Експірація: <b>{expiration} хв</b>\n"
             f"⚡ <b>Signal Score:</b> <code>{signal_score}/100</code> | 📐 ТФ: <code>{html.escape(str(optimal_tf_final))}</code>\n"
             f"🎯 Стратегія: <code>{html.escape(str(strategy_name))}</code>\n"
@@ -472,7 +472,7 @@ def process_all_pairs_background(chat_id):
     bot.send_message(chat_id=chat_id, text="🔎 Розпочато сканування всіх доступних пар...")
     for pair_name, pair_ticker in PAIRS_MAP.items():
         try:
-            process_single_pair(chat_id, pair_name, pair_ticker)
+            process_single_pair(chat_id, pair_name, pair_ticker, ignore_cooldown=False)
         except Exception as e:
             logger.error(f"Помилка при фоновій обробці {pair_name}: {e}")
         
@@ -517,19 +517,25 @@ def handle_callback_query(update, context):
         return
 
     data = query.data
+    logger.info(f"📥 Отримано callback_data: '{data}' від chat_id: {chat_id}")
+
     if data.startswith("pair_"):
-        pair_name = data[5:]  # Витягуємо назву пари після 'pair_'
+        pair_name = data[5:].strip()
+        logger.info(f"🔍 Виконується ручний запит для пари: '{pair_name}'")
+
         if pair_name in PAIRS_MAP:
             bot.send_message(chat_id=chat_id, text=f"⏳ Виконується мульти-ТФ аналіз для пари {pair_name}...")
             
-            # Запускаємо аналіз в окремому потоці, щоб не блокувати Webhook
+            # Ігноруємо кулдаун (ignore_cooldown=True) для ручних викликів з кнопок
             thread = threading.Thread(
                 target=process_single_pair,
                 args=(chat_id, pair_name, PAIRS_MAP[pair_name]),
+                kwargs={"ignore_cooldown": True},
                 daemon=True
             )
             thread.start()
         else:
+            logger.error(f"❌ Пару '{pair_name}' не знайдено в PAIRS_MAP!")
             bot.send_message(chat_id=chat_id, text=f"⚠️ Пару {pair_name} не знайдено в конфігурації PAIRS_MAP.")
 
 dispatcher.add_handler(CommandHandler("start", start))
