@@ -504,15 +504,33 @@ def handle_text_message(update, context):
 
 def handle_callback_query(update, context):
     query = update.callback_query
-    chat_id = query.message.chat_id
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.warning(f"Не вдалося відповісти на callback query: {e}")
+
+    if not query or not query.data:
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else (query.message.chat_id if query.message else None)
+    if not chat_id:
+        return
 
     data = query.data
     if data.startswith("pair_"):
-        pair_name = data.replace("pair_", "")
+        pair_name = data[5:]  # Витягуємо назву пари після 'pair_'
         if pair_name in PAIRS_MAP:
-            bot.send_message(chat_id=chat_id, text=f"⏳ Виконується мульти-ТФ аналіз пара {pair_name}...")
-            process_single_pair(chat_id, pair_name, PAIRS_MAP[pair_name])
+            bot.send_message(chat_id=chat_id, text=f"⏳ Виконується мульти-ТФ аналіз для пари {pair_name}...")
+            
+            # Запускаємо аналіз в окремому потоці, щоб не блокувати Webhook
+            thread = threading.Thread(
+                target=process_single_pair,
+                args=(chat_id, pair_name, PAIRS_MAP[pair_name]),
+                daemon=True
+            )
+            thread.start()
+        else:
+            bot.send_message(chat_id=chat_id, text=f"⚠️ Пару {pair_name} не знайдено в конфігурації PAIRS_MAP.")
 
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CallbackQueryHandler(handle_callback_query))
