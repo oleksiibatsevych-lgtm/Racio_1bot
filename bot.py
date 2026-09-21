@@ -202,17 +202,17 @@ def get_current_session_info():
     return session_str, session_code, hour
 
 def get_exit_price(ticker, name=""):
-    # 1. Спроба з WebSocket
+    # 1. WebSocket Finnhub
     price = get_live_price(ticker)
     if price and float(price) > 0:
         return float(price)
 
-    # 2. Спроба через Finnhub REST
+    # 2. REST Finnhub
     df = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
     if df is not None and not df.empty:
         return float(df['close'].iloc[-1])
 
-    # 3. Резервна спроба через Yahoo Finance
+    # 3. Yahoo Finance Fallback
     yahoo_ticker = normalize_yahoo_ticker(ticker, name)
     if yahoo_ticker:
         price_yf = get_live_price(yahoo_ticker)
@@ -254,7 +254,7 @@ def process_signal_expiration(sig_id):
 
         exit_price = get_exit_price(ticker, pair_name)
 
-        # Якщо ціну не вдалося витягнути з першого разу — відкладаємо на 30 секунд (не фіксуємо NEUTRAL)
+        # Перевірка неотримання ціни: відкладаємо замість закриття як NEUTRAL
         if not exit_price:
             logger.warning(f"⚠️ Повторне отримання ціни для {ticker} (ID: {sig_id}) через 30 сек...")
             timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
@@ -293,10 +293,14 @@ def process_signal_expiration(sig_id):
                     text=f"{orig_txt}\n{report_str}",
                     parse_mode="HTML"
                 )
-            except BadRequest:
-                logger.warning(f"⚠️ Повідомлення {sig_data['message_id']} видалено або недоступне.")
-            except TelegramError as te:
-                logger.warning(f"⚠️ Помилка Telegram API для {sig_id}: {te}")
+            except Exception as e:
+                logger.warning(f"⚠️ Не вдалося відредагувати повідомлення {sig_id}: {e}. Надсилаємо окремий звіт...")
+                bot.send_message(
+                    chat_id=sig_data["chat_id"],
+                    text=f"🏁 <b>Результат угоди #{sig_id} ({ticker}):</b>\n{res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>",
+                    parse_mode="HTML",
+                    reply_to_message_id=sig_data["message_id"]
+                )
 
     except Exception as e:
         logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
@@ -319,6 +323,31 @@ def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
 
 def start_background_checker():
     def loop():
+        # Первинна автоматична відновлювальна перевірка при запуску бота (після рестарту Render)
+        try:
+            logger.info("🔍 Перевірка застряглих сигналів після запуску бота...")
+            pending = database.get_pending_signals()
+            now = datetime.utcnow()
+            for row in pending:
+                sig_id = row[0]
+                expiration_mins = row[4]
+                timestamp_str = row[5]
+                created_at = parse_dt(timestamp_str)
+                expiry_time = created_at + timedelta(minutes=expiration_mins)
+                
+                if now >= expiry_time:
+                    logger.info(f"⚡ Підхоплено та оброблено застряглий сигнал ID: {sig_id}")
+                    process_signal_expiration(sig_id)
+                else:
+                    remaining_delay = (expiry_time - now).total_seconds()
+                    timer = threading.Timer(remaining_delay, process_signal_expiration, args=[sig_id])
+                    timer.daemon = True
+                    timer.start()
+                    logger.info(f"⏱ Відновлено таймер для застряглого сигналу {sig_id} (через {remaining_delay:.1f} сек)")
+        except Exception as e:
+            logger.error(f"⚠️ Помилка первинної перевірки застряглих сигналів: {e}")
+
+        # Основний цикли перевірки кожні 20 секунд
         while True:
             try:
                 pending = database.get_pending_signals()
@@ -332,7 +361,7 @@ def start_background_checker():
                         process_signal_expiration(sig_id)
             except Exception as e:
                 logger.error(f"⚠️ Помилка фонової перевірки сигналів: {e}")
-            time.sleep(30)
+            time.sleep(20)
 
     thread = threading.Thread(target=loop, daemon=True)
     thread.start()
