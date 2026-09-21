@@ -20,7 +20,7 @@ def init_db():
         conn = get_connection()
         cursor = conn.cursor()
         
-        # Створення таблиці користувачів (якщо її немає)
+        # Створення таблиці користувачів
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -29,7 +29,7 @@ def init_db():
             );
         """)
         
-        # Створення таблиці сигналів (якщо її немає або її було видалено)
+        # Створення таблиці сигналів
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id SERIAL PRIMARY KEY,
@@ -55,6 +55,23 @@ def init_db():
         logger.info("✅ Базу даних ініціалізовано: таблиці 'users' та 'signals' перевірено/створено.")
     except Exception as e:
         logger.error(f"⚠️ Помилка ініціалізації бази даних: {e}")
+
+def register_user(user_id, username=None):
+    """Реєстрація або оновлення даних користувача в БД."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO users (user_id, username)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE 
+            SET username = EXCLUDED.username;
+        """, (user_id, username))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка реєстрації користувача {user_id}: {e}")
 
 def save_signal(chat_id, message_id, ticker, signal_type, entry_price, primary_tf, score, expiration_mins):
     """Збереження нового сигналу у статус PENDING."""
