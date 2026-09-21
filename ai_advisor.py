@@ -13,9 +13,29 @@ class AITradingAdvisor:
         if self.api_key:
             try:
                 genai.configure(api_key=self.api_key)
-                # Використовуємо стабільне ім'я моделі замість застарілих/неіснуючих версій
-                self.model = genai.GenerativeModel('gemini-1.5-flash')
-                logger.info("✅ Gemini API успішно ініціалізовано (gemini-1.5-flash)")
+                
+                # Автоматичний пошук усіх моделей, які підтримують генерацію тексту
+                available_models = [
+                    m.name for m in genai.list_models() 
+                    if 'generateContent' in m.supported_generation_methods
+                ]
+                
+                # Пріоритет вибору моделей
+                selected_model_name = None
+                for candidate in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-2.0-flash', 'models/gemini-2.5-flash']:
+                    if candidate in available_models:
+                        selected_model_name = candidate
+                        break
+                
+                # Якщо жодної з пріоритетних немає, беремо першу доступну
+                if not selected_model_name and available_models:
+                    selected_model_name = available_models[0]
+
+                if selected_model_name:
+                    self.model = genai.GenerativeModel(selected_model_name)
+                    logger.info(f"✅ Gemini API успішно ініціалізовано з моделлю: {selected_model_name}")
+                else:
+                    logger.warning("⚠️ Не знайдено жодної активної моделі Gemini для generateContent.")
             except Exception as e:
                 logger.error(f"⚠️ Помилка ініціалізації Gemini API: {e}")
 
@@ -23,13 +43,13 @@ class AITradingAdvisor:
         if not self.model:
             return {
                 "confidence": 7,
-                "reason": "Аналіз проведено на основі математичної моделі (ШІ-сервіси офлайн).",
+                "reason": "Аналіз проведено за математичною моделлю.",
                 "optimal_tf": payload.get("primary_tf", "5m"),
                 "suggested_expiration": payload.get("suggested_exp", 5)
             }
 
         prompt = f"""
-Ти є професійним Forex та Binary Options трейдером. Проаналізуй наступний технічний сигнал:
+Ти є професійним Forex та Binary Options трейдером. Проаналізуй сигнал:
 
 Пара: {pair_name}
 Сигнал: {payload.get('signal')}
@@ -41,13 +61,13 @@ ADX: {payload.get('adx')} | RSI: {payload.get('rsi')}
 Дивергенція: {payload.get('divergence')}
 Обґрунтування алгоритму: {payload.get('reason')}
 
-Дай коротку оцінку якості сигналу у форматі JSON з полями:
+Дай коротку оцінку у форматі JSON з полями:
 - confidence (число від 1 до 10)
 - reason (1 короткий висновок українською мовою, до 15 слів)
 - optimal_tf (рекомендований таймфрейм)
 - suggested_expiration (час експірації в хвилинах: від 3 до 15)
 
-Відповідай ТІЛЬКИ у форматі чистого JSON без додаткового тексту.
+Відповідай ТІЛЬКИ у форматі чистого JSON.
 """
         try:
             response = self.model.generate_content(prompt)
@@ -55,10 +75,10 @@ ADX: {payload.get('adx')} | RSI: {payload.get('rsi')}
             data = json.loads(clean_json)
             return data
         except Exception as e:
-            logger.warning(f"⚠️ Помилка запиту до Gemini API: {e}")
+            logger.warning(f"⚠️ Помилка виконання запиту ШІ: {e}")
             return {
                 "confidence": 7,
-                "reason": "Сигнал підтверджено технічним алгоритмом.",
+                "reason": "Сигнал підтверджено математичною моделлю.",
                 "optimal_tf": payload.get("primary_tf", "5m"),
                 "suggested_expiration": payload.get("suggested_exp", 5)
             }
