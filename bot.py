@@ -66,6 +66,14 @@ def parse_dt(dt_val):
     except Exception:
         return datetime.utcnow()
 
+def normalize_yahoo_ticker(ticker, name=""):
+    if name and name in YAHOO_PAIRS_MAP:
+        return YAHOO_PAIRS_MAP[name]
+    clean = ticker.replace("OANDA:", "").replace("IC MARKETS:", "").replace("_", "").replace("/", "")
+    if len(clean) == 6 and not clean.endswith("=X"):
+        return f"{clean}=X"
+    return ticker
+
 def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     token = FINNHUB_API_KEY or FINNHUB_TOKEN
     if not token:
@@ -193,30 +201,22 @@ def get_current_session_info():
     session_str = ", ".join(sessions) if sessions else "Тихоокеанська сесія"
     return session_str, session_code, hour
 
-def get_exit_price(ticker):
-    # 1. Спроба отримати live ціну з WebSocket
+def get_exit_price(ticker, name=""):
+    # 1. Спроба з WebSocket
     price = get_live_price(ticker)
-    if price:
+    if price and float(price) > 0:
         return float(price)
 
-    # 2. Спроба через Finnhub REST свічки
+    # 2. Спроба через Finnhub REST
     df = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
     if df is not None and not df.empty:
         return float(df['close'].iloc[-1])
 
-    # 3. Пошук відповідника у Yahoo Finance
-    yahoo_ticker = None
-    for name, finn_t in PAIRS_MAP.items():
-        if finn_t == ticker:
-            yahoo_ticker = YAHOO_PAIRS_MAP.get(name)
-            break
-            
-    if not yahoo_ticker and ticker in YAHOO_PAIRS_MAP.values():
-        yahoo_ticker = ticker
-
+    # 3. Резервна спроба через Yahoo Finance
+    yahoo_ticker = normalize_yahoo_ticker(ticker, name)
     if yahoo_ticker:
         price_yf = get_live_price(yahoo_ticker)
-        if price_yf:
+        if price_yf and float(price_yf) > 0:
             return float(price_yf)
         df_yf = fetch_yahoo_fallback(yahoo_ticker, interval="1m", range_period="1d")
         if df_yf is not None and not df_yf.empty:
@@ -239,82 +239,64 @@ def process_signal_expiration(sig_id):
         elapsed_seconds = (datetime.utcnow() - created_at).total_seconds()
         target_seconds = expiration_mins * 60
 
-        # Перевіряємо, чи дійсно настав час закриття (залишаємо запас у 10 сек)
         if 0 <= elapsed_seconds < (target_seconds - 10):
             remaining_delay = target_seconds - elapsed_seconds
-            logger.info(f"⏳ Перепланування сигналу {sig_id} через {remaining_delay:.1f} сек.")
             timer = threading.Timer(remaining_delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
             return
 
-        # Отримання актуальної ціни закриття через універсальну функцію
-        exit_price = get_exit_price(ticker)
+        pair_name = ""
+        for k_name, k_ticker in PAIRS_MAP.items():
+            if k_ticker == ticker:
+                pair_name = k_name
+                break
 
-        if exit_price:
-            multiplier = 1000 if "JPY" in ticker else 100000
-            raw_pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
-            pips = int(round(raw_pips))
+        exit_price = get_exit_price(ticker, pair_name)
 
-            if signal_type == "CALL":
-                result = "WIN" if exit_price > entry_price else ("LOSS" if exit_price < entry_price else "NEUTRAL")
-            else:
-                result = "WIN" if exit_price < entry_price else ("LOSS" if exit_price > entry_price else "NEUTRAL")
-
-            database.update_signal_result(sig_id, result, exit_price, pips)
-
-            res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
-            pips_str = f"+{pips}" if pips > 0 else f"{pips}"
-
-            report_str = (
-                f"\n----------------------------------\n"
-                f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
-                f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>"
-            )
-
-            orig_txt = sig_data.get("message_text", "")
-            if orig_txt and "🏁 Результат" not in orig_txt:
-                try:
-                    bot.edit_message_text(
-                        chat_id=sig_data["chat_id"], 
-                        message_id=sig_data["message_id"], 
-                        text=f"{orig_txt}\n{report_str}",
-                        parse_mode="HTML"
-                    )
-                except BadRequest:
-                    logger.warning(f"⚠️ Повідомлення {sig_data['message_id']} видалено або недоступне.")
-                except TelegramError as te:
-                    logger.warning(f"⚠️ Помилка Telegram API для сигналу {sig_id}: {te}")
+        # Якщо ціну не вдалося витягнути з першого разу — відкладаємо на 30 секунд (не фіксуємо NEUTRAL)
+        if not exit_price:
+            logger.warning(f"⚠️ Повторне отримання ціни для {ticker} (ID: {sig_id}) через 30 сек...")
+            timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
+            timer.daemon = True
+            timer.start()
             return
 
-        # Резервна обробка через базу даних
-        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=fetch_yahoo_fallback)
-        if res_data and res_data.get("chat_id") and res_data.get("message_id"):
-            pips_val = int(res_data.get('pips', 0))
-            pips_str = f"+{pips_val}" if pips_val > 0 else f"{pips_val}"
-            res_result = res_data.get('result', 'NEUTRAL')
-            entry_p = float(res_data.get('entry_price', 0.0))
-            exit_p = float(res_data.get('exit_price', 0.0))
-            
-            res_icon = "✅ WIN" if res_result == "WIN" else ("❌ LOSS" if res_result == "LOSS" else "➖ NEUTRAL")
+        multiplier = 1000 if "JPY" in ticker else 100000
+        raw_pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
+        pips = int(round(raw_pips))
 
-            report_str = (
-                f"\n----------------------------------\n"
-                f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
-                f"📍 Вхід: <code>{entry_p:.5f}</code> ➔ 🏁 Закриття: <code>{exit_p:.5f}</code>"
-            )
+        if pips > 0:
+            result = "WIN"
+        elif pips < 0:
+            result = "LOSS"
+        else:
+            result = "NEUTRAL"
 
-            orig_txt = res_data.get("message_text", "")
-            if orig_txt and "🏁 Результат" not in orig_txt:
-                try:
-                    bot.edit_message_text(
-                        chat_id=res_data["chat_id"], 
-                        message_id=res_data["message_id"], 
-                        text=f"{orig_txt}\n{report_str}",
-                        parse_mode="HTML"
-                    )
-                except Exception as te:
-                    logger.warning(f"⚠️ Помилка Telegram API для {sig_id}: {te}")
+        database.update_signal_result(sig_id, result, exit_price, pips)
+
+        res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
+        pips_str = f"+{pips}" if pips > 0 else f"{pips}"
+
+        report_str = (
+            f"\n----------------------------------\n"
+            f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
+            f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>"
+        )
+
+        orig_txt = sig_data.get("message_text", "")
+        if orig_txt and "🏁 Результат" not in orig_txt:
+            try:
+                bot.edit_message_text(
+                    chat_id=sig_data["chat_id"], 
+                    message_id=sig_data["message_id"], 
+                    text=f"{orig_txt}\n{report_str}",
+                    parse_mode="HTML"
+                )
+            except BadRequest:
+                logger.warning(f"⚠️ Повідомлення {sig_data['message_id']} видалено або недоступне.")
+            except TelegramError as te:
+                logger.warning(f"⚠️ Помилка Telegram API для {sig_id}: {te}")
 
     except Exception as e:
         logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
@@ -336,7 +318,6 @@ def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
         logger.exception(f"Помилка планування таймера {sig_id}: {e}")
 
 def start_background_checker():
-    """Фоновий потік, який періодично перевіряє базу на наявність незакритих сигналів, час експірації яких минув."""
     def loop():
         while True:
             try:
@@ -350,13 +331,12 @@ def start_background_checker():
                     if now >= created_at + timedelta(minutes=expiration_mins):
                         process_signal_expiration(sig_id)
             except Exception as e:
-                logger.error(f"⚠️ Помилка фонової перевірки незакритих сигналів: {e}")
+                logger.error(f"⚠️ Помилка фонової перевірки сигналів: {e}")
             time.sleep(30)
 
     thread = threading.Thread(target=loop, daemon=True)
     thread.start()
 
-# Запуск фонового демона та відновлення таймерів
 start_background_checker()
 
 @app.route("/")
