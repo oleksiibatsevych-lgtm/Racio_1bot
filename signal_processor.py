@@ -1,4 +1,5 @@
 import logging
+import html
 from ai_advisor import analyze_signal_with_gemini
 from filters import calculate_dynamic_expiration, validate_signal_conditions
 
@@ -33,7 +34,7 @@ def process_and_filter_signal(
 
     # 4. Записуємо отримані параметри
     market_data["ai_confidence"] = ai_result["confidence"]
-    market_data["ai_reason"] = ai_result["reason"]
+    market_data["ai_reason"] = html.escape(str(ai_result["reason"]))
     market_data["suggested_exp"] = ai_result.get(
         "suggested_expiration", calculated_exp
     )
