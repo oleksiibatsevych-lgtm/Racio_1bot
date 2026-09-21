@@ -4,10 +4,8 @@ import os
 import re
 import google.generativeai as genai
 
-# Налаштування логування
 logger = logging.getLogger(__name__)
 
-# Ініціалізація Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -18,14 +16,7 @@ else:
 def analyze_signal_with_gemini(
     pair_name: str, payload: dict, chart_images: list = None
 ) -> dict:
-    """Аналізує ринковий сигнал за допомогою Gemini 2.5 Flash.
-
-    Повертає словник із полями:
-    - confidence (int): оцінка 1-10
-    - reason (str): короткий висновок
-    - optimal_tf (str): рекомендований ТФ
-    - suggested_expiration (int): рекомендована експірація у хвилинах
-    """
+    """Аналізує ринковий сигнал за допомогою Gemini 2.5 Flash."""
     if not GEMINI_API_KEY:
         logger.error("❌ Gemini API Key відсутній. Перехід на fallback.")
         return _get_fallback_response(
@@ -63,7 +54,6 @@ def analyze_signal_with_gemini(
 
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
-
         generation_config = {
             "response_mime_type": "application/json",
             "temperature": 0.2,
@@ -80,12 +70,13 @@ def analyze_signal_with_gemini(
 
         raw_text = response.text.strip() if response.text else ""
 
-        # Витягуємо чистий JSON за допомогою регулярних виразів
+        # Витягуємо JSON через регулярний вираз
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-        if json_match:
-            clean_json = json_match.group(0)
-        else:
-            clean_json = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
+        clean_json = (
+            json_match.group(0)
+            if json_match
+            else re.sub(r"```json\s*|\s*```", "", raw_text).strip()
+        )
 
         data = json.loads(clean_json)
 
@@ -111,10 +102,10 @@ def analyze_signal_with_gemini(
 
     except json.JSONDecodeError as e:
         logger.error(
-            f"❌ Помилка парсингу JSON від Gemini для {pair_name}: {e}. Сирий текст: {raw_text}"
+            f"❌ Помилка парсингу JSON від Gemini для {pair_name}: {e}. Текст: {raw_text}"
         )
         return _get_fallback_response(
-            payload, f"Помилка формату JSON від ШІ"
+            payload, "Помилка формату JSON від ШІ"
         )
 
     except Exception as e:
@@ -125,9 +116,8 @@ def analyze_signal_with_gemini(
 
 
 def _get_fallback_response(payload: dict, error_msg: str) -> dict:
-    """Маркерна резервна відповідь при помилці API."""
     return {
-        "confidence": 0,  # 0 чітко показує у чаті/логах, що стався збій
+        "confidence": 0,  # 0 показує у логах і чаті, що стався збій
         "reason": error_msg,
         "optimal_tf": payload.get("primary_tf", "5m"),
         "suggested_expiration": payload.get("suggested_exp", 5),
