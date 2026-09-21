@@ -36,7 +36,6 @@ app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
-# Автоматичне оновлення Webhook при запуску на Render
 RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 if RENDER_URL:
     webhook_url = f"{RENDER_URL}/webhook"
@@ -202,17 +201,14 @@ def get_current_session_info():
     return session_str, session_code, hour
 
 def get_exit_price(ticker, name=""):
-    # 1. WebSocket Finnhub
     price = get_live_price(ticker)
     if price and float(price) > 0:
         return float(price)
 
-    # 2. REST Finnhub
     df = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
     if df is not None and not df.empty:
         return float(df['close'].iloc[-1])
 
-    # 3. Yahoo Finance Fallback
     yahoo_ticker = normalize_yahoo_ticker(ticker, name)
     if yahoo_ticker:
         price_yf = get_live_price(yahoo_ticker)
@@ -254,7 +250,6 @@ def process_signal_expiration(sig_id):
 
         exit_price = get_exit_price(ticker, pair_name)
 
-        # Перевірка неотримання ціни: відкладаємо замість закриття як NEUTRAL
         if not exit_price:
             logger.warning(f"⚠️ Повторне отримання ціни для {ticker} (ID: {sig_id}) через 30 сек...")
             timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
@@ -323,15 +318,14 @@ def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
 
 def start_background_checker():
     def loop():
-        # Первинна автоматична відновлювальна перевірка при запуску бота (після рестарту Render)
         try:
             logger.info("🔍 Перевірка застряглих сигналів після запуску бота...")
             pending = database.get_pending_signals()
             now = datetime.utcnow()
             for row in pending:
-                sig_id = row[0]
-                expiration_mins = row[4]
-                timestamp_str = row[5]
+                sig_id = row['id']
+                expiration_mins = row['expiration_mins']
+                timestamp_str = row['timestamp_str']
                 created_at = parse_dt(timestamp_str)
                 expiry_time = created_at + timedelta(minutes=expiration_mins)
                 
@@ -347,15 +341,14 @@ def start_background_checker():
         except Exception as e:
             logger.error(f"⚠️ Помилка первинної перевірки застряглих сигналів: {e}")
 
-        # Основний цикли перевірки кожні 20 секунд
         while True:
             try:
                 pending = database.get_pending_signals()
                 now = datetime.utcnow()
                 for row in pending:
-                    sig_id = row[0]
-                    expiration_mins = row[4]
-                    timestamp_str = row[5]
+                    sig_id = row['id']
+                    expiration_mins = row['expiration_mins']
+                    timestamp_str = row['timestamp_str']
                     created_at = parse_dt(timestamp_str)
                     if now >= created_at + timedelta(minutes=expiration_mins):
                         process_signal_expiration(sig_id)
@@ -543,9 +536,21 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             ticker=ticker,
             signal_type=signal_type,
             entry_price=current_price,
+            primary_tf=optimal_tf_final,
+            score=signal_score,
             expiration_mins=expiration,
             timestamp_str=timestamp_str,
-            message_text=msg_text
+            message_text=msg_text,
+            rsi=rsi,
+            adx=adx,
+            bb_width=bb_width,
+            session_code=session_code,
+            hour=hour,
+            divergence=divergence_str,
+            dist_pivot=dist_pivot,
+            volatility_ratio=volatility_ratio,
+            wick_ratio=wick_ratio,
+            ema_dist=ema_dist
         )
 
         if sig_id:
