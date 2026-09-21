@@ -55,6 +55,17 @@ last_sent_signals = {}
 database.init_db()
 start_finnhub_ws()
 
+def parse_dt(dt_val):
+    if isinstance(dt_val, datetime):
+        return dt_val
+    if not dt_val:
+        return datetime.utcnow()
+    dt_str = str(dt_val).split('.')[0].replace('T', ' ')
+    try:
+        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.utcnow()
+
 def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     token = FINNHUB_API_KEY or FINNHUB_TOKEN
     if not token:
@@ -182,10 +193,41 @@ def get_current_session_info():
     session_str = ", ".join(sessions) if sessions else "Тихоокеанська сесія"
     return session_str, session_code, hour
 
+def get_exit_price(ticker):
+    # 1. Спроба отримати live ціну з WebSocket
+    price = get_live_price(ticker)
+    if price:
+        return float(price)
+
+    # 2. Спроба через Finnhub REST свічки
+    df = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
+    if df is not None and not df.empty:
+        return float(df['close'].iloc[-1])
+
+    # 3. Пошук відповідника у Yahoo Finance
+    yahoo_ticker = None
+    for name, finn_t in PAIRS_MAP.items():
+        if finn_t == ticker:
+            yahoo_ticker = YAHOO_PAIRS_MAP.get(name)
+            break
+            
+    if not yahoo_ticker and ticker in YAHOO_PAIRS_MAP.values():
+        yahoo_ticker = ticker
+
+    if yahoo_ticker:
+        price_yf = get_live_price(yahoo_ticker)
+        if price_yf:
+            return float(price_yf)
+        df_yf = fetch_yahoo_fallback(yahoo_ticker, interval="1m", range_period="1d")
+        if df_yf is not None and not df_yf.empty:
+            return float(df_yf['close'].iloc[-1])
+
+    return None
+
 def process_signal_expiration(sig_id):
     try:
         sig_data = database.get_signal_by_id(sig_id)
-        if not sig_data:
+        if not sig_data or sig_data.get('status') == 'CLOSED':
             return
 
         ticker = sig_data['ticker']
@@ -193,31 +235,21 @@ def process_signal_expiration(sig_id):
         signal_type = sig_data['signal_type']
         expiration_mins = int(sig_data.get('expiration_mins', 5))
         
-        # Перевірка часу створення для запобігання передчасному закриттю
-        timestamp_raw = sig_data.get('timestamp_str')
-        if isinstance(timestamp_raw, datetime):
-            created_at = timestamp_raw
-        else:
-            created_at = datetime.strptime(str(timestamp_raw), "%Y-%m-%d %H:%M:%S")
-
+        created_at = parse_dt(sig_data.get('timestamp_str'))
         elapsed_seconds = (datetime.utcnow() - created_at).total_seconds()
         target_seconds = expiration_mins * 60
 
-        # Якщо таймер спрацював раніше часу (наприклад, через зсув годинників) — переплановуємо залишок
-        if elapsed_seconds < (target_seconds - 5):
+        # Перевіряємо, чи дійсно настав час закриття (залишаємо запас у 10 сек)
+        if 0 <= elapsed_seconds < (target_seconds - 10):
             remaining_delay = target_seconds - elapsed_seconds
-            logger.warning(f"⏳ Передчасне спрацювання для сигналу {sig_id}. Перепланування через {remaining_delay:.1f} сек.")
+            logger.info(f"⏳ Перепланування сигналу {sig_id} через {remaining_delay:.1f} сек.")
             timer = threading.Timer(remaining_delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
             return
 
-        # Отримання ціни закриття
-        exit_price = get_live_price(ticker)
-        if not exit_price:
-            df_check = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
-            if not df_check.empty:
-                exit_price = float(df_check['close'].iloc[-1])
+        # Отримання актуальної ціни закриття через універсальну функцію
+        exit_price = get_exit_price(ticker)
 
         if exit_price:
             multiplier = 1000 if "JPY" in ticker else 100000
@@ -250,12 +282,13 @@ def process_signal_expiration(sig_id):
                         parse_mode="HTML"
                     )
                 except BadRequest:
-                    logger.warning(f"⚠️ Повідомлення {sig_data['message_id']} в чаті {sig_data['chat_id']} видалено або недоступне.")
+                    logger.warning(f"⚠️ Повідомлення {sig_data['message_id']} видалено або недоступне.")
                 except TelegramError as te:
-                    logger.warning(f"⚠️ Помилка Telegram API при оновленні сигналу {sig_id}: {te}")
+                    logger.warning(f"⚠️ Помилка Telegram API для сигналу {sig_id}: {te}")
             return
 
-        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=None)
+        # Резервна обробка через базу даних
+        res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=fetch_yahoo_fallback)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
             pips_val = int(res_data.get('pips', 0))
             pips_str = f"+{pips_val}" if pips_val > 0 else f"{pips_val}"
@@ -280,20 +313,15 @@ def process_signal_expiration(sig_id):
                         text=f"{orig_txt}\n{report_str}",
                         parse_mode="HTML"
                     )
-                except BadRequest:
-                    logger.warning(f"⚠️ Повідомлення {res_data['message_id']} в чаті {res_data['chat_id']} видалено або недоступне.")
-                except TelegramError as te:
-                    logger.warning(f"⚠️ Помилка Telegram API при оновленні сигналу {sig_id}: {te}")
+                except Exception as te:
+                    logger.warning(f"⚠️ Помилка Telegram API для {sig_id}: {te}")
+
     except Exception as e:
         logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
 
 def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
     try:
-        if isinstance(timestamp_val, datetime):
-            signal_time = timestamp_val
-        else:
-            signal_time = datetime.strptime(str(timestamp_val), "%Y-%m-%d %H:%M:%S")
-            
+        signal_time = parse_dt(timestamp_val)
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
         delay = (expiry_time - datetime.utcnow()).total_seconds()
         
@@ -307,28 +335,29 @@ def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
     except Exception as e:
         logger.exception(f"Помилка планування таймера {sig_id}: {e}")
 
-def restore_pending_timers():
-    pending = database.get_pending_signals()
-    for i, row in enumerate(pending):
-        sig_id = row[0]
-        expiration_mins = row[4]
-        timestamp_str = row[5]
-        try:
-            if isinstance(timestamp_str, datetime):
-                signal_time = timestamp_str
-            else:
-                signal_time = datetime.strptime(str(timestamp_str), "%Y-%m-%d %H:%M:%S")
-                
-            expiry_time = signal_time + timedelta(minutes=expiration_mins)
-            delay = max((expiry_time - datetime.utcnow()).total_seconds(), 2 + (i * 2))
-            timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
-            timer.daemon = True
-            timer.start()
-        except Exception as e:
-            logger.warning(f"⚠️ Помилка відновлення таймера {sig_id}: {e}")
-    logger.info(f"⏳ Відновлено активних таймерів: {len(pending)}")
+def start_background_checker():
+    """Фоновий потік, який періодично перевіряє базу на наявність незакритих сигналів, час експірації яких минув."""
+    def loop():
+        while True:
+            try:
+                pending = database.get_pending_signals()
+                now = datetime.utcnow()
+                for row in pending:
+                    sig_id = row[0]
+                    expiration_mins = row[4]
+                    timestamp_str = row[5]
+                    created_at = parse_dt(timestamp_str)
+                    if now >= created_at + timedelta(minutes=expiration_mins):
+                        process_signal_expiration(sig_id)
+            except Exception as e:
+                logger.error(f"⚠️ Помилка фонової перевірки незакритих сигналів: {e}")
+            time.sleep(30)
 
-restore_pending_timers()
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+
+# Запуск фонового демона та відновлення таймерів
+start_background_checker()
 
 @app.route("/")
 def index():
