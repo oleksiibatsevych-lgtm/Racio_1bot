@@ -185,52 +185,75 @@ def get_current_session_info():
 def process_signal_expiration(sig_id):
     try:
         sig_data = database.get_signal_by_id(sig_id)
-        if sig_data:
-            ticker = sig_data['ticker']
-            entry_price = float(sig_data['entry_price'])
-            signal_type = sig_data['signal_type']
+        if not sig_data:
+            return
 
-            exit_price = get_live_price(ticker)
-            if not exit_price:
-                df_check = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
-                if not df_check.empty:
-                    exit_price = float(df_check['close'].iloc[-1])
+        ticker = sig_data['ticker']
+        entry_price = float(sig_data['entry_price'])
+        signal_type = sig_data['signal_type']
+        expiration_mins = int(sig_data.get('expiration_mins', 5))
+        
+        # Перевірка часу створення для запобігання передчасному закриттю
+        timestamp_raw = sig_data.get('timestamp_str')
+        if isinstance(timestamp_raw, datetime):
+            created_at = timestamp_raw
+        else:
+            created_at = datetime.strptime(str(timestamp_raw), "%Y-%m-%d %H:%M:%S")
 
-            if exit_price:
-                multiplier = 1000 if "JPY" in ticker else 100000
-                raw_pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
-                pips = int(round(raw_pips))
+        elapsed_seconds = (datetime.utcnow() - created_at).total_seconds()
+        target_seconds = expiration_mins * 60
 
-                if signal_type == "CALL":
-                    result = "WIN" if exit_price > entry_price else ("LOSS" if exit_price < entry_price else "NEUTRAL")
-                else:
-                    result = "WIN" if exit_price < entry_price else ("LOSS" if exit_price > entry_price else "NEUTRAL")
+        # Якщо таймер спрацював раніше часу (наприклад, через зсув годинників) — переплановуємо залишок
+        if elapsed_seconds < (target_seconds - 5):
+            remaining_delay = target_seconds - elapsed_seconds
+            logger.warning(f"⏳ Передчасне спрацювання для сигналу {sig_id}. Перепланування через {remaining_delay:.1f} сек.")
+            timer = threading.Timer(remaining_delay, process_signal_expiration, args=[sig_id])
+            timer.daemon = True
+            timer.start()
+            return
 
-                database.update_signal_result(sig_id, result, exit_price, pips)
+        # Отримання ціни закриття
+        exit_price = get_live_price(ticker)
+        if not exit_price:
+            df_check = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
+            if not df_check.empty:
+                exit_price = float(df_check['close'].iloc[-1])
 
-                res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
-                pips_str = f"+{pips}" if pips > 0 else f"{pips}"
+        if exit_price:
+            multiplier = 1000 if "JPY" in ticker else 100000
+            raw_pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
+            pips = int(round(raw_pips))
 
-                report_str = (
-                    f"\n----------------------------------\n"
-                    f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
-                    f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>"
-                )
+            if signal_type == "CALL":
+                result = "WIN" if exit_price > entry_price else ("LOSS" if exit_price < entry_price else "NEUTRAL")
+            else:
+                result = "WIN" if exit_price < entry_price else ("LOSS" if exit_price > entry_price else "NEUTRAL")
 
-                orig_txt = sig_data.get("message_text", "")
-                if orig_txt and "🏁 Результат" not in orig_txt:
-                    try:
-                        bot.edit_message_text(
-                            chat_id=sig_data["chat_id"], 
-                            message_id=sig_data["message_id"], 
-                            text=f"{orig_txt}\n{report_str}",
-                            parse_mode="HTML"
-                        )
-                    except BadRequest:
-                        logger.warning(f"⚠️ Повідомлення {sig_data['message_id']} в чаті {sig_data['chat_id']} видалено або недоступне.")
-                    except TelegramError as te:
-                        logger.warning(f"⚠️ Помилка Telegram API при оновленні сигналу {sig_id}: {te}")
-                return
+            database.update_signal_result(sig_id, result, exit_price, pips)
+
+            res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
+            pips_str = f"+{pips}" if pips > 0 else f"{pips}"
+
+            report_str = (
+                f"\n----------------------------------\n"
+                f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
+                f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>"
+            )
+
+            orig_txt = sig_data.get("message_text", "")
+            if orig_txt and "🏁 Результат" not in orig_txt:
+                try:
+                    bot.edit_message_text(
+                        chat_id=sig_data["chat_id"], 
+                        message_id=sig_data["message_id"], 
+                        text=f"{orig_txt}\n{report_str}",
+                        parse_mode="HTML"
+                    )
+                except BadRequest:
+                    logger.warning(f"⚠️ Повідомлення {sig_data['message_id']} в чаті {sig_data['chat_id']} видалено або недоступне.")
+                except TelegramError as te:
+                    logger.warning(f"⚠️ Помилка Telegram API при оновленні сигналу {sig_id}: {te}")
+            return
 
         res_data = database.evaluate_single_signal(sig_id, fetch_yahoo_data_func=None)
         if res_data and res_data.get("chat_id") and res_data.get("message_id"):
@@ -272,10 +295,15 @@ def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
             signal_time = datetime.strptime(str(timestamp_val), "%Y-%m-%d %H:%M:%S")
             
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
-        delay = max((expiry_time - datetime.utcnow()).total_seconds(), 1)
+        delay = (expiry_time - datetime.utcnow()).total_seconds()
+        
+        if delay <= 0:
+            delay = 1
+
         timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
         timer.daemon = True
         timer.start()
+        logger.info(f"⏱ Таймер для сигналу {sig_id} заплановано через {delay:.1f} сек.")
     except Exception as e:
         logger.exception(f"Помилка планування таймера {sig_id}: {e}")
 
