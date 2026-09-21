@@ -18,7 +18,7 @@ else:
 def analyze_signal_with_gemini(
     pair_name: str, payload: dict, chart_images: list = None
 ) -> dict:
-    """Аналізує ринковий сигнал за допомогою Gemini 2.5 Flash."""
+    """Аналізує ринковий сигнал за допомогою Gemini API."""
     if not GEMINI_API_KEY:
         logger.error("❌ Gemini API Key відсутній. Перехід на fallback.")
         return _get_fallback_response(
@@ -54,40 +54,57 @@ def analyze_signal_with_gemini(
 }}
 """
 
+    inputs = [prompt]
+
+    # 🛠 Перетворення зображень у формат PIL.Image для Google Generative AI
+    if chart_images and isinstance(chart_images, list):
+        for img in chart_images:
+            if isinstance(img, io.BytesIO):
+                try:
+                    img.seek(0)
+                    pil_img = Image.open(img)
+                    inputs.append(pil_img)
+                except Exception as img_err:
+                    logger.warning(
+                        f"⚠️ Не вдалося відкрити зображення через PIL: {img_err}"
+                    )
+            elif isinstance(img, Image.Image):
+                inputs.append(img)
+
+    # 🔹 Офіційні та робочі назви моделей Google Gemini
+    models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    response = None
+    last_error = None
+
+    for model_name in models_to_try:
+        try:
+            logger.info(
+                f"🧠 Запит до Gemini API ({model_name}) для {pair_name}..."
+            )
+            model = genai.GenerativeModel(model_name)
+            generation_config = {
+                "response_mime_type": "application/json",
+                "temperature": 0.2,
+            }
+            response = model.generate_content(
+                inputs, generation_config=generation_config
+            )
+            if response and response.text:
+                break
+        except Exception as e:
+            last_error = e
+            logger.warning(f"⚠️ Модель {model_name} недоступна: {e}")
+
+    if not response or not response.text:
+        logger.error(
+            f"❌ Усі моделі Gemini недоступні для {pair_name}: {last_error}"
+        )
+        return _get_fallback_response(
+            payload, f"Збій API ШІ: {str(last_error)[:30]}"
+        )
+
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        generation_config = {
-            "response_mime_type": "application/json",
-            "temperature": 0.2,
-        }
-
-        inputs = [prompt]
-
-        # 🛠 Конвертація io.BytesIO у PIL.Image для підтримки Gemini SDK
-        if chart_images and isinstance(chart_images, list):
-            for img in chart_images:
-                if isinstance(img, io.BytesIO):
-                    try:
-                        img.seek(0)
-                        pil_img = Image.open(img)
-                        inputs.append(pil_img)
-                    except Exception as img_err:
-                        logger.warning(
-                            f"⚠️ Не вдалося відкрити зображення через PIL: {img_err}"
-                        )
-                elif isinstance(img, Image.Image):
-                    inputs.append(img)
-
-        logger.info(
-            f"🧠 Відправка запиту до Gemini API для {pair_name} (графіків додано: {len(inputs)-1})..."
-        )
-        response = model.generate_content(
-            inputs, generation_config=generation_config
-        )
-
-        raw_text = response.text.strip() if response.text else ""
-
-        # Витягуємо JSON через регулярний вираз
+        raw_text = response.text.strip()
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         clean_json = (
             json_match.group(0)
@@ -124,12 +141,6 @@ def analyze_signal_with_gemini(
         return _get_fallback_response(
             payload, "Помилка формату JSON від ШІ"
         )
-
-    except Exception as e:
-        logger.error(
-            f"❌ Критична помилка Gemini API для {pair_name}: {type(e).__name__} - {e}"
-        )
-        return _get_fallback_response(payload, f"Збій API ШІ: {str(e)[:30]}")
 
 
 def _get_fallback_response(payload: dict, error_msg: str) -> dict:
