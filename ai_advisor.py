@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import html
 import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,6 @@ def analyze_signal_with_gemini(
 
         raw_text = response.text.strip() if response.text else ""
 
-        # Витягуємо JSON через регулярний вираз
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         clean_json = (
             json_match.group(0)
@@ -81,7 +81,7 @@ def analyze_signal_with_gemini(
         data = json.loads(clean_json)
 
         confidence = int(data.get("confidence", 5))
-        reason = str(data.get("reason", "Аналіз виконано успішно")).strip()
+        reason = html.escape(str(data.get("reason", "Аналіз виконано успішно")).strip())
         optimal_tf = str(
             data.get("optimal_tf", payload.get("primary_tf", "5m"))
         )
@@ -117,8 +117,8 @@ def analyze_signal_with_gemini(
 
 def _get_fallback_response(payload: dict, error_msg: str) -> dict:
     return {
-        "confidence": 0,  # 0 показує у логах і чаті, що стався збій
-        "reason": error_msg,
+        "confidence": 0,
+        "reason": html.escape(error_msg),
         "optimal_tf": payload.get("primary_tf", "5m"),
         "suggested_expiration": payload.get("suggested_exp", 5),
     }
