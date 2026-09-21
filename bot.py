@@ -49,7 +49,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ✅ Безопечне зчитування токена зі змінних оточення Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     logger.error("❌ Критична помилка: TELEGRAM_TOKEN не знайдено в Environment Variables!")
@@ -480,7 +479,6 @@ def index():
     return "Racio_1bot is running with Finnhub REST & WebSocket!"
 
 
-# 🔹 Універсальні роути для обробки вебхуків від Telegram
 @app.route("/webhook", methods=["POST"])
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
@@ -632,9 +630,10 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             logger.info(
                 f"⏭️ Сигнал для {name} пропущено фільтром: {filter_reason}"
             )
+            # 💡 Виправлено: екранування символу '<' для запобігання помилкам HTML
             bot.send_message(
                 chat_id=chat_id,
-                text=f"⏭ <b>Пара {name} пропущена:</b> {filter_reason}",
+                text=f"⏭ <b>Пара {name} пропущена:</b> {html.escape(filter_reason)}",
                 parse_mode="HTML",
             )
             return
@@ -749,7 +748,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
     except Exception as e:
         logger.exception(f"Помилка при обробці пари {name}: {e}")
         bot.send_message(
-            chat_id=chat_id, text=f"⚠️ Помилка при аналізі пари {name}: {e}"
+            chat_id=chat_id, text=f"⚠️ Помилка при аналізі пари {name}: {html.escape(str(e))}"
         )
 
 
