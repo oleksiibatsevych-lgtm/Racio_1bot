@@ -41,6 +41,7 @@ def init_db():
                 primary_tf VARCHAR(10),
                 score INT,
                 expiration_mins INT,
+                timestamp_str VARCHAR(50),
                 status VARCHAR(20) DEFAULT 'PENDING',
                 result VARCHAR(10),
                 exit_price NUMERIC,
@@ -73,16 +74,22 @@ def register_user(user_id, username=None):
     except Exception as e:
         logger.error(f"⚠️ Помилка реєстрації користувача {user_id}: {e}")
 
-def save_signal(chat_id, message_id, ticker, signal_type, entry_price, primary_tf, score, expiration_mins):
+def save_signal(chat_id=None, message_id=None, ticker=None, signal_type=None, 
+                entry_price=None, primary_tf=None, score=None, expiration_mins=None, 
+                timestamp_str=None, **kwargs):
     """Збереження нового сигналу у статус PENDING."""
+    # Підтримка альтернативних ключів
+    ticker = ticker or kwargs.get('pair')
+    signal_type = signal_type or kwargs.get('signal')
+    
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO signals (chat_id, message_id, ticker, signal_type, entry_price, primary_tf, score, expiration_mins, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'PENDING')
+            INSERT INTO signals (chat_id, message_id, ticker, signal_type, entry_price, primary_tf, score, expiration_mins, timestamp_str, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING')
             RETURNING id;
-        """, (chat_id, message_id, ticker, signal_type, entry_price, primary_tf, score, expiration_mins))
+        """, (chat_id, message_id, ticker, signal_type, entry_price, primary_tf, score, expiration_mins, timestamp_str))
         signal_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
