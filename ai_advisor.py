@@ -2,6 +2,7 @@ import os
 import logging
 import json
 import google.generativeai as genai
+from PIL import Image
 from config import GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,6 @@ class AITradingAdvisor:
         if self.api_key:
             try:
                 genai.configure(api_key=self.api_key)
-                # Використовуємо актуальну модель gemini-2.5-flash
                 self.model = genai.GenerativeModel('gemini-2.5-flash')
                 logger.info("✅ Gemini API успішно ініціалізовано з моделлю: gemini-2.5-flash")
             except Exception as e:
@@ -29,7 +29,7 @@ class AITradingAdvisor:
             }
 
         prompt = f"""
-Ти є професійним Forex та Binary Options трейдером. Проаналізуй сигнал:
+Ти є професійним Forex та Binary Options трейдером. Проаналізуй сигнал та графіки:
 
 Пара: {pair_name}
 Сигнал: {payload.get('signal')}
@@ -49,8 +49,18 @@ ADX: {payload.get('adx')} | RSI: {payload.get('rsi')}
 
 Відповідай ТІЛЬКИ у форматі чистого JSON.
 """
+        contents = [prompt]
+        for chart in [macro_chart, mid_chart, micro_chart]:
+            if chart:
+                try:
+                    chart.seek(0)
+                    img = Image.open(chart)
+                    contents.append(img)
+                except Exception as img_err:
+                    logger.warning(f"⚠️ Помилка відкриття графіку для ШІ: {img_err}")
+
         try:
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(contents)
             clean_json = response.text.strip().replace("```json", "").replace("```", "").strip()
             return json.loads(clean_json)
         except Exception as e:
