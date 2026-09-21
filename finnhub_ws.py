@@ -53,6 +53,8 @@ def on_error(ws, error):
     logger.error(f"❌ Finnhub WebSocket Помилка: {error}")
 
 def on_close(ws, close_status_code, close_msg):
+    global _ws_thread_started
+    _ws_thread_started = False
     logger.warning("🔌 З'єднання Finnhub WebSocket закрито. Повторне підключення через 5 секунд...")
     time.sleep(5)
     start_finnhub_ws()
