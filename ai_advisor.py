@@ -1,8 +1,9 @@
+import io
 import json
 import logging
 import os
 import re
-import html
+from PIL import Image
 import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ def analyze_signal_with_gemini(
 - ML-ймовірність: {payload.get('ml_prob', 0)}%
 
 💡 ЗАВДАННЯ:
-1. Проаналізуй узгодженість індикаторів та графіків.
+1. Проаналізуй узгодженість індикаторів та наданих графіків.
 2. Дай оцінку впевненості у сигналі від 1 до 10 (де 1-4 — слабкий/небезпечний, 5-7 — середній, 8-10 — сильний).
 3. Надай КОРОТКЕ (до 20 слів) конкретне обґрунтування українською мовою (вкажи головний плюс або головний ризик).
 4. Визнач оптимальний час експірації у хвилинах.
@@ -61,16 +62,32 @@ def analyze_signal_with_gemini(
         }
 
         inputs = [prompt]
-        if chart_images and isinstance(chart_images, list):
-            inputs.extend(chart_images)
 
-        logger.info(f"🧠 Відправка запиту до Gemini API для {pair_name}...")
+        # 🛠 Конвертація io.BytesIO у PIL.Image для підтримки Gemini SDK
+        if chart_images and isinstance(chart_images, list):
+            for img in chart_images:
+                if isinstance(img, io.BytesIO):
+                    try:
+                        img.seek(0)
+                        pil_img = Image.open(img)
+                        inputs.append(pil_img)
+                    except Exception as img_err:
+                        logger.warning(
+                            f"⚠️ Не вдалося відкрити зображення через PIL: {img_err}"
+                        )
+                elif isinstance(img, Image.Image):
+                    inputs.append(img)
+
+        logger.info(
+            f"🧠 Відправка запиту до Gemini API для {pair_name} (графіків додано: {len(inputs)-1})..."
+        )
         response = model.generate_content(
             inputs, generation_config=generation_config
         )
 
         raw_text = response.text.strip() if response.text else ""
 
+        # Витягуємо JSON через регулярний вираз
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         clean_json = (
             json_match.group(0)
@@ -81,7 +98,7 @@ def analyze_signal_with_gemini(
         data = json.loads(clean_json)
 
         confidence = int(data.get("confidence", 5))
-        reason = html.escape(str(data.get("reason", "Аналіз виконано успішно")).strip())
+        reason = str(data.get("reason", "Аналіз виконано успішно")).strip()
         optimal_tf = str(
             data.get("optimal_tf", payload.get("primary_tf", "5m"))
         )
@@ -118,7 +135,7 @@ def analyze_signal_with_gemini(
 def _get_fallback_response(payload: dict, error_msg: str) -> dict:
     return {
         "confidence": 0,
-        "reason": html.escape(error_msg),
+        "reason": error_msg,
         "optimal_tf": payload.get("primary_tf", "5m"),
         "suggested_expiration": payload.get("suggested_exp", 5),
     }
