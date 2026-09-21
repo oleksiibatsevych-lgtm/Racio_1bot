@@ -49,6 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ✅ Зчитування токена зі змінних оточення Render
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     logger.error("❌ Критична помилка: TELEGRAM_TOKEN не знайдено в Environment Variables!")
@@ -630,7 +631,6 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             logger.info(
                 f"⏭️ Сигнал для {name} пропущено фільтром: {filter_reason}"
             )
-            # 💡 Виправлено: екранування символу '<' для запобігання помилкам HTML
             bot.send_message(
                 chat_id=chat_id,
                 text=f"⏭ <b>Пара {name} пропущена:</b> {html.escape(filter_reason)}",
@@ -661,7 +661,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             ema_dist,
         )
 
-        # 4️⃣ ГЕНЕРАЦІЯ ГРАФІКІВ ТА АНАЛІЗ ЧЕРЕЗ ШІ GEMINI 2.5 FLASH
+        # 4️⃣ ГЕНЕРАЦІЯ ГРАФІКІВ ТА АНАЛІЗ ЧЕРЕЗ ШІ GEMINI
         macro_chart = create_chart_image(df_macro, name, tf_label="1h")
         mid_chart = create_chart_image(df_mid, name, tf_label="15m")
         micro_chart = create_chart_image(df_fast, name, tf_label="5m")
@@ -752,6 +752,20 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
         )
 
 
+def analyze_all_pairs_async(chat_id):
+    """Фонова функція для сканування всіх пар без тайм-ауту Flask."""
+    logger.info(f"🚀 Запущено фоновий масовий аналіз пар для chat_id: {chat_id}")
+    for name, ticker in PAIRS_MAP.items():
+        try:
+            process_single_pair(chat_id, name, ticker)
+            time.sleep(2)  # Пауза між запитами
+        except Exception as e:
+            logger.error(f"⚠️ Помилка фонового аналізу пари {name}: {e}")
+    bot.send_message(
+        chat_id=chat_id, text="✅ <b>Масовий аналіз усіх пар завершено!</b>", parse_mode="HTML"
+    )
+
+
 # =====================================================================
 # 📩 ОБРОБНИКИ КОМАНД ТА КНОПОК
 # =====================================================================
@@ -775,10 +789,16 @@ def handle_message(update, context):
     chat_id = update.effective_chat.id
 
     if text == "📊 Аналіз усіх пар":
-        update.message.reply_text("🔎 Розпочинаю аналіз усіх пар на ринку...")
-        for name, ticker in PAIRS_MAP.items():
-            process_single_pair(chat_id, name, ticker)
-            time.sleep(1)
+        update.message.reply_text(
+            "🔎 <b>Розпочинаю фоновий аналіз усіх пар...</b>\n"
+            "Сигнали будуть надходити в чат по мірі перевірки.",
+            parse_mode="HTML"
+        )
+        # 🟢 Асинхронний запуск у фоновому потоці
+        thread = threading.Thread(
+            target=analyze_all_pairs_async, args=(chat_id,), daemon=True
+        )
+        thread.start()
 
     elif text == "💵 Пари":
         show_pairs_menu(chat_id)
