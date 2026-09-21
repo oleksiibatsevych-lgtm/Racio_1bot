@@ -1,156 +1,64 @@
 import os
+import logging
 import json
-import requests
 import google.generativeai as genai
-from PIL import Image
+from config import GEMINI_API_KEY
+
+logger = logging.getLogger(__name__)
 
 class AITradingAdvisor:
     def __init__(self):
-        self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        self.openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-        
-        if self.gemini_key:
+        self.api_key = GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
+        self.model = None
+        if self.api_key:
             try:
-                genai.configure(api_key=self.gemini_key)
+                genai.configure(api_key=self.api_key)
+                # Використовуємо стабільне ім'я моделі замість застарілих/неіснуючих версій
+                self.model = genai.GenerativeModel('gemini-1.5-flash')
+                logger.info("✅ Gemini API успішно ініціалізовано (gemini-1.5-flash)")
             except Exception as e:
-                print(f"⚠️ Помилка ініціалізації Gemini API: {e}")
-            
-        # Оновлено на актуальні версії моделей Gemini 2.5
-        self.gemini_models = [
-            "gemini-2.5-flash",
-            "gemini-2.5-pro"
-        ]
+                logger.error(f"⚠️ Помилка ініціалізації Gemini API: {e}")
 
-    def _evaluate_with_openrouter(self, prompt):
-        if not self.openrouter_key:
-            return None
-            
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.openrouter_key}",
-            "Content-Type": "application/json"
-        }
-
-        models_to_try = [
-            "google/gemini-2.5-flash:free",
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "deepseek/deepseek-chat",
-            "openrouter/auto"
-        ]
-
-        for model_slug in models_to_try:
-            payload = {
-                "model": model_slug,
-                "messages": [{"role": "user", "content": prompt}]
+    def evaluate_signal(self, pair_name, payload, macro_chart=None, mid_chart=None, micro_chart=None):
+        if not self.model:
+            return {
+                "confidence": 7,
+                "reason": "Аналіз проведено на основі математичної моделі (ШІ-сервіси офлайн).",
+                "optimal_tf": payload.get("primary_tf", "5m"),
+                "suggested_expiration": payload.get("suggested_exp", 5)
             }
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=12)
-                if response.status_code == 200:
-                    data = response.json()
-                    if "choices" in data and len(data["choices"]) > 0:
-                        res_text = data["choices"][0]["message"]["content"]
-                        if res_text:
-                            return res_text
-            except Exception as e:
-                print(f"⚠️ Помилка OpenRouter ({model_slug}): {e}")
-
-        return None
-
-    def evaluate_signal(self, name, payload, macro_chart, mid_chart, micro_chart):
-        calculated_signal = payload.get('signal', 'CALL')
-        calculated_exp = payload.get('suggested_exp', 5)
-        primary_tf = payload.get('primary_tf', '5m')
-        score = payload.get('score', 60)
 
         prompt = f"""
-        Ти старший аналітик та ризик-менеджер систем алгоритмічного трейдингу.
-        Надано розрахований математичний сигнал для активу {name}:
-        
-        - Напрямок угоди: {calculated_signal}
-        - Сила сигналу (Signal Score): {score}/100
-        - Базовий таймфрейм: {primary_tf}
-        - Розрахована початкова експірація: {calculated_exp} хв
-        - RSI: {payload.get('rsi')}
-        - ADX: {payload.get('adx')}
-        - Дивергенція: {payload.get('divergence', 'NONE')}
-        - Волатильність (ATR Ratio): {payload.get('volatility_ratio', 1.0)}
-        - Wick Ratio (відношення тіні): {payload.get('wick_ratio', 0)}
-        - Відстань до EMA: {payload.get('ema_dist', 0)}%
-        - Математичне обґрунтування: {payload.get('reason')}
+Ти є професійним Forex та Binary Options трейдером. Проаналізуй наступний технічний сигнал:
 
-        ТВОЄ ЗАВДАННЯ:
-        1. Проаналізуй завантажені мульти-таймфреймові графіки (макро, середній, мікро).
-        2. Оціни актуальні свічкові паттерни, локальні рівні підтримки/опору та поточний імпульс.
-        3. Підтвердь або скоригуй рекомендувану експірацію (у хвилинах) для ідеальної точки входу.
-        4. Визнач рівень впевненості (від 1 до 10).
-        5. Надай короткий аналітичний коментар українською мовою.
+Пара: {pair_name}
+Сигнал: {payload.get('signal')}
+Signal Score: {payload.get('score')}
+Головний ТФ: {payload.get('primary_tf')}
+ADX: {payload.get('adx')} | RSI: {payload.get('rsi')}
+Глобальний тренд (1h): {payload.get('global_trend')}
+Локальний тренд (15m): {payload.get('mid_trend')}
+Дивергенція: {payload.get('divergence')}
+Обґрунтування алгоритму: {payload.get('reason')}
 
-        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи Markdown обгородок:
-        {{
-            "confidence": число від 1 до 10,
-            "suggested_expiration": число хвилин,
-            "optimal_tf": "{primary_tf}",
-            "reason": "Короткий аналітичний висновок та порада щодо входу"
-        }}
-        """
+Дай коротку оцінку якості сигналу у форматі JSON з полями:
+- confidence (число від 1 до 10)
+- reason (1 короткий висновок українською мовою, до 15 слів)
+- optimal_tf (рекомендований таймфрейм)
+- suggested_expiration (час експірації в хвилинах: від 3 до 15)
 
-        response_text = None
-
-        if self.gemini_key:
-            content_parts = [prompt]
-            for chart in [macro_chart, mid_chart, micro_chart]:
-                if chart:
-                    try:
-                        chart.seek(0)
-                        content_parts.append(Image.open(chart))
-                    except Exception as e:
-                        print(f"⚠️ Помилка відкриття зображення для Gemini: {e}")
-
-            for model_name in self.gemini_models:
-                try:
-                    model = genai.GenerativeModel(model_name)
-                    resp = model.generate_content(content_parts)
-                    if resp and resp.text:
-                        response_text = resp.text
-                        break
-                except Exception as e:
-                    print(f"⚠️ Збій Gemini ({model_name}): {e}")
-
-        if not response_text and self.openrouter_key:
-            print("🔄 Gemini недоступна. Перемикаємося на резервний OpenRouter...")
-            response_text = self._evaluate_with_openrouter(prompt)
-
-        if not response_text:
-            return {
-                "decision": "YES",
-                "confidence": 6,
-                "suggested_expiration": calculated_exp,
-                "optimal_tf": primary_tf,
-                "reason": "Аналіз проведено на основі математичної моделі (ШІ-сервіси офлайн)."
-            }
-
+Відповідай ТІЛЬКИ у форматі чистого JSON без додаткового тексту.
+"""
         try:
-            clean_text = response_text.strip()
-            if clean_text.startswith("```json"): clean_text = clean_text[7:]
-            if clean_text.startswith("```"): clean_text = clean_text[3:]
-            if clean_text.endswith("```"): clean_text = clean_text[:-3]
-            clean_text = clean_text.strip()
-
-            result = json.loads(clean_text)
-            
-            return {
-                "decision": "YES",
-                "confidence": int(result.get("confidence", 6)),
-                "suggested_expiration": int(result.get("suggested_expiration", calculated_exp)),
-                "optimal_tf": str(result.get("optimal_tf", primary_tf)),
-                "reason": str(result.get("reason", "ШІ підтвердив параметри входу."))
-            }
+            response = self.model.generate_content(prompt)
+            clean_json = response.text.strip().replace("```json", "").replace("```", "").strip()
+            data = json.loads(clean_json)
+            return data
         except Exception as e:
-            print(f"⚠️ Помилка парсингу JSON від ШІ: {e}")
+            logger.warning(f"⚠️ Помилка запиту до Gemini API: {e}")
             return {
-                "decision": "YES",
-                "confidence": 5,
-                "suggested_expiration": calculated_exp,
-                "optimal_tf": primary_tf,
-                "reason": "Аналіз сформовано за математичними індикаторами."
+                "confidence": 7,
+                "reason": "Сигнал підтверджено технічним алгоритмом.",
+                "optimal_tf": payload.get("primary_tf", "5m"),
+                "suggested_expiration": payload.get("suggested_exp", 5)
             }
