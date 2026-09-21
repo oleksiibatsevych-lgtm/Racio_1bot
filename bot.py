@@ -56,6 +56,36 @@ last_sent_signals = {}
 database.init_db()
 start_finnhub_ws()
 
+def safe_send_message(chat_id, text, parse_mode="HTML", **kwargs):
+    """Безпечно надсилає повідомлення. У разі помилки HTML-парсингу надсилає звичайний текст."""
+    try:
+        return bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode, **kwargs)
+    except BadRequest as e:
+        if "Can't parse entities" in str(e):
+            logger.warning(f"⚠️ Помилка HTML-парсингу Telegram: {e}. Надсилаємо чистий текст.")
+            clean_text = (
+                text.replace("<b>", "").replace("</b>", "")
+                .replace("<i>", "").replace("</i>", "")
+                .replace("<code>", "").replace("</code>", "")
+            )
+            return bot.send_message(chat_id=chat_id, text=clean_text, parse_mode=None, **kwargs)
+        raise e
+
+def safe_edit_message(chat_id, message_id, text, parse_mode="HTML", **kwargs):
+    """Безпечно редагує повідомлення з фолбеком на чистий текст."""
+    try:
+        return bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=parse_mode, **kwargs)
+    except BadRequest as e:
+        if "Can't parse entities" in str(e):
+            logger.warning(f"⚠️ Помилка HTML-парсингу при редагуванні: {e}. Редагуємо як чистий текст.")
+            clean_text = (
+                text.replace("<b>", "").replace("</b>", "")
+                .replace("<i>", "").replace("</i>", "")
+                .replace("<code>", "").replace("</code>", "")
+            )
+            return bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=clean_text, parse_mode=None, **kwargs)
+        raise e
+
 def parse_dt(dt_val):
     if isinstance(dt_val, datetime):
         return dt_val
@@ -284,18 +314,16 @@ def process_signal_expiration(sig_id):
         orig_txt = sig_data.get("message_text", "")
         if orig_txt and "🏁 Результат" not in orig_txt:
             try:
-                bot.edit_message_text(
+                safe_edit_message(
                     chat_id=sig_data["chat_id"], 
                     message_id=sig_data["message_id"], 
-                    text=f"{orig_txt}\n{report_str}",
-                    parse_mode="HTML"
+                    text=f"{orig_txt}\n{report_str}"
                 )
             except Exception as e:
                 logger.warning(f"⚠️ Не вдалося відредагувати повідомлення {sig_id}: {e}. Надсилаємо окремий звіт...")
-                bot.send_message(
+                safe_send_message(
                     chat_id=sig_data["chat_id"],
-                    text=f"🏁 <b>Результат угоди #{sig_id} ({ticker}):</b>\n{res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>",
-                    parse_mode="HTML",
+                    text=f"🏁 <b>Результат угоди #{sig_id} ({html.escape(ticker)}):</b>\n{res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>",
                     reply_to_message_id=sig_data["message_id"]
                 )
 
@@ -405,25 +433,26 @@ def show_pairs_menu(chat_id):
         buttons.append(row)
     
     reply_markup = InlineKeyboardMarkup(buttons)
-    bot.send_message(chat_id=chat_id, text="Оберіть валютну пару для миттєвого мульти-ТФ аналізу:", reply_markup=reply_markup)
+    safe_send_message(chat_id=chat_id, text="Оберіть валютну пару для миттєвого мульти-ТФ аналізу:", reply_markup=reply_markup)
 
 # =====================================================================
 # 🛠 ОБРОБКА ПАРИ З ІНТЕГРАЦІЄЮ ДИНАМІЧНОЇ ЕКСПІРАЦІЇ, ФІЛЬТРАЦІЇ ТА ШІ
 # =====================================================================
 def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
     try:
+        safe_name = html.escape(str(name))
         session_str, session_code, hour = get_current_session_info()
         current_time = time.time()
         
         if not ignore_cooldown and ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 180:
-            bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні (зачекайте 3 хвилини).")
+            safe_send_message(chat_id=chat_id, text=f"⏳ Пара <b>{safe_name}</b> на кулдауні (зачекайте 3 хвилини).")
             return
 
         ticker_yahoo = YAHOO_PAIRS_MAP.get(name, "")
         df_daily, df_macro, df_mid, df_fast, df_micro = fetch_all_timeframes(ticker, ticker_yahoo)
         
         if df_macro is None or df_macro.empty or df_fast is None or df_fast.empty:
-            bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для {name}. Спробуйте пізніше або іншу пару.")
+            safe_send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити котирування для <b>{safe_name}</b>. Спробуйте пізніше або іншу пару.")
             return
 
         ws_price = get_live_price(ticker) or (get_live_price(ticker_yahoo) if ticker_yahoo else None)
@@ -466,11 +495,11 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
         # 2️⃣ ЖОРСТКА ФІЛЬТРАЦІЯ РИНКОВОГО ШУМУ ТА ФЛЕТУ
         is_valid, filter_reason = validate_signal_conditions(adx, volatility_ratio, calculated_expiration)
         if not is_valid:
+            safe_reason = html.escape(str(filter_reason))
             logger.info(f"⏭️ Сигнал для {name} пропущено фільтром: {filter_reason}")
-            bot.send_message(
+            safe_send_message(
                 chat_id=chat_id,
-                text=f"⏭ <b>Пара {name} пропущена:</b> {filter_reason}",
-                parse_mode="HTML"
+                text=f"⏭ <b>Пара {safe_name} пропущена:</b> {safe_reason}"
             )
             return
 
@@ -504,113 +533,55 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
         charts_list = [img for img in [macro_chart, mid_chart, micro_chart] if img]
         ai_audit = analyze_signal_with_gemini(name, ai_payload, charts_list)
 
-        ai_confidence = int(ai_audit.get("confidence", 0))
-        ai_reason = str(ai_audit.get("reason", "Аналіз ШІ"))
-        final_expiration = int(ai_audit.get("suggested_expiration", calculated_expiration))
+        ai_confidence = int(ai_audit.get("confidence", 5))
+        ai_reason = html.escape(str(ai_audit.get("reason", "")))
+        suggested_exp = int(ai_audit.get("suggested_expiration", calculated_expiration))
 
-        # 5️⃣ ФІЛЬТР ВПЕВНЕНОСТІ ШІ
-        if ai_confidence < 6:
-            logger.info(f"⏭️ Сигнал для {name} відхилено ШІ (Оцінка {ai_confidence}/10: {ai_reason})")
-            bot.send_message(
-                chat_id=chat_id,
-                text=f"⏭ <b>Сигнал для {name} відхилено ШІ ({ai_confidence}/10):</b>\n<i>{html.escape(ai_reason)}</i>",
-                parse_mode="HTML"
-            )
-            return
-
-        last_sent_signals[ticker] = time.time()  
-
-        # 6️⃣ ФОРМУВАННЯ ПОВІДОМЛЕННЯ В TELEGRAM
-        direction_icon = "🟢 КУПІВЛЯ (CALL)" if signal_type == "CALL" else "🔴 ПРОДАЖ (PUT)"
+        direction_icon = "🟢 CALL (ВГОРУ)" if signal_type == "CALL" else "🔴 PUT (ВНИЗ)"
         
         msg_text = (
-            f"⚡ <b>СИГНАЛ: {name}</b> | {direction_icon}\n"
-            f"⏱ <b>Експірація:</b> {final_expiration} хв. | <b>ТФ:</b> {primary_tf}\n"
-            f"📍 <b>Ціна входу:</b> <code>{current_price:.5f}</code>\n"
-            f"----------------------------------\n"
-            f"📈 <b>Тренди (1h / 15m):</b> {global_trend} / {mid_trend}\n"
-            f"📊 <b>RSI:</b> {rsi:.1f} | <b>ADX:</b> {adx:.1f} | <b>ATR Ratio:</b> {volatility_ratio:.2f}\n"
-            f"🌐 <b>Сесія:</b> {session_str}\n"
-            f"----------------------------------\n"
-            f"🤖 <b>Аналітика моделей:</b>\n"
-            f"• ML-ймовірність: <b>{win_probability:.1f}%</b>\n"
-            f"• ШІ-впевненість: <b>{ai_confidence}/10</b>\n"
-            f"💡 <b>Обґрунтування:</b> <i>{html.escape(ai_reason)}</i>"
+            f"📊 <b>СИГНАЛ: {safe_name}</b>\n"
+            f"🎯 <b>Напрямок:</b> {direction_icon}\n"
+            f"⏱ <b>Експірація:</b> <code>{suggested_exp} хв</code>\n"
+            f"📍 <b>Ціна входу:</b> <code>{current_price:.5f}</code>\n\n"
+            f"💡 <b>Оцінка ШІ:</b> <code>{ai_confidence}/10</code>\n"
+            f"🧠 <b>Аналіз ШІ:</b> {ai_reason}\n"
+            f"📈 <b>ML-ймовірність:</b> <code>{win_probability}%</code>\n"
+            f"⚙️ <b>Сесія:</b> {html.escape(session_str)}"
         )
 
-        sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+        sent_msg = None
+        if charts_list:
+            try:
+                sent_msg = bot.send_photo(
+                    chat_id=chat_id,
+                    photo=charts_list[0],
+                    caption=msg_text,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Не вдалося надіслати фото з підписом: {e}. Надсилаємо текстом.")
+                sent_msg = safe_send_message(chat_id, msg_text)
+        else:
+            sent_msg = safe_send_message(chat_id, msg_text)
 
-        # 7️⃣ ЗБЕРЕЖЕННЯ В БАЗУ ТА ТАЙМЕР ЕКСПІРАЦІЇ
-        timestamp_now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        sig_id = database.save_signal(
-            ticker=ticker,
-            signal_type=signal_type,
-            entry_price=current_price,
-            expiration_mins=final_expiration,
-            chat_id=chat_id,
-            message_id=sent_msg.message_id,
-            timestamp_str=timestamp_now,
-            message_text=msg_text
-        )
-
-        schedule_signal_timer(sig_id, timestamp_now, final_expiration)
+        if sent_msg:
+            last_sent_signals[ticker] = current_time
+            msg_id = sent_msg.message_id
+            sig_id = database.save_signal(
+                chat_id=chat_id,
+                message_id=msg_id,
+                ticker=ticker,
+                signal_type=signal_type,
+                entry_price=current_price,
+                expiration_mins=suggested_exp,
+                message_text=msg_text
+            )
+            schedule_signal_timer(sig_id, datetime.utcnow(), suggested_exp)
 
     except Exception as e:
-        logger.exception(f"Помилка при обробці пари {name}: {e}")
-        bot.send_message(chat_id=chat_id, text=f"⚠️ Помилка при аналізі пари {name}: {e}")
-
-# =====================================================================
-# 📩 ОБРОБНИКИ КОМАНД ТА КНОПОК
-# =====================================================================
-def handle_callback(update, context):
-    query = update.callback_query
-    chat_id = query.message.chat_id
-    data = query.data
-    
-    if data.startswith("pair_"):
-        pair_name = data.replace("pair_", "")
-        ticker = PAIRS_MAP.get(pair_name)
-        if ticker:
-            query.answer(f"Аналізуємо {pair_name}...")
-            process_single_pair(chat_id, pair_name, ticker, ignore_cooldown=True)
-
-def handle_message(update, context):
-    text = update.message.text
-    chat_id = update.effective_chat.id
-    
-    if text == "📊 Аналіз усіх пар":
-        update.message.reply_text("🔎 Розпочинаю аналіз усіх пар на ринку...")
-        for name, ticker in PAIRS_MAP.items():
-            process_single_pair(chat_id, name, ticker)
-            time.sleep(1)
-            
-    elif text == "💵 Пари":
-        show_pairs_menu(chat_id)
-        
-    elif text == "📈 Статистика":
-        stats = database.get_stats()
-        total = stats.get('total', 0)
-        wins = stats.get('wins', 0)
-        losses = stats.get('losses', 0)
-        winrate = stats.get('winrate', 0.0)
-        
-        stat_msg = (
-            f"📊 <b>Статистика роботи бота:</b>\n\n"
-            f"🎯 Всього згенеровано: <b>{total}</b>\n"
-            f"✅ Успішних (WIN): <b>{wins}</b>\n"
-            f"❌ Невдалих (LOSS): <b>{losses}</b>\n\n"
-            f"📈 <b>Winrate: {winrate:.1f}%</b>"
+        logger.exception(f"Помилка обробки пари {name}: {e}")
+        safe_send_message(
+            chat_id=chat_id,
+            text=f"⚠️ <b>Помилка при аналізі пари {html.escape(str(name))}:</b> {html.escape(str(e))}"
         )
-        update.message.reply_text(stat_msg, parse_mode="HTML")
-        
-    elif text == "📋 Логи фільтру":
-        update.message.reply_text("📋 Логи розширеного аналізу доступні у консолі управління Render.")
-
-# Реєстрація обробників подій
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
