@@ -1,73 +1,78 @@
-import os
-import logging
 import json
+import logging
+import re
 import google.generativeai as genai
-from PIL import Image
-from config import GEMINI_API_KEY
 
-logger = logging.getLogger(__name__)
 
-class AITradingAdvisor:
-    def __init__(self):
-        self.api_key = GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY", "")
-        self.model = None
-        if self.api_key:
-            try:
-                genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel('gemini-2.5-flash')
-                logger.info("✅ Gemini API успішно ініціалізовано з моделлю: gemini-2.5-flash")
-            except Exception as e:
-                logger.error(f"⚠️ Помилка ініціалізації Gemini API: {e}")
+def analyze_signal_with_gemini(
+    pair_name: str, payload: dict, chart_images: list = None
+) -> dict:
+    """Аналіз сигналу за допомогою Gemini 2.5 Flash із примусовим JSON-форматуванням."""
+    prompt = f"""
+Ти є професійним Forex та Binary Options трейдером. Проаналізуй торгову ситуацію та надай свій вердикт.
 
-    def evaluate_signal(self, pair_name, payload, macro_chart=None, mid_chart=None, micro_chart=None):
-        if not self.model:
-            return {
-                "confidence": 7,
-                "reason": "Аналіз проведено за математичною моделлю.",
-                "optimal_tf": payload.get("primary_tf", "5m"),
-                "suggested_expiration": payload.get("suggested_exp", 5)
-            }
+📊 ВХІДНІ ДАНІ СИГНАЛУ:
+- Пара: {pair_name}
+- Напрямок: {payload.get('signal')}
+- Основний ТФ: {payload.get('primary_tf', '5m')}
+- RSI: {payload.get('rsi')} | ADX: {payload.get('adx')}
+- Дивергенція: {payload.get('divergence', 'NONE')}
+- Обґрунтування тех. аналізу: {payload.get('reason')}
+- ML-ймовірність: {payload.get('ml_prob', 0)}%
 
-        prompt = f"""
-Ти є професійним Forex та Binary Options трейдером. Проаналізуй сигнал та графіки:
+💡 ЗАВДАННЯ:
+1. Оціни впевненість від 1 до 10 (де 1 - високий ризик/шум, 10 - ідеальний сетап).
+2. Вкажи КОНКРЕТНУ причину чи застереження (до 20 слів українською).
+3. Визнач оптимальну експірацію у хвилинах.
 
-Пара: {pair_name}
-Сигнал: {payload.get('signal')}
-Signal Score: {payload.get('score')}
-Головний ТФ: {payload.get('primary_tf')}
-ADX: {payload.get('adx')} | RSI: {payload.get('rsi')}
-Глобальний тренд (1h): {payload.get('global_trend')}
-Локальний тренд (15m): {payload.get('mid_trend')}
-Дивергенція: {payload.get('divergence')}
-Обґрунтування алгоритму: {payload.get('reason')}
-
-Дай коротку оцінку у форматі JSON з полями:
-- confidence (число від 1 до 10)
-- reason (1 короткий висновок українською мовою, до 15 слів)
-- optimal_tf (рекомендований таймфрейм)
-- suggested_expiration (час експірації в хвилинах: від 3 до 15)
-
-Відповідай ТІЛЬКИ у форматі чистого JSON.
+ВІДПОВІДЬ СТРОГО У ФОРМАТІ JSON (без сміття та обгорток):
+{{
+    "confidence": <число 1-10>,
+    "reason": "<короткий конкретний висновок>",
+    "optimal_tf": "{payload.get('primary_tf', '5m')}",
+    "suggested_expiration": <число хвилин>
+}}
 """
-        contents = [prompt]
-        for chart in [macro_chart, mid_chart, micro_chart]:
-            if chart:
-                try:
-                    chart.seek(0)
-                    img = Image.open(chart)
-                    contents.append(img)
-                except Exception as img_err:
-                    logger.warning(f"⚠️ Помилка відкриття графіку для ШІ: {img_err}")
 
-        try:
-            response = self.model.generate_content(contents)
-            clean_json = response.text.strip().replace("```json", "").replace("```", "").strip()
-            return json.loads(clean_json)
-        except Exception as e:
-            logger.error(f"⚠️ Помилка виконання запиту ШІ: {e}")
-            return {
-                "confidence": 7,
-                "reason": "Сигнал підтверджено математичною моделлю.",
-                "optimal_tf": payload.get("primary_tf", "5m"),
-                "suggested_expiration": payload.get("suggested_exp", 5)
-            }
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        # Примусово вимагаємо чистий JSON від API
+        generation_config = {
+            "response_mime_type": "application/json",
+            "temperature": 0.2,
+        }
+
+        inputs = [prompt]
+        if chart_images:
+            inputs.extend(chart_images)
+
+        response = model.generate_content(
+            inputs, generation_config=generation_config
+        )
+
+        raw_text = response.text.strip()
+        # Додаткова страховка очищення від ```json
+        clean_text = re.sub(r"```json\s*|\s*```", "", raw_text).strip()
+        data = json.loads(clean_text)
+
+        return {
+            "confidence": int(data.get("confidence", 5)),
+            "reason": str(data.get("reason", "Аналіз виконано")),
+            "optimal_tf": str(data.get("optimal_tf", "5m")),
+            "suggested_expiration": int(
+                data.get("suggested_expiration", 5)
+            ),
+        }
+
+    except Exception as e:
+        # Логуємо точну помилку в консоль Render
+        logging.error(f"❌ Помилка Gemini API у ai_advisor: {e}")
+
+        # Маркерний fallback: якщо 0/10 — одразу видно, що стався збій API або ключа
+        return {
+            "confidence": 0,
+            "reason": f"Збій ШІ: {str(e)[:30]}",
+            "optimal_tf": payload.get("primary_tf", "5m"),
+            "suggested_expiration": payload.get("suggested_exp", 5),
+        }
