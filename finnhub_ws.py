@@ -8,6 +8,8 @@ from config import FINNHUB_TOKEN
 logger = logging.getLogger(__name__)
 
 LIVE_PRICES = {}
+RECONNECT_DELAY = 10
+MAX_RECONNECT_DELAY = 300
 
 FINNHUB_SYMBOL_MAP = {
     "EURUSD=X": "OANDA:EUR_USD",
@@ -53,13 +55,19 @@ def on_error(ws, error):
     logger.error(f"❌ Finnhub WebSocket Помилка: {error}")
 
 def on_close(ws, close_status_code, close_msg):
-    global _ws_thread_started
+    global _ws_thread_started, RECONNECT_DELAY
     _ws_thread_started = False
-    logger.warning("🔌 З'єднання Finnhub WebSocket закрито. Повторне підключення через 5 секунд...")
-    time.sleep(5)
+    logger.warning(
+        f"🔌 З'єднання Finnhub WebSocket закрито (Код: {close_status_code}). "
+        f"Повторне підключення через {RECONNECT_DELAY} секунд..."
+    )
+    time.sleep(RECONNECT_DELAY)
+    RECONNECT_DELAY = min(RECONNECT_DELAY * 2, MAX_RECONNECT_DELAY)
     start_finnhub_ws()
 
 def on_open(ws):
+    global RECONNECT_DELAY
+    RECONNECT_DELAY = 10  # Скидаємо затримку при успішному з'єднанні
     logger.info("🟢 Finnhub WebSocket підключено успішно!")
     for yf_ticker, fh_symbol in FINNHUB_SYMBOL_MAP.items():
         subscribe_msg = json.dumps({"type": "subscribe", "symbol": fh_symbol})
