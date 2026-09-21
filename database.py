@@ -15,7 +15,7 @@ def get_connection():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
-    """Створення та перевірка наявності всіх необхідних таблиць."""
+    """Створення та перевірка наявності всіх необхідних таблиць та колонок."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -50,10 +50,23 @@ def init_db():
             );
         """)
         
+        # АВТО-МІГРАЦІЯ: додаємо колонку timestamp_str, якщо таблиця вже існувала раніше без неї
+        cursor.execute("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='signals' AND column_name='timestamp_str'
+                ) THEN
+                    ALTER TABLE signals ADD COLUMN timestamp_str VARCHAR(50);
+                END IF;
+            END $$;
+        """)
+        
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info("✅ Базу даних ініціалізовано: таблиці 'users' та 'signals' перевірено/створено.")
+        logger.info("✅ Базу даних ініціалізовано: структуру таблиць перевірено та оновлено.")
     except Exception as e:
         logger.error(f"⚠️ Помилка ініціалізації бази даних: {e}")
 
@@ -78,7 +91,6 @@ def save_signal(chat_id=None, message_id=None, ticker=None, signal_type=None,
                 entry_price=None, primary_tf=None, score=None, expiration_mins=None, 
                 timestamp_str=None, **kwargs):
     """Збереження нового сигналу у статус PENDING."""
-    # Підтримка альтернативних ключів
     ticker = ticker or kwargs.get('pair')
     signal_type = signal_type or kwargs.get('signal')
     
@@ -133,21 +145,8 @@ def update_signal_result(signal_id, status, result, exit_price, pips=0):
     except Exception as e:
         logger.error(f"⚠️ Помилка оновлення сигналу #{signal_id}: {e}")
 
-def clear_signals_safely():
-    """Безпечне очищення таблиці сигналів (зберігає структуру таблиці)."""
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("TRUNCATE TABLE signals RESTART IDENTITY;")
-        conn.commit()
-        cursor.close()
-        conn.close()
-        logger.info("✅ Таблицю signals безпечно очищено (TRUNCATE).")
-    except Exception as e:
-        logger.error(f"⚠️ Помилка очищення таблиці signals: {e}")
-
 def get_stats():
-    """Отримання загальної статистики сигналів бота."""
+    """Повертає словник зі статистикою."""
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -166,3 +165,36 @@ def get_stats():
     except Exception as e:
         logger.error(f"⚠️ Помилка отримання статистики: {e}")
         return {"total": 0, "wins": 0, "losses": 0, "pending": 0}
+
+def get_stats_summary():
+    """Повертає готовий форматований текст або словник статистики для bot.py."""
+    stats = get_stats()
+    total = stats.get('total', 0) or 0
+    wins = stats.get('wins', 0) or 0
+    losses = stats.get('losses', 0) or 0
+    pending = stats.get('pending', 0) or 0
+    
+    closed = wins + losses
+    winrate = round((wins / closed * 100), 1) if closed > 0 else 0.0
+    
+    return (
+        f"📊 **Статистика сигналів бота:**\n\n"
+        f"🎯 Всього згенеровано: **{total}**\n"
+        f"✅ Успішних (WIN): **{wins}**\n"
+        f"❌ Невдалих (LOSS): **{losses}**\n"
+        f"⏳ В очікуванні: **{pending}**\n\n"
+        f"📈 **Winrate:** **{winrate}%**"
+    )
+
+def clear_signals_safely():
+    """Безпечне очищення таблиці сигналів."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("TRUNCATE TABLE signals RESTART IDENTITY;")
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info("✅ Таблицю signals безпечно очищено.")
+    except Exception as e:
+        logger.error(f"⚠️ Помилка очищення таблиці signals: {e}")
