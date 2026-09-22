@@ -125,6 +125,7 @@ class AdaptiveTechnicalAnalysis:
 
         threshold = 0.0018
 
+        # Відскок від підтримки -> CALL
         for s_level in supports:
             if s_level and s_level > 0:
                 dist_pct = (current_price - s_level) / current_price
@@ -136,6 +137,7 @@ class AdaptiveTechnicalAnalysis:
                         "reason": f"Відскок від підтримки S ({s_level:.5f})",
                     }
 
+        # Відскок від опору -> PUT
         for r_level in resistances:
             if r_level and r_level > 0:
                 dist_pct = (r_level - current_price) / current_price
