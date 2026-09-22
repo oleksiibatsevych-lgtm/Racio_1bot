@@ -665,13 +665,20 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             ai_audit.get("suggested_expiration", calculated_expiration)
         )
 
-        if ai_confidence < 7:
-            bot.send_message(
-                chat_id=chat_id,
-                text=f"⏭ <b>Сигнал для {name} відхилено ШІ ({ai_confidence}/10):</b>\n<i>{html.escape(ai_reason)}</i>",
-                parse_mode="HTML",
-            )
-            return
+        # 🟢 Перевірка ШІ та обхід блокування за ML >= 55%
+        if ai_confidence < 6:
+            if ai_confidence == 0 and win_probability >= 55.0:
+                logger.info(
+                    f"⚠️ ШІ недоступний (помилка/ліміт) для {name}, але ML-ймовірність висока ({win_probability:.1f}%). Сигнал пропущено за ML!"
+                )
+                ai_reason = f"ШІ недоступний. Авто-схвалення за високою ML-ймовірністю ({win_probability:.1f}%)"
+            else:
+                bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⏭ <b>Сигнал для {name} відхилено ШІ ({ai_confidence}/10):</b>\n<i>{html.escape(ai_reason)}</i>",
+                    parse_mode="HTML",
+                )
+                return
 
         last_sent_signals[ticker] = time.time()
 
@@ -723,12 +730,12 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
 
 
 def analyze_all_pairs_async(chat_id):
-    """Фонова обробка масового аналізу."""
+    """Фонова обробка масового аналізу із затримкою 4.5 сек."""
     logger.info(f"🚀 Запущено фоновий масовий аналіз для chat_id: {chat_id}")
     for name, ticker in PAIRS_MAP.items():
         try:
             process_single_pair(chat_id, name, ticker)
-            time.sleep(2)
+            time.sleep(4.5)
         except Exception as e:
             logger.error(f"⚠️ Помилка фонового аналізу пари {name}: {e}")
     bot.send_message(
