@@ -72,20 +72,25 @@ def validate_signal_conditions(
     rsi: float = 50.0,
     signal_type: str = "CALL",
 ) -> tuple[bool, str]:
-    """Жорсткі фільтри стану ринку з урахуванням напрямку угоди."""
-    if requested_exp <= 3 and adx < 24.0:
+    """Жорсткі фільтри стану ринку з адаптованим ADX під стратегію відскоків."""
+    if requested_exp <= 3 and adx < 15.0:
         return (
             False,
-            f"Низький ADX ({adx:.1f} < 24) для угоди на {requested_exp} хв",
+            f"Занадто низький ADX ({adx:.1f} < 15.0) для короткої угоди на {requested_exp} хв",
         )
 
-    if adx < 18.0:
-        return False, f"Глибокий флет (ADX {adx:.1f} < 18.0)"
+    # 🟢 Поріг ADX знижено до 12.0 (для відскоку від рівнів боковик із низьким ADX — це норма)
+    if adx < 12.0:
+        return False, f"Повний штиль на ринку (ADX {adx:.1f} < 12.0)"
 
-    if volatility_ratio < 0.80:
+    # 🟢 Захист від сильного імпульсного пробою рівнів
+    if adx > 45.0:
+        return False, f"Занадто сильний пробійний тренд (ADX {adx:.1f} > 45.0)"
+
+    if volatility_ratio < 0.75:
         return (
             False,
-            f"Низька волатильність (ATR Ratio {volatility_ratio:.2f} < 0.80)",
+            f"Низька волатильність (ATR Ratio {volatility_ratio:.2f} < 0.75)",
         )
 
     # Блокуємо КУПІВЛЮ (CALL) на піку перекупленості, але ДОЗВОЛЯЄМО ПРОДАЖ (PUT)
