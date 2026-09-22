@@ -1,390 +1,242 @@
 import pandas as pd
+import pandas_ta as ta
 import numpy as np
 
+
 class AdaptiveTechnicalAnalysis:
-    
-    def get_rma(self, series, period):
-        return series.ewm(alpha=1/period, adjust=False).mean()
+    def __init__(self):
+        pass
 
-    def calculate_indicators(self, df, rsi_period=14, bb_period=20, ema_periods=(9, 21, 50)):
-        if df is None or df.empty or len(df) < max(bb_period, max(ema_periods)) + 5:
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Обчислює всі необхідні індикатори за допомогою pandas_ta."""
+        if df is None or df.empty or len(df) < 30:
             return df
 
-        df = df.copy()
-        df.columns = [str(col).lower() for col in df.columns]
-
-        if 'close' not in df.columns:
-            return df
-
-        delta = df['close'].diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = self.get_rma(gain, rsi_period)
-        avg_loss = self.get_rma(loss, rsi_period)
-        rs = avg_gain / (avg_loss + 1e-10)
-        df['rsi'] = (100 - (100 / (1 + rs))).clip(0, 100).fillna(50)
-
-        sma = df['close'].rolling(window=bb_period).mean()
-        std = df['close'].rolling(window=bb_period).std()
-        df['bb_upper'] = sma + (std * 2)
-        df['bb_lower'] = sma - (std * 2)
-        df['bb_middle'] = sma
-        
-        bb_range = df['bb_upper'] - df['bb_lower']
-        df['bb_width'] = (bb_range / (sma + 1e-10)).fillna(0.001)
-        df['pct_b'] = np.where(bb_range > 0, (df['close'] - df['bb_lower']) / bb_range, 0.5)
-        df['pct_b'] = df['pct_b'].clip(0.0, 1.0)
-
-        if 'high' in df.columns and 'low' in df.columns:
-            high, low, close_prev = df['high'], df['low'], df['close'].shift(1)
-            tr = pd.concat([high - low, (high - close_prev).abs(), (low - close_prev).abs()], axis=1).max(axis=1)
-            df['atr'] = self.get_rma(tr, 14).fillna(0.0010)
-        else:
-            df['atr'] = 0.0010
-
-        if 'high' in df.columns and 'low' in df.columns:
-            up_move = df['high'] - df['high'].shift(1)
-            down_move = df['low'].shift(1) - df['low']
+        try:
+            df.ta.rsi(length=14, append=True)
+            df.ta.adx(length=14, append=True)
+            df.ta.bbands(length=20, std=2, append=True)
+            df.ta.atr(length=14, append=True)
             
-            plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-            minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-            
-            plus_dm_rma = self.get_rma(pd.Series(plus_dm, index=df.index), 14)
-            minus_dm_rma = self.get_rma(pd.Series(minus_dm, index=df.index), 14)
-            
-            plus_di = 100 * (plus_dm_rma / (df['atr'] + 1e-10))
-            minus_di = 100 * (minus_dm_rma / (df['atr'] + 1e-10))
-            
-            di_sum = plus_di + minus_di
-            di_diff = (plus_di - minus_di).abs()
-            
-            dx = np.where(di_sum > 0, (di_diff / di_sum) * 100, 0)
-            df['adx'] = self.get_rma(pd.Series(dx, index=df.index), 14).clip(0, 100).fillna(20)
-        else:
-            df['adx'] = 20.0
+            df.ta.ema(length=10, append=True)
+            df.ta.ema(length=50, append=True)
+            df.ta.ema(length=200, append=True)
 
-        for span in ema_periods:
-            df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
-            
-        ema_main = f'ema_{ema_periods[-1]}'
-        df['ema_dist'] = ((df['close'] - df[ema_main]) / (df[ema_main] + 1e-10)) * 100
+            if 'RSI_14' in df.columns:
+                df['rsi'] = df['RSI_14']
+            else:
+                df['rsi'] = 50.0
 
-        ema12 = df['close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['close'].ewm(span=26, adjust=False).mean()
-        df['macd'] = ema12 - ema26
-        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-        df['macd_hist'] = df['macd'] - df['macd_signal']
+            if 'ADX_14' in df.columns:
+                df['adx'] = df['ADX_14']
+            else:
+                df['adx'] = 20.0
 
-        if 'high' in df.columns and 'low' in df.columns:
-            lowest_low = df['low'].rolling(window=14).min()
-            highest_high = df['high'].rolling(window=14).max()
-            stoch_range = highest_high - lowest_low
-            df['stoch_k'] = np.where(stoch_range > 0, ((df['close'] - lowest_low) / (stoch_range + 1e-10)) * 100, 50)
-            df['stoch_k'] = pd.Series(df['stoch_k'], index=df.index).clip(0, 100).fillna(50)
-            df['stoch_d'] = df['stoch_k'].rolling(window=3).mean().clip(0, 100).fillna(50)
-        else:
-            df['stoch_k'] = 50.0
-            df['stoch_d'] = 50.0
+            bb_cols = [c for c in df.columns if 'BBL' in c]
+            if bb_cols:
+                df['bb_lower'] = df[bb_cols[0]]
+                df['bb_upper'] = df[[c for c in df.columns if 'BBU' in c][0]]
+                df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_lower']
 
-        if 'volume' in df.columns and df['volume'].sum() > 0:
-            typical_price = (df['high'] + df['low'] + df['close']) / 3
-            df['vwap_20'] = (typical_price * df['volume']).rolling(20).sum() / (df['volume'].rolling(20).sum() + 1e-10)
-        else:
-            df['vwap_20'] = df['close']
+            if 'ATR_14' in df.columns:
+                df['atr'] = df['ATR_14']
+                df['atr_sma'] = df['atr'].rolling(window=14).mean()
+                df['volatility_ratio'] = df['atr'] / df['atr_sma']
+                df['volatility_ratio'] = df['volatility_ratio'].fillna(1.0)
+            else:
+                df['volatility_ratio'] = 1.0
 
-        if 'high' in df.columns and 'low' in df.columns and 'open' in df.columns:
-            candle_range = df['high'] - df['low'] + 1e-10
-            df['upper_wick_ratio'] = (df['high'] - df[['open', 'close']].max(axis=1)) / candle_range
-            df['lower_wick_ratio'] = (df[['open', 'close']].min(axis=1) - df['low']) / candle_range
-            df['upper_wick_ratio'] = df['upper_wick_ratio'].clip(0, 1).fillna(0.0)
-            df['lower_wick_ratio'] = df['lower_wick_ratio'].clip(0, 1).fillna(0.0)
-        else:
-            df['upper_wick_ratio'] = 0.0
-            df['lower_wick_ratio'] = 0.0
-            
+        except Exception as e:
+            print(f"Помилка розрахунку індикаторів: {e}")
+
         return df
 
-    def get_trend(self, df, span_val=50):
-        if df is None or df.empty or 'close' not in df.columns or len(df) < span_val:
+    def get_trend(self, df: pd.DataFrame, span_val: int = 50) -> str:
+        """Визначає глобальний тренд за EMA."""
+        if df is None or df.empty or len(df) < span_val:
             return "NEUTRAL"
-        ema = df['close'].ewm(span=span_val, adjust=False).mean()
-        current_price = float(df['close'].iloc[-1])
-        current_ema = float(ema.iloc[-1])
-        threshold = current_ema * 0.0003
-        
-        if current_price - current_ema > threshold:
-            return "BULLISH"
-        elif current_price - current_ema < -threshold:
-            return "BEARISH"
+
+        close = float(df['close'].iloc[-1])
+        try:
+            ema_col = f"EMA_{span_val}"
+            if ema_col in df.columns:
+                ema = float(df[ema_col].iloc[-1])
+            else:
+                ema = float(df['close'].ewm(span=span_val, adjust=False).mean().iloc[-1])
+
+            if close > ema:
+                return "BULLISH"
+            elif close < ema:
+                return "BEARISH"
+        except Exception:
+            pass
         return "NEUTRAL"
 
-    def calculate_pivots(self, df_daily):
-        if df_daily is None or df_daily.empty or 'high' not in df_daily.columns or len(df_daily) < 2:
-            return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
-        last_day = df_daily.iloc[-2] if len(df_daily) >= 2 else df_daily.iloc[-1]
-        high, low, close = float(last_day['high']), float(last_day['low']), float(last_day['close'])
+    def calculate_pivots(self, df: pd.DataFrame) -> dict:
+        """Розраховує класичні рівні Pivot."""
+        pivots = {"P": 0.0, "R1": 0.0, "R2": 0.0, "R3": 0.0, "S1": 0.0, "S2": 0.0, "S3": 0.0}
+        if df is None or len(df) < 2:
+            return pivots
+
+        prev_candle = df.iloc[-2]
+        high = float(prev_candle['high'])
+        low = float(prev_candle['low'])
+        close = float(prev_candle['close'])
+
         p = (high + low + close) / 3
-        return {"P": p, "R1": (2 * p) - low, "S1": (2 * p) - high, "R2": p + (high - low), "S2": p - (high - low)}
+        r1 = (2 * p) - low
+        s1 = (2 * p) - high
+        r2 = p + (high - low)
+        s2 = p - (high - low)
+        r3 = high + 2 * (p - low)
+        s3 = low - 2 * (high - p)
 
-    def detect_divergence(self, df, window=25):
-        if df is None or df.empty or 'rsi' not in df.columns or 'macd' not in df.columns or len(df) < window:
+        return {"P": p, "R1": r1, "R2": r2, "R3": r3, "S1": s1, "S2": s2, "S3": s3}
+
+    def check_divergence(self, df: pd.DataFrame) -> str:
+        """Шукає дивергенцію по RSI."""
+        if len(df) < 20 or 'rsi' not in df.columns:
             return "NONE"
-        sub = df.tail(window).copy().reset_index(drop=True)
-        prices, rsi_vals, macd_vals = sub['close'].values, sub['rsi'].values, sub['macd'].values
-        
-        low_pivots = [i for i in range(2, len(prices) - 2) if prices[i] <= prices[i-1] and prices[i] <= prices[i-2] and prices[i] <= prices[i+1] and prices[i] <= prices[i+2]]
-        high_pivots = [i for i in range(2, len(prices) - 2) if prices[i] >= prices[i-1] and prices[i] >= prices[i-2] and prices[i] >= prices[i+1] and prices[i] >= prices[i+2]]
-        
-        if len(low_pivots) >= 2:
-            p1, p2 = low_pivots[-2], low_pivots[-1]
-            if prices[p2] < prices[p1] and (rsi_vals[p2] > rsi_vals[p1] + 1.5 or macd_vals[p2] > macd_vals[p1]):
-                return "BULLISH_DIV"
 
-        if len(high_pivots) >= 2:
-            p1, p2 = high_pivots[-2], high_pivots[-1]
-            if prices[p2] > prices[p1] and (rsi_vals[p2] < rsi_vals[p1] - 1.5 or macd_vals[p2] < macd_vals[p1]):
-                return "BEARISH_DIV"
+        recent_price_low = df['low'].iloc[-10:].min()
+        past_price_low = df['low'].iloc[-20:-10].min()
+        recent_rsi_low = df['rsi'].iloc[-10:].min()
+        past_rsi_low = df['rsi'].iloc[-20:-10].min()
+
+        recent_price_high = df['high'].iloc[-10:].max()
+        past_price_high = df['high'].iloc[-20:-10].max()
+        recent_rsi_high = df['rsi'].iloc[-10:].max()
+        past_rsi_high = df['rsi'].iloc[-20:-10].max()
+
+        if recent_price_low < past_price_low and recent_rsi_low > past_rsi_low:
+            return "BULLISH"
+        if recent_price_high > past_price_high and recent_rsi_high < past_rsi_high:
+            return "BEARISH"
 
         return "NONE"
 
-    def score_single_timeframe(self, df_tf, tf_name, global_trend="NEUTRAL", pivots=None):
-        if df_tf is None or df_tf.empty or len(df_tf) < 20:
-            return {'tf_name': tf_name, 'call_score': 0, 'put_score': 0, 'rsi': 50, 'adx': 20, 'atr': 0.001, 'pct_b': 0.5, 'divergence': 'NONE', 'lower_wick': 0.0, 'upper_wick': 0.0, 'reasons_call': [], 'reasons_put': []}
+    def _evaluate_bounce_signal(self, current_price: float, pivots: dict, rsi: float) -> dict:
+        """Перевірка відскоку від рівнів S/R."""
+        if not pivots or current_price <= 0:
+            return {"signal": "NONE", "score": 0, "reason": ""}
 
-        df_tf = self.calculate_indicators(df_tf, rsi_period=9 if tf_name == '1m' else 14)
-        last = df_tf.iloc[-1]
+        resistances = [pivots.get("R1"), pivots.get("R2"), pivots.get("R3")]
+        supports = [pivots.get("S1"), pivots.get("S2"), pivots.get("S3")]
 
-        rsi = float(last.get('rsi', 50))
-        stoch_k = float(last.get('stoch_k', 50))
-        stoch_d = float(last.get('stoch_d', 50))
-        adx = float(last.get('adx', 20))
-        atr = float(last.get('atr', 0.001))
-        pct_b = float(last.get('pct_b', 0.5))
-        close = float(last['close'])
-        ema_9 = float(last.get('ema_9', close))
-        ema_21 = float(last.get('ema_21', close))
-        vwap_20 = float(last.get('vwap_20', close))
-        macd_hist = float(last.get('macd_hist', 0.0))
-        lower_wick = float(last.get('lower_wick_ratio', 0.0))
-        upper_wick = float(last.get('upper_wick_ratio', 0.0))
+        threshold = 0.0018
+
+        for s_level in supports:
+            if s_level and s_level > 0:
+                dist_pct = (current_price - s_level) / current_price
+                if 0 <= dist_pct <= threshold:
+                    score = 75 + (15 if rsi < 45 else 0)
+                    return {
+                        "signal": "CALL",
+                        "score": score,
+                        "reason": f"Відскок від підтримки S ({s_level:.5f})",
+                    }
+
+        for r_level in resistances:
+            if r_level and r_level > 0:
+                dist_pct = (r_level - current_price) / current_price
+                if 0 <= dist_pct <= threshold:
+                    score = 75 + (15 if rsi > 55 else 0)
+                    return {
+                        "signal": "PUT",
+                        "score": score,
+                        "reason": f"Відскок від опору R ({r_level:.5f})",
+                    }
+
+        return {"signal": "NONE", "score": 0, "reason": ""}
+
+    def generate_signal(
+        self, global_trend: str, mid_trend: str, df_daily: pd.DataFrame, tf_dict: dict
+    ) -> dict:
+        """Генерує фінальний сигнал: пріоритет відскоку від рівнів, інакше - тренд."""
+        df_fast = tf_dict.get("5m")
+        if df_fast is None or df_fast.empty or 'rsi' not in df_fast.columns:
+            return {"signal": "NONE", "score": 0, "reason": "Недостатньо даних (5m)"}
+
+        current_price = float(df_fast['close'].iloc[-1])
+        rsi = float(df_fast['rsi'].iloc[-1])
+        adx = float(df_fast['adx'].iloc[-1]) if 'adx' in df_fast.columns else 20.0
         
-        div = self.detect_divergence(df_tf, window=25)
+        volatility_ratio = 1.0
+        if 'volatility_ratio' in df_fast.columns:
+            volatility_ratio = float(df_fast['volatility_ratio'].iloc[-1])
+            
+        divergence = self.check_divergence(df_fast)
+        pivots = self.calculate_pivots(df_daily if df_daily is not None else tf_dict.get("1h"))
 
-        call_score = 0
-        put_score = 0
-        reasons_call = []
-        reasons_put = []
-
-        is_trending = adx >= 25
-        is_strong_trend = adx >= 35
-
-        trend_base_weight = 20 if is_trending else 10
-        
-        if ema_9 > ema_21:
-            call_score += trend_base_weight
-            reasons_call.append(f"Локальний висхідний тренд EMA ({tf_name})")
-        elif ema_9 < ema_21:
-            put_score += trend_base_weight
-            reasons_put.append(f"Локальний низхідний тренд EMA ({tf_name})")
-
-        if ema_9 > ema_21 and global_trend == "BULLISH":
-            call_score += 25
-            reasons_call.append("Синхронізація макро та мікро трендів 📈")
-        elif ema_9 < ema_21 and global_trend == "BEARISH":
-            put_score += 25
-            reasons_put.append("Синхронізація макро та мікро трендів 📉")
-
-        if close > vwap_20:
-            call_score += 10
-            reasons_call.append("Ціна вище VWAP")
-        elif close < vwap_20:
-            put_score += 10
-            reasons_put.append("Ціна нижче VWAP")
-
-        if macd_hist > 0:
-            call_score += 10
-        elif macd_hist < 0:
-            put_score += 10
-
-        osc_weight_deep = 15 if is_trending else 25
-        
-        if rsi <= 30:
-            if not (is_strong_trend and global_trend == "BEARISH"):
-                call_score += osc_weight_deep
-                reasons_call.append(f"Перепроданість RSI ({rsi:.1f})")
-        elif rsi >= 70:
-            if not (is_strong_trend and global_trend == "BULLISH"):
-                put_score += osc_weight_deep
-                reasons_put.append(f"Перекупленість RSI ({rsi:.1f})")
-
-        if stoch_k <= 20 and stoch_k > stoch_d:
-            call_score += 15
-            reasons_call.append("Висхідний перетин Stochastic")
-        elif stoch_k >= 80 and stoch_k < stoch_d:
-            put_score += 15
-            reasons_put.append("Низхідний перетин Stochastic")
-
-        bb_weight = 10 if is_trending else 25
-        if pct_b <= 0.15:
-            if not (is_strong_trend and global_trend == "BEARISH"):
-                call_score += bb_weight
-                reasons_call.append(f"Відбиття від нижньої межі BB (%B: {pct_b:.2f})")
-        elif pct_b >= 0.85:
-            if not (is_strong_trend and global_trend == "BULLISH"):
-                put_score += bb_weight
-                reasons_put.append(f"Відбиття від верхньої межі BB (%B: {pct_b:.2f})")
-
-        if lower_wick >= 0.4:
-            call_score += 15
-            reasons_call.append(f"Пінбар/Відкупна тінь ({lower_wick:.2f})")
-        elif upper_wick >= 0.4:
-            put_score += 15
-            reasons_put.append(f"Пінбар/Тінь продажів ({upper_wick:.2f})")
-
-        if div == 'BULLISH_DIV':
-            call_score += 30
-            reasons_call.append(f"Бича дивергенція на {tf_name}")
-        elif div == 'BEARISH_DIV':
-            put_score += 30
-            reasons_put.append(f"Ведмежа дивергенція на {tf_name}")
-
-        pivot_weight = 10 if is_trending else 20
-        if pivots:
-            s1, s2 = pivots.get('S1', 0), pivots.get('S2', 0)
-            r1, r2 = pivots.get('R1', 0), pivots.get('R2', 0)
-            if (s1 > 0 and close <= s1 * 1.002 and close >= s1 * 0.998) or (s2 > 0 and close <= s2 * 1.002 and close >= s2 * 0.998):
-                call_score += pivot_weight
-                reasons_call.append("Тест підтримки Pivot S1/S2")
-            elif (r1 > 0 and close >= r1 * 0.998 and close <= r1 * 1.002) or (r2 > 0 and close >= r2 * 0.998 and close <= r2 * 1.002):
-                put_score += pivot_weight
-                reasons_put.append("Тест опору Pivot R1/R2")
-
-        return {
-            'tf_name': tf_name,
-            'call_score': call_score,
-            'put_score': put_score,
-            'rsi': rsi,
-            'adx': adx,
-            'atr': atr,
-            'pct_b': pct_b,
-            'divergence': div,
-            'lower_wick': lower_wick,
-            'upper_wick': upper_wick,
-            'reasons_call': reasons_call,
-            'reasons_put': reasons_put
-        }
-
-    def generate_signal(self, df_1m=None, df_5m=None, global_trend="NEUTRAL", mid_trend="NEUTRAL", df_daily=None, tf_dict=None):
-        frames = {}
-        if isinstance(tf_dict, dict):
-            frames = tf_dict
-        else:
-            if df_1m is not None and not df_1m.empty:
-                frames['1m'] = df_1m
-            if df_5m is not None and not df_5m.empty:
-                frames['5m'] = df_5m
-
-        if isinstance(global_trend, pd.DataFrame):
-            df_macro = global_trend
-            global_trend = self.get_trend(df_macro, span_val=200)
-            if df_daily is None:
-                df_daily = df_macro
-
-        pivots = self.calculate_pivots(df_daily) if df_daily is not None else {}
-
-        if not frames:
+        # 1. СТРАТЕГІЯ ВІДСКОКУ
+        bounce = self._evaluate_bounce_signal(current_price, pivots, rsi)
+        if bounce["signal"] != "NONE":
             return {
-                'signal': 'CALL',
-                'score': 50,
-                'confidence_level': 'LOW_DATA',
-                'suggested_exp': 5,
-                'expiration_minutes': 5,
-                'strategy': 'Базовий аналіз',
-                'priority': 4,
-                'reason': 'Недостатньо історичних даних для аналізу'
+                "signal": bounce["signal"],
+                "score": bounce["score"],
+                "primary_tf": "5m",
+                "rsi": rsi,
+                "adx": adx,
+                "divergence": divergence,
+                "volatility_ratio": volatility_ratio,
+                "wick_ratio": 0.0,
+                "ema_dist": 0.0,
+                "reason": bounce["reason"],
             }
 
-        evaluated_tfs = []
-        for tf_name, df_tf in frames.items():
-            df_tf_calc = self.calculate_indicators(df_tf, rsi_period=9 if tf_name == '1m' else 14)
-            frames[tf_name] = df_tf_calc
-            tf_res = self.score_single_timeframe(df_tf_calc, tf_name, global_trend=global_trend, pivots=pivots)
-            evaluated_tfs.append(tf_res)
+        # 2. ТРЕНДОВА СТРАТЕГІЯ
+        signal = "NONE"
+        score = 0
+        reason = "Флет або відсутність умов"
 
-        total_call = sum(t['call_score'] for t in evaluated_tfs)
-        total_put = sum(t['put_score'] for t in evaluated_tfs)
+        if global_trend == "BULLISH" and mid_trend == "BULLISH":
+            if rsi < 65:
+                signal = "CALL"
+                score = 65
+                reason = "Сильний бичачий тренд"
+                if divergence == "BULLISH":
+                    score += 15
 
-        if total_call >= total_put:
-            direction = 'CALL'
-            raw_score = total_call
-            best_tf_res = max(evaluated_tfs, key=lambda x: x['call_score'])
-            selected_reasons = best_tf_res['reasons_call']
-            wick_ratio_final = best_tf_res['lower_wick']
-        else:
-            direction = 'PUT'
-            raw_score = total_put
-            best_tf_res = max(evaluated_tfs, key=lambda x: x['put_score'])
-            selected_reasons = best_tf_res['reasons_put']
-            wick_ratio_final = best_tf_res['upper_wick']
+        elif global_trend == "BEARISH" and mid_trend == "BEARISH":
+            if rsi > 35:
+                signal = "PUT"
+                score = 65
+                reason = "Сильний ведмежий тренд"
+                if divergence == "BEARISH":
+                    score += 15
 
-        max_possible = max(len(evaluated_tfs) * 120, 100)
-        final_score = int(min(100, max(45, (raw_score / max_possible) * 100 + 30)))
+        wick_ratio = 0.0
+        ema_dist = 0.0
+        try:
+            high = float(df_fast['high'].iloc[-1])
+            low = float(df_fast['low'].iloc[-1])
+            open_p = float(df_fast['open'].iloc[-1])
+            close_p = float(df_fast['close'].iloc[-1])
+            
+            total_len = high - low
+            if total_len > 0:
+                if signal == "CALL":
+                    lower_wick = min(open_p, close_p) - low
+                    wick_ratio = lower_wick / total_len
+                elif signal == "PUT":
+                    upper_wick = high - max(open_p, close_p)
+                    wick_ratio = upper_wick / total_len
 
-        primary_tf = best_tf_res['tf_name']
-        atr = best_tf_res['atr']
-        adx = best_tf_res['adx']
-        rsi = best_tf_res['rsi']
-        div = best_tf_res['divergence']
-
-        if primary_tf == '1m':
-            base_exp = 3
-        elif primary_tf in ['3m', '5m']:
-            base_exp = 5
-        elif primary_tf == '15m':
-            base_exp = 15
-        else:
-            base_exp = 5
-
-        atr_series = frames[primary_tf].get('atr', pd.Series([atr]))
-        atr_ma = atr_series.rolling(20).mean().iloc[-1] if len(atr_series) >= 20 else atr
-        volatility_ratio = float(atr / (atr_ma + 1e-10))
-
-        if volatility_ratio > 1.35 or adx > 32:
-            suggested_exp = max(2, base_exp - 1)
-        elif volatility_ratio < 0.75:
-            suggested_exp = base_exp + 2
-        else:
-            suggested_exp = base_exp
-
-        if final_score >= 75:
-            confidence_level = "HIGH"
-            strategy_name = f"Синхронний тренд {direction}"
-        elif final_score >= 60:
-            confidence_level = "MEDIUM"
-            strategy_name = f"Локальний імпульс {primary_tf}"
-        else:
-            confidence_level = "LOW_RISK"
-            strategy_name = "Канальний відклик (Флет)"
-
-        reason_str = ", ".join(selected_reasons[:3]) if selected_reasons else f"Пріоритет напрямку {direction}"
-
-        ema_dist_val = float(frames[primary_tf].get('ema_dist', pd.Series([0])).iloc[-1])
+            if 'EMA_10' in df_fast.columns:
+                ema_10 = float(df_fast['EMA_10'].iloc[-1])
+                ema_dist = abs(current_price - ema_10) / ema_10
+        except Exception:
+            pass
 
         return {
-            'signal': direction,
-            'score': final_score,
-            'confidence_level': confidence_level,
-            'rsi': round(rsi, 1),
-            'adx': round(adx, 1),
-            'atr': atr,
-            'divergence': div,
-            'suggested_exp': suggested_exp,
-            'expiration_minutes': suggested_exp,
-            'primary_tf': primary_tf,
-            'strategy': strategy_name,
-            'priority': 1 if final_score >= 75 else (2 if final_score >= 60 else 3),
-            'reason': reason_str,
-            'volatility_ratio': round(volatility_ratio, 3),
-            'wick_ratio': round(wick_ratio_final, 3),
-            'ema_dist': round(ema_dist_val, 3)
+            "signal": signal,
+            "score": score,
+            "primary_tf": "5m",
+            "rsi": rsi,
+            "adx": adx,
+            "divergence": divergence,
+            "volatility_ratio": volatility_ratio,
+            "wick_ratio": wick_ratio,
+            "ema_dist": ema_dist,
+            "reason": reason,
         }
