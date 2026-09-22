@@ -25,7 +25,7 @@ def check_pivot_level_proximity(
     pivots: dict,
     threshold_pct: float = 0.0015,
 ) -> tuple[bool, str]:
-    """Перевіряє, чи не здійснюється купівля в опір або продаж в підтримку (поріг ~0.15%)."""
+    """Захист: блокує купівлю CALL прямо під опором та PUT прямо над підтримкою."""
     if not pivots or current_price <= 0:
         return True, "OK"
 
@@ -70,8 +70,9 @@ def validate_signal_conditions(
     volatility_ratio: float,
     requested_exp: int,
     rsi: float = 50.0,
+    signal_type: str = "CALL",
 ) -> tuple[bool, str]:
-    """Основні жорсткі фільтри стану ринку."""
+    """Жорсткі фільтри стану ринку з урахуванням напрямку угоди."""
     if requested_exp <= 3 and adx < 24.0:
         return (
             False,
@@ -87,15 +88,18 @@ def validate_signal_conditions(
             f"Низька волатильність (ATR Ratio {volatility_ratio:.2f} < 0.80)",
         )
 
-    if rsi > 67.0:
+    # Блокуємо КУПІВЛЮ (CALL) на піку перекупленості, але ДОЗВОЛЯЄМО ПРОДАЖ (PUT)
+    if signal_type == "CALL" and rsi > 67.0:
         return (
             False,
-            f"Перекупленість (RSI {rsi:.1f} > 67) — високий ризик відкату вниз",
+            f"Перекупленість (RSI {rsi:.1f} > 67) — високий ризик купувати CALL на піку",
         )
-    if rsi < 33.0:
+
+    # Блокуємо ПРОДАЖ (PUT) на дні перепроданості, але ДОЗВОЛЯЄМО КУПІВЛЮ (CALL)
+    if signal_type == "PUT" and rsi < 33.0:
         return (
             False,
-            f"Перепроданість (RSI {rsi:.1f} < 33) — високий ризик відкату вгору",
+            f"Перепроданість (RSI {rsi:.1f} < 33) — високий ризик продавати PUT на дні",
         )
 
     return True, "OK"
