@@ -25,7 +25,7 @@ def check_pivot_level_proximity(
     pivots: dict,
     threshold_pct: float = 0.0015,
 ) -> tuple[bool, str]:
-    """Перевіряє, чи не здійснюється купівля в опір або продажу в підтримку (поріг ~0.15%)."""
+    """Перевіряє, чи не здійснюється купівля в опір або продаж в підтримку (поріг ~0.15%)."""
     if not pivots or current_price <= 0:
         return True, "OK"
 
@@ -39,7 +39,7 @@ def check_pivot_level_proximity(
                 if 0 <= dist <= threshold_pct:
                     return (
                         False,
-                        f"Ціна занадто близько до рівню опору R ({r_level:.5f}) — високий ризик відкату вниз",
+                        f"Ціна занадто близько до опору R ({r_level:.5f}) — ризик відкату вниз",
                     )
                 elif -0.0005 <= dist < 0:
                     return (
@@ -54,7 +54,7 @@ def check_pivot_level_proximity(
                 if 0 <= dist <= threshold_pct:
                     return (
                         False,
-                        f"Ціна занадто близько до рівню підтримки S ({s_level:.5f}) — високий ризик відскоку вгору",
+                        f"Ціна занадто близько до підтримки S ({s_level:.5f}) — ризик відскоку вгору",
                     )
                 elif -0.0005 <= dist < 0:
                     return (
