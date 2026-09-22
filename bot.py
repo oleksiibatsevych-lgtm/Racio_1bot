@@ -574,8 +574,9 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             primary_tf, adx, volatility_ratio
         )
 
+        # Передаємо signal_type для коректного фільтра RSI
         is_valid, filter_reason = validate_signal_conditions(
-            adx, volatility_ratio, calculated_expiration, rsi=rsi
+            adx, volatility_ratio, calculated_expiration, rsi=rsi, signal_type=signal_type
         )
         if not is_valid:
             bot.send_message(
@@ -609,7 +610,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             else 0.0
         )
 
-        # 🟢 Отримання ML-ймовірності та конвертація 0.0..1.0 в відсотки (0%..100%)
+        # Конвертація ML-ймовірності у відсотки
         raw_prob = ml_filter.predict_signal_probability(
             rsi,
             adx,
