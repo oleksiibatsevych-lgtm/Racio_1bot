@@ -16,27 +16,26 @@ else:
 
 
 def get_available_gemini_models() -> list[str]:
-    """Динамічно отримує список усіх доступних моделей для генерації контенту за вашим API-ключем."""
+    """Динамічно отримує список моделей з підтримкою generateContent."""
     try:
         available_models = []
         for m in genai.list_models():
             if "generateContent" in m.supported_generation_methods:
-                # Отримуємо назву моделі (наприклад, 'models/gemini-1.5-flash' або 'models/gemini-2.0-flash')
-                model_name = m.name
-                available_models.append(model_name)
-        
-        logger.info(f"📋 Доступні Gemini моделі для ключа: {available_models}")
-        return available_models
+                available_models.append(m.name)
+
+        if available_models:
+            logger.info(f"📋 Доступні Gemini моделі: {available_models}")
+            return available_models
     except Exception as e:
         logger.error(f"❌ Помилка отримання списку моделей від Gemini: {e}")
-        # Резервний список на випадок помилки запиту списку
-        return ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "gemini-1.5-flash"]
+
+    return ["models/gemini-1.5-flash", "models/gemini-1.5-pro"]
 
 
 def analyze_signal_with_gemini(
     pair_name: str, payload: dict, chart_images: list = None
 ) -> dict:
-    """Аналізує ринковий сигнал за допомогою Gemini API."""
+    """Аналізує сигнал за допомогою Gemini API."""
     if not GEMINI_API_KEY:
         logger.error("❌ Gemini API Key відсутній. Перехід на fallback.")
         return _get_fallback_response(
@@ -44,29 +43,32 @@ def analyze_signal_with_gemini(
         )
 
     prompt = f"""
-Ти є професійним Forex та Binary Options аналітиком. Оціни поточний торговий сигнал.
+Ти є суворим Forex та Binary Options аналітиком. Оціни торговий сигнал.
 
 📊 ПАРАМЕТРИ СИГНАЛУ:
 - Валютна пара: {pair_name}
 - Напрямок: {payload.get('signal', 'UNKNOWN')}
 - Основний ТФ: {payload.get('primary_tf', '5m')}
+- Поточна ціна: {payload.get('current_price', 'N/A')}
+- Рівні Pivot: P={payload.get('pivot_p', 'N/A')}, R1={payload.get('pivot_r1', 'N/A')}, S1={payload.get('pivot_s1', 'N/A')}
 - Поточний RSI: {payload.get('rsi', 'N/A')}
 - Поточний ADX: {payload.get('adx', 'N/A')}
-- Наявність дивергенції: {payload.get('divergence', 'NONE')}
 - Співвідношення ATR: {payload.get('atr_ratio', 'N/A')}
-- Початкове обґрунтування: {payload.get('reason', '')}
 - ML-ймовірність: {payload.get('ml_prob', 0)}%
 
-💡 ЗАВДАННЯ:
-1. Проаналізуй узгодженість індикаторів та наданих графіків.
-2. Дай оцінку впевненості у сигналі від 1 до 10 (де 1-4 — слабкий/небезпечний, 5-7 — середній, 8-10 — сильний).
-3. Надай КОРОТКЕ (до 20 слів) конкретне обґрунтування українською мовою (вкажи головний плюс або головний ризик).
-4. Визнач оптимальний час експірації у хвилинах.
+⚠️ ПРИОРІТЕТНІ ПРАВИЛА ОЦІНКИ (РІВНІ ТА ПІКИ):
+1. ЯКЩО СИГНАЛ 'CALL' (Купівля):
+   - Якщо ціна перебуває прямо під рівнем опору (R1/R2/R3 або локальний хай) — СТАВ ОЦІНКУ НЕ БІЛЬШЕ 4/10!Купувати в опір заборонено.
+   - Оцінка 8-10 дається ТІЛЬКИ якщо стався чіткий відскок ВІД підтримки (S1/S2/Pivot) ВГОРУ або впевнений ретест після пробою.
 
-ВІДПОВІДЬ НАДАЙ СТРОГО У ФОРМАТІ JSON БЕЗ БУДЬ-ЯКОГО ДОДАТКОВОГО ТЕКСТУ ТА МАРКДАУН-ТЕГІВ:
+2. ЯКЩО СИГНАЛ 'PUT' (Продаж):
+   - Якщо ціна перебуває прямо над рівнем підтримки (S1/S2/S3 або локальний лоу) — СТАВ ОЦІНКУ НЕ БІЛЬШЕ 4/10!
+   - Оцінка 8-10 дається ТІЛЬКИ якщо стався відскок ВІД опору (R1/R2/Pivot) ВНИЗ.
+
+ВІДПОВІДЬ НАДАЙ СТРОГО У ФОРМАТІ JSON БЕЗ МАРКДАУН-ТЕГІВ:
 {{
     "confidence": 8,
-    "reason": "Сильний імпульс за трендом, але RSI наближається до зони перекупленості",
+    "reason": "Чіткий відскок від рівня з підтвердженням за індикаторами (до 20 слів)",
     "optimal_tf": "{payload.get('primary_tf', '5m')}",
     "suggested_expiration": {payload.get('suggested_exp', 5)}
 }}
@@ -74,7 +76,6 @@ def analyze_signal_with_gemini(
 
     inputs = [prompt]
 
-    # 🛠 Перетворення зображень у формат PIL.Image
     if chart_images and isinstance(chart_images, list):
         for img in chart_images:
             if isinstance(img, io.BytesIO):
@@ -89,7 +90,6 @@ def analyze_signal_with_gemini(
             elif isinstance(img, Image.Image):
                 inputs.append(img)
 
-    # 🔹 Отримуємо СПРАВЖНІЙ динамічний список моделей під ваш ключ
     models_to_try = get_available_gemini_models()
     response = None
     last_error = None
@@ -142,10 +142,6 @@ def analyze_signal_with_gemini(
             data.get("suggested_expiration", payload.get("suggested_exp", 5))
         )
 
-        logger.info(
-            f"✅ Gemini успішно опрацював {pair_name}: Оцінка {confidence}/10 | {reason}"
-        )
-
         return {
             "confidence": confidence,
             "reason": reason,
@@ -155,7 +151,7 @@ def analyze_signal_with_gemini(
 
     except json.JSONDecodeError as e:
         logger.error(
-            f"❌ Помилка парсингу JSON від Gemini для {pair_name}: {e}. Текст: {raw_text}"
+            f"❌ Помилка парсингу JSON від Gemini для {pair_name}: {e}"
         )
         return _get_fallback_response(
             payload, "Помилка формату JSON від ШІ"
