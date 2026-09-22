@@ -609,7 +609,8 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             else 0.0
         )
 
-        win_probability = ml_filter.predict_signal_probability(
+        # 🟢 Отримання ML-ймовірності та конвертація 0.0..1.0 в відсотки (0%..100%)
+        raw_prob = ml_filter.predict_signal_probability(
             rsi,
             adx,
             bb_width,
@@ -621,6 +622,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             wick_ratio,
             ema_dist,
         )
+        win_probability = raw_prob * 100.0 if raw_prob <= 1.0 else raw_prob
 
         if win_probability < 40.0:
             bot.send_message(
