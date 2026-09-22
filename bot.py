@@ -574,7 +574,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             primary_tf, adx, volatility_ratio
         )
 
-        # Передаємо signal_type для коректного фільтра RSI
+        # Передаємо signal_type для розрізнення напрямку угоди
         is_valid, filter_reason = validate_signal_conditions(
             adx, volatility_ratio, calculated_expiration, rsi=rsi, signal_type=signal_type
         )
@@ -610,7 +610,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             else 0.0
         )
 
-        # Конвертація ML-ймовірності у відсотки
+        # 🟢 Масштабування ML-ймовірності у відсотки
         raw_prob = ml_filter.predict_signal_probability(
             rsi,
             adx,
