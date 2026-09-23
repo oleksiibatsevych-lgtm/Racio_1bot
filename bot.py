@@ -118,7 +118,6 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    # 🟢 Очищення URL та значень від прихованих символів (\xa0, пробілів)
     url = "https://finnhub.io/api/v1/forex/candle".strip()
     params = {
         "symbol": str(symbol).strip(),
@@ -572,18 +571,25 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
         wick_ratio = float(sig_data.get("wick_ratio", 0.0))
         ema_dist = float(sig_data.get("ema_dist", 0.0))
 
+        # 🟢 ДИНАМІЧНА ЕКСПІРАЦІЯ
         calculated_expiration = calculate_dynamic_expiration(
-            primary_tf, adx, volatility_ratio
+            primary_tf=primary_tf,
+            adx=adx,
+            volatility_ratio=volatility_ratio,
+            strategy_type=strategy_type,
+            rsi=rsi,
+            session_info=session_str,
         )
 
-        # Дворежимні перевірки (BOUNCE / TREND)
+        # 🟢 ПЕРЕВІРКА ФІЛЬТРІВ (з адаптивним ADX під сесію)
         is_valid, filter_reason = validate_signal_conditions(
-            adx,
-            volatility_ratio,
-            calculated_expiration,
+            adx=adx,
+            volatility_ratio=volatility_ratio,
+            requested_exp=calculated_expiration,
             rsi=rsi,
             signal_type=signal_type,
             strategy_type=strategy_type,
+            session_info=session_str,
         )
         if not is_valid:
             bot.send_message(
@@ -617,7 +623,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             else 0.0
         )
 
-        # Розрахунок ML-ймовірності
+        # ML-ймовірність
         raw_prob = ml_filter.predict_signal_probability(
             rsi,
             adx,
@@ -673,7 +679,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             ai_audit.get("suggested_expiration", calculated_expiration)
         )
 
-        # 🟢 Обхід відхилення ШІ при високій ML-ймовірності (>= 55%)
+        # ОБХІД ВІДХИЛЕННЯ ШІ ПРИ ВІСОКІЙ ML >= 55%
         if ai_confidence < 6:
             if win_probability >= 55.0:
                 logger.info(
@@ -740,7 +746,6 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
 
 
 def analyze_all_pairs_async(chat_id):
-    """Фонова обробка масового аналізу із затримкою 4.5 сек."""
     logger.info(f"🚀 Запущено фоновий масовий аналіз для chat_id: {chat_id}")
     for name, ticker in PAIRS_MAP.items():
         try:
