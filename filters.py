@@ -71,36 +71,33 @@ def validate_signal_conditions(
     requested_exp: int,
     rsi: float = 50.0,
     signal_type: str = "CALL",
+    strategy_type: str = "TREND",
 ) -> tuple[bool, str]:
-    """Жорсткі фільтри стану ринку з адаптованим ADX під стратегію відскоків."""
-    if requested_exp <= 3 and adx < 15.0:
-        return (
-            False,
-            f"Занадто низький ADX ({adx:.1f} < 15.0) для короткої угоди на {requested_exp} хв",
-        )
+    """Фільтри ринку з окремими правилами для ТРЕНДУ та ВІДСКОКУ ВІД РІВНІВ."""
+    
+    # 1. Спеціальні правила для відскоку від рівнів
+    if strategy_type == "BOUNCE":
+        if adx < 10.0:
+            return False, f"Мертвий ринок (ADX {adx:.1f} < 10.0)"
+        if adx > 38.0:
+            return False, f"Занадто сильний тренд для відскоку (ADX {adx:.1f} > 38.0) — ризик пробою рівня"
+        if volatility_ratio < 0.70:
+            return False, f"Занадто низька волатильність ({volatility_ratio:.2f} < 0.70)"
 
-    # 🟢 Поріг ADX знижено до 12.0 (для відскоку від рівнів боковик із низьким ADX — це норма)
-    if adx < 12.0:
-        return False, f"Повний штиль на ринку (ADX {adx:.1f} < 12.0)"
+    # 2. Спеціальні правила для трендової торгівлі
+    else:
+        if adx < 20.0:
+            return False, f"Слабкий тренд для торгівлі за імпульсом (ADX {adx:.1f} < 20.0)"
+        if volatility_ratio < 0.80:
+            return False, f"Низька волатильність для тренду ({volatility_ratio:.2f} < 0.80)"
 
-    # 🟢 Захист від сильного імпульсного пробою рівнів
-    if adx > 45.0:
-        return False, f"Занадто сильний пробійний тренд (ADX {adx:.1f} > 45.0)"
-
-    if volatility_ratio < 0.75:
-        return (
-            False,
-            f"Низька волатильність (ATR Ratio {volatility_ratio:.2f} < 0.75)",
-        )
-
-    # Блокуємо КУПІВЛЮ (CALL) на піку перекупленості, але ДОЗВОЛЯЄМО ПРОДАЖ (PUT)
+    # 3. Напрямкові фільтри RSI
     if signal_type == "CALL" and rsi > 67.0:
         return (
             False,
             f"Перекупленість (RSI {rsi:.1f} > 67) — високий ризик купувати CALL на піку",
         )
 
-    # Блокуємо ПРОДАЖ (PUT) на дні перепроданості, але ДОЗВОЛЯЄМО КУПІВЛЮ (CALL)
     if signal_type == "PUT" and rsi < 33.0:
         return (
             False,
