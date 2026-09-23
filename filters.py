@@ -3,20 +3,39 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def get_session_adx_threshold(session_info: str) -> float:
+    """Повертає адаптивний поріг ADX залежно від поточної сесії."""
+    sess = str(session_info).lower()
+    if any(s in sess for s in ["азія", "asia", "тихий", "pacific"]):
+        return 16.0  # Тихоокеанська / Азійська сесія (флет, тренди виявляємо раніше)
+    elif any(s in sess for s in ["лондон", "london", "європа", "europe", "нью-йорк", "ny"]):
+        return 22.0  # Висока волатильність Європи та Америки вимагає сильнішого тренду
+    return 20.0
+
+
 def calculate_dynamic_expiration(
-    primary_tf: str, adx: float, volatility_ratio: float
+    primary_tf: str,
+    adx: float,
+    volatility_ratio: float,
+    strategy_type: str = "TREND",
+    rsi: float = 50.0,
+    session_info: str = "Азія",
 ) -> int:
-    """Обчислює рекомендований час експірації залежно від ТФ та стану ринку."""
-    if primary_tf == "1h":
-        return 30 if adx < 25 else 15
-    elif primary_tf == "15m":
-        return 15 if adx < 25 else 10
-    else:  # 5m або 1m
-        if volatility_ratio > 1.3:
-            return 3
-        elif volatility_ratio < 0.8:
-            return 5
-        return 5
+    """Динамічний розрахунок часу експірації у хвилинах."""
+    # 1. СТРАТЕГІЯ "ПО ТРЕНДУ"
+    if strategy_type == "TREND":
+        if adx >= 30.0 or volatility_ratio > 1.25:
+            return 15  # Потужний імпульс — даємо ціні 3 свічки (15 хв)
+        return 10      # Стандартний трендовий вхід — 2 свічки (10 хв)
+
+    # 2. СТРАТЕГІЯ "ВІДСКОК ВІД РІВНЯ"
+    elif strategy_type == "BOUNCE":
+        if rsi >= 70.0 or rsi <= 30.0 or volatility_ratio > 1.2:
+            return 3  # Швидкий імпульсний відскок (3 хв)
+        return 5      # Стандартний відскок (5 хв)
+
+    # Дефолт за таймфреймом
+    return 5
 
 
 def check_pivot_level_proximity(
@@ -72,36 +91,36 @@ def validate_signal_conditions(
     rsi: float = 50.0,
     signal_type: str = "CALL",
     strategy_type: str = "TREND",
+    session_info: str = "Азія",
 ) -> tuple[bool, str]:
-    """Фільтри ринку з окремими правилами для ТРЕНДУ та ВІДСКОКУ ВІД РІВНІВ."""
+    """Перевіряє відповідність ринку з адаптивним ADX під сесію."""
     
-    # 1. Спеціальні правила для відскоку від рівнів
+    min_adx_required = get_session_adx_threshold(session_info)
+
+    # 1. Правила для відскоку від рівнів
     if strategy_type == "BOUNCE":
         if adx < 10.0:
             return False, f"Мертвий ринок (ADX {adx:.1f} < 10.0)"
         if adx > 38.0:
-            return False, f"Занадто сильний тренд для відскоку (ADX {adx:.1f} > 38.0) — ризик пробою рівня"
+            return False, f"Занадто сильний тренд для відскоку (ADX {adx:.1f} > 38.0) — ризик пробою"
         if volatility_ratio < 0.70:
             return False, f"Занадто низька волатильність ({volatility_ratio:.2f} < 0.70)"
 
-    # 2. Спеціальні правила для трендової торгівлі
+    # 2. Правила для трендової стратегії (з адаптивним ADX)
     else:
-        if adx < 20.0:
-            return False, f"Слабкий тренд для торгівлі за імпульсом (ADX {adx:.1f} < 20.0)"
+        if adx < min_adx_required:
+            return (
+                False,
+                f"Слабкий тренд для торгівлі за імпульсом (ADX {adx:.1f} < {min_adx_required:.1f} для сесії: {session_info})",
+            )
         if volatility_ratio < 0.80:
             return False, f"Низька волатильність для тренду ({volatility_ratio:.2f} < 0.80)"
 
     # 3. Напрямкові фільтри RSI
     if signal_type == "CALL" and rsi > 67.0:
-        return (
-            False,
-            f"Перекупленість (RSI {rsi:.1f} > 67) — високий ризик купувати CALL на піку",
-        )
+        return False, f"Перекупленість (RSI {rsi:.1f} > 67) — ризик купувати CALL на піку"
 
     if signal_type == "PUT" and rsi < 33.0:
-        return (
-            False,
-            f"Перепроданість (RSI {rsi:.1f} < 33) — високий ризик продавати PUT на дні",
-        )
+        return False, f"Перепроданість (RSI {rsi:.1f} < 33) — ризик продавати PUT на дні"
 
     return True, "OK"
