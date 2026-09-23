@@ -118,13 +118,14 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
+    # 🟢 Очищення URL та значень від прихованих символів (\xa0, пробілів)
+    url = "https://finnhub.io/api/v1/forex/candle".strip()
     params = {
-        "symbol": symbol,
-        "resolution": resolution,
+        "symbol": str(symbol).strip(),
+        "resolution": str(resolution).strip(),
         "from": start_time,
         "to": end_time,
-        "token": token,
+        "token": str(token).strip(),
     }
 
     try:
@@ -575,7 +576,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             primary_tf, adx, volatility_ratio
         )
 
-        # Дворежимні перевірки
+        # Дворежимні перевірки (BOUNCE / TREND)
         is_valid, filter_reason = validate_signal_conditions(
             adx,
             volatility_ratio,
@@ -616,7 +617,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             else 0.0
         )
 
-        # ML-ймовірність
+        # Розрахунок ML-ймовірності
         raw_prob = ml_filter.predict_signal_probability(
             rsi,
             adx,
@@ -672,7 +673,7 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False):
             ai_audit.get("suggested_expiration", calculated_expiration)
         )
 
-        # 🟢 ОБХІД БЛОКУВАННЯ ШІ ПРИ ВІДПОВІДІ < 6 ЯКЩО ML >= 55%
+        # 🟢 Обхід відхилення ШІ при високій ML-ймовірності (>= 55%)
         if ai_confidence < 6:
             if win_probability >= 55.0:
                 logger.info(
