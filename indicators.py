@@ -8,6 +8,7 @@ class AdaptiveTechnicalAnalysis:
         pass
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Обчислює всі необхідні індикатори за допомогою pandas_ta."""
         if df is None or df.empty or len(df) < 30:
             return df
 
@@ -51,6 +52,7 @@ class AdaptiveTechnicalAnalysis:
         return df
 
     def get_trend(self, df: pd.DataFrame, span_val: int = 50) -> str:
+        """Визначає глобальний тренд за EMA."""
         if df is None or df.empty or len(df) < span_val:
             return "NEUTRAL"
 
@@ -71,6 +73,7 @@ class AdaptiveTechnicalAnalysis:
         return "NEUTRAL"
 
     def calculate_pivots(self, df: pd.DataFrame) -> dict:
+        """Розраховує класичні рівні Pivot."""
         pivots = {"P": 0.0, "R1": 0.0, "R2": 0.0, "R3": 0.0, "S1": 0.0, "S2": 0.0, "S3": 0.0}
         if df is None or len(df) < 2:
             return pivots
@@ -91,6 +94,7 @@ class AdaptiveTechnicalAnalysis:
         return {"P": p, "R1": r1, "R2": r2, "R3": r3, "S1": s1, "S2": s2, "S3": s3}
 
     def check_divergence(self, df: pd.DataFrame) -> str:
+        """Шукає дивергенцію по RSI."""
         if len(df) < 20 or 'rsi' not in df.columns:
             return "NONE"
 
@@ -112,14 +116,14 @@ class AdaptiveTechnicalAnalysis:
         return "NONE"
 
     def _evaluate_bounce_signal(self, current_price: float, pivots: dict, rsi: float) -> dict:
+        """Перевірка відскоку від рівнів S/R."""
         if not pivots or current_price <= 0:
             return {"signal": "NONE", "score": 0, "reason": ""}
 
         resistances = [pivots.get("R1"), pivots.get("R2"), pivots.get("R3")]
         supports = [pivots.get("S1"), pivots.get("S2"), pivots.get("S3")]
 
-        # 🟢 Розширено поріг до 0.0030 (~25-30 pips)
-        threshold = 0.0030
+        threshold = 0.0030  # Поріг підходу до рівня (~25-30 pips)
 
         # Відскок від підтримки -> CALL
         for s_level in supports:
@@ -150,6 +154,7 @@ class AdaptiveTechnicalAnalysis:
     def generate_signal(
         self, global_trend: str, mid_trend: str, df_daily: pd.DataFrame, tf_dict: dict
     ) -> dict:
+        """Генерує сигнал із дворежимним вибором (BOUNCE або TREND)."""
         df_fast = tf_dict.get("5m")
         if df_fast is None or df_fast.empty or 'rsi' not in df_fast.columns:
             return {"signal": "NONE", "score": 0, "reason": "Недостатньо даних (5m)"}
@@ -165,13 +170,16 @@ class AdaptiveTechnicalAnalysis:
         divergence = self.check_divergence(df_fast)
         pivots = self.calculate_pivots(df_daily if df_daily is not None else tf_dict.get("1h"))
 
-        # 1. ПРІОРИТЕТ: СТРАТЕГІЯ ВІДСКОКУ
+        # ========================================================
+        # 1. ПРІОРИТЕТ: СТРАТЕГІЯ ВІДСКОКУ ВІД РІВНІВ
+        # ========================================================
         bounce = self._evaluate_bounce_signal(current_price, pivots, rsi)
         if bounce["signal"] != "NONE":
             return {
                 "signal": bounce["signal"],
                 "score": bounce["score"],
                 "primary_tf": "5m",
+                "strategy_type": "BOUNCE",
                 "rsi": rsi,
                 "adx": adx,
                 "divergence": divergence,
@@ -181,7 +189,9 @@ class AdaptiveTechnicalAnalysis:
                 "reason": bounce["reason"],
             }
 
-        # 2. ТРЕНДОВА СТРАТЕГІЯ (Гнучкіша умова за середнім ТФ 15m)
+        # ========================================================
+        # 2. ТРЕНДОВА СТРАТЕГІЯ (Якщо ціна між рівнями)
+        # ========================================================
         local_trend = self.get_trend(df_fast, span_val=10)
         signal = "NONE"
         score = 0
@@ -191,7 +201,7 @@ class AdaptiveTechnicalAnalysis:
             if rsi < 63:
                 signal = "CALL"
                 score = 65
-                reason = "Бичачий імпульс (15m/5m)"
+                reason = "Бичачий трендовий імпульс"
                 if divergence == "BULLISH":
                     score += 15
 
@@ -199,7 +209,7 @@ class AdaptiveTechnicalAnalysis:
             if rsi > 37:
                 signal = "PUT"
                 score = 65
-                reason = "Ведмежий імпульс (15m/5m)"
+                reason = "Ведмежий трендовий імпульс"
                 if divergence == "BEARISH":
                     score += 15
 
@@ -230,6 +240,7 @@ class AdaptiveTechnicalAnalysis:
             "signal": signal,
             "score": score,
             "primary_tf": "5m",
+            "strategy_type": "TREND",
             "rsi": rsi,
             "adx": adx,
             "divergence": divergence,
