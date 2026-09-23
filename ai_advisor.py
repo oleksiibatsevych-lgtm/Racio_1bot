@@ -48,6 +48,7 @@ def analyze_signal_with_gemini(
 📊 ПАРАМЕТРИ СИГНАЛУ:
 - Валютна пара: {pair_name}
 - Напрямок: {payload.get('signal', 'UNKNOWN')}
+- Режим стратегії: {payload.get('strategy_type', 'TREND')}
 - Основний ТФ: {payload.get('primary_tf', '5m')}
 - Поточна ціна: {payload.get('current_price', 'N/A')}
 - Рівні Pivot: P={payload.get('pivot_p', 'N/A')}, R1={payload.get('pivot_r1', 'N/A')}, S1={payload.get('pivot_s1', 'N/A')}
@@ -119,19 +120,19 @@ def analyze_signal_with_gemini(
             f"❌ Усі доступні моделі Gemini виявилися недоступними для {pair_name}: {last_error}"
         )
         return _get_fallback_response(
-            payload, f"Збій API ШІ: {str(last_error)[:30]}"
+            payload, "Перевищено ліміт запитів API Gemini (429)"
         )
 
     try:
         raw_text = response.text.strip()
-        json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-        clean_json = (
-            json_match.group(0)
-            if json_match
-            else re.sub(r"```json\s*|\s*```", "", raw_text).strip()
-        )
+        clean_text = re.sub(
+            r"^```json\s*|^```\s*|```$", "", raw_text, flags=re.MULTILINE
+        ).strip()
+        json_match = re.search(r"\{.*\}", clean_text, re.DOTALL)
+        if json_match:
+            clean_text = json_match.group(0)
 
-        data = json.loads(clean_json)
+        data = json.loads(clean_text)
 
         confidence = int(data.get("confidence", 5))
         reason = str(data.get("reason", "Аналіз виконано успішно")).strip()
@@ -151,7 +152,7 @@ def analyze_signal_with_gemini(
 
     except json.JSONDecodeError as e:
         logger.error(
-            f"❌ Помилка парсингу JSON від Gemini для {pair_name}: {e}"
+            f"❌ Помилка парсингу JSON від Gemini для {pair_name}: {e}. Отримано: {response.text}"
         )
         return _get_fallback_response(
             payload, "Помилка формату JSON від ШІ"
