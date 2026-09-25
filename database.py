@@ -81,7 +81,7 @@ def init_db():
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано.")
+        logger.info("✅ Базу даних PostgreSQL ініціалізовано.")
     except Exception as e:
         logger.error(f"⚠️ Помилка ініціалізації БД: {e}")
 
@@ -273,3 +273,19 @@ def clear_filtered_logs(chat_id):
         conn.close()
     except Exception as e:
         logger.error(f"⚠️ Помилка очищення логів: {e}")
+
+
+def clear_all_stats():
+    """Скидає статистику сигналів та логи відхилень."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("TRUNCATE TABLE signals, filtered_logs RESTART IDENTITY;")
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info("🧹 Базу даних очищено.")
+        return True
+    except Exception as e:
+        logger.error(f"⚠️ Помилка очищення бази: {e}")
+        return False
