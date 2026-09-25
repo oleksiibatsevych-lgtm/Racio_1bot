@@ -14,10 +14,32 @@ class AITradingAdvisor:
         if self.api_key:
             genai.configure(api_key=self.api_key.strip())
 
-        # Офіційні валідні назви моделей Gemini API
-        self.models_to_try = [
+    def get_available_models(self) -> list:
+        """Динамічно отримує список усіх доступних моделей з Google API."""
+        try:
+            available_models = []
+            for m in genai.list_models():
+                if "generateContent" in m.supported_generation_methods:
+                    available_models.append(m.name)
+
+            # Пріоритетизуємо швидші моделі (flash попереду)
+            available_models.sort(
+                key=lambda name: (
+                    0 if "flash" in name else (1 if "pro" in name else 2)
+                )
+            )
+            if available_models:
+                return available_models
+        except Exception as e:
+            logger.warning(f"⚠️ Не вдалося отримати список моделей через API: {e}")
+
+        # Резервний список на випадок тимчасового збою опитування API
+        return [
             "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
             "gemini-1.5-pro",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-exp",
         ]
 
     def evaluate_signal(
@@ -72,15 +94,18 @@ class AITradingAdvisor:
                 except Exception as e:
                     logger.warning(f"⚠️ Помилка відкриття графіка для ШІ: {e}")
 
+        models_to_try = self.get_available_models()
         response_text = None
-        for model_name in self.models_to_try:
+
+        for model_name in models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
                 response = model.generate_content(
-                    content_parts, request_options={"timeout": 10}
+                    content_parts, request_options={"timeout": 12}
                 )
                 if response and response.text:
                     response_text = response.text
+                    logger.info(f"✅ Успішна відповідь від ШІ-моделі: {model_name}")
                     break
             except google.api_core.exceptions.ResourceExhausted:
                 logger.warning(f"⚠️ Квота вичерпана для моделі {model_name}.")
@@ -92,9 +117,9 @@ class AITradingAdvisor:
         if not response_text:
             return {
                 "decision": "NO",
-                "confidence": 1,
+                "confidence": 0,
                 "suggested_expiration": suggested_exp,
-                "reason": "Усі моделі Gemini наразі недоступні або перевищено квоту.",
+                "reason": "ШІ недоступний (усі моделі зайняті або перевищено квоту)",
             }
 
         try:
@@ -118,7 +143,7 @@ class AITradingAdvisor:
             logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}. Текст: {response_text}")
             return {
                 "decision": "NO",
-                "confidence": 1,
+                "confidence": 0,
                 "suggested_expiration": suggested_exp,
                 "reason": "Помилка обробки відповіді ШІ (некоректний JSON)",
             }
