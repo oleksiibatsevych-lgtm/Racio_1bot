@@ -7,33 +7,46 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+
 class AITradingAdvisor:
     def __init__(self):
-        self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
+        self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get(
+            "GEMINI_KEY"
+        )
         if self.api_key:
             genai.configure(api_key=self.api_key.strip())
-        
-        # Пріоритет моделей (як у боті з високим вінрейтом)
+
+        # Список моделей у порядку пріоритету
         self.models_to_try = [
             "gemini-2.5-flash",
             "gemini-2.0-flash",
-            "gemini-1.5-flash"
+            "gemini-1.5-flash",
         ]
 
-    def evaluate_signal(self, name, payload, macro_chart=None, mid_chart=None, micro_chart=None):
+    def evaluate_signal(
+        self,
+        name: str,
+        payload: dict,
+        macro_chart=None,
+        mid_chart=None,
+        micro_chart=None,
+    ) -> dict:
+        """Здійснює аналіз сигналу за допомогою Gemini з підтримкою мульти-модельності."""
+        suggested_exp = payload.get("suggested_exp", 5)
+
         if not self.api_key:
             logger.warning("⚠️ GEMINI_API_KEY відсутній. ШІ-аналіз пропущено.")
             return {
                 "decision": "NO",
                 "confidence": 0,
-                "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "GEMINI_API_KEY не налаштовано"
+                "suggested_expiration": suggested_exp,
+                "reason": "GEMINI_API_KEY не налаштовано",
             }
 
         prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
         Параметри сигналу:
-        - Сигнал (Напрямок): {payload.get('signal')}
+        - Напрямок: {payload.get('signal')}
         - Поточна ціна: {payload.get('current_price')}
         - RSI: {payload.get('rsi')}
         - ADX: {payload.get('adx')}
@@ -42,7 +55,7 @@ class AITradingAdvisor:
         - Дивергенція: {payload.get('divergence', 'NONE')}
         - Технічна причина: {payload.get('reason')}
         - ATR Ratio: {payload.get('atr_ratio')}
-        - Рекомендована експірація: {payload.get('suggested_exp')} хв
+        - Рекомендована експірація: {suggested_exp} хв
 
         Оціни доцільність входу в угоду та підтвердь або скоригуй час експірації.
         Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи обгорток markdown:
@@ -50,7 +63,7 @@ class AITradingAdvisor:
             "decision": "YES" або "NO",
             "confidence": <число від 1 до 10>,
             "suggested_expiration": <число в хвилинах>,
-            "reason": "<Коротке обґрунтування українською мовою>"
+            "reason": "<коротке обґрунтування українською мовою>"
         }}
         """
 
@@ -67,16 +80,14 @@ class AITradingAdvisor:
         for model_name in self.models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
-                # Таймаут 10 секунд, щоб Render не обірвав з'єднання
                 response = model.generate_content(
-                    content_parts, 
-                    request_options={"timeout": 10}
+                    content_parts, request_options={"timeout": 10}
                 )
                 if response and response.text:
                     response_text = response.text
                     break
             except google.api_core.exceptions.ResourceExhausted:
-                logger.warning(f"⚠️ Квота вичерпана для {model_name}.")
+                logger.warning(f"⚠️ Квота вичерпана для моделі {model_name}.")
                 continue
             except Exception as e:
                 logger.warning(f"⚠️ Модель {model_name} недоступна: {e}")
@@ -86,8 +97,8 @@ class AITradingAdvisor:
             return {
                 "decision": "NO",
                 "confidence": 1,
-                "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "Усі моделі Gemini наразі недоступні або перевищено квоту."
+                "suggested_expiration": suggested_exp,
+                "reason": "Усі моделі Gemini наразі недоступні або перевищено квоту.",
             }
 
         try:
@@ -97,31 +108,40 @@ class AITradingAdvisor:
             if clean_text.startswith("```"):
                 clean_text = clean_text.replace("```", "", 1)
             if clean_text.endswith("```"):
-                clean_text = clean_text[::-1].replace("```", "", 1)[::-1]
+                clean_text = clean_text[:-3]
             clean_text = clean_text.strip()
 
             result = json.loads(clean_text)
             return {
-                "decision": result.get("decision", "NO").upper(),
+                "decision": str(result.get("decision", "NO")).upper(),
                 "confidence": int(result.get("confidence", 0)),
-                "suggested_expiration": int(result.get("suggested_expiration", payload.get('suggested_exp', 5))),
-                "reason": str(result.get("reason", "ШІ не надав детального пояснення"))
+                "suggested_expiration": int(
+                    result.get("suggested_expiration", suggested_exp)
+                ),
+                "reason": str(
+                    result.get("reason", "ШІ не надав детального пояснення")
+                ),
             }
         except Exception as e:
-            logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}. Текст: {response_text}")
+            logger.error(
+                f"⚠️ Помилка парсингу відповіді ШІ: {e}. Текст: {response_text}"
+            )
             return {
                 "decision": "NO",
                 "confidence": 1,
-                "suggested_expiration": payload.get('suggested_exp', 5),
-                "reason": "Помилка обробки відповіді ШІ (некоректний JSON)"
+                "suggested_expiration": suggested_exp,
+                "reason": "Помилка обробки відповіді ШІ (некоректний JSON)",
             }
 
-# Створюємо глобальний екземпляр для сумісності з іншими файлами
+
 ai_advisor_instance = AITradingAdvisor()
 
+
 def analyze_signal_with_gemini(symbol, payload, chart_images=[]):
-    """Обгортка для сумісності зі старим кодом"""
+    """Обгортка для сумісності з функціональним викликом."""
     c_macro = chart_images[0] if len(chart_images) > 0 else None
     c_mid = chart_images[1] if len(chart_images) > 1 else None
     c_micro = chart_images[2] if len(chart_images) > 2 else None
-    return ai_advisor_instance.evaluate_signal(symbol, payload, c_macro, c_mid, c_micro)
+    return ai_advisor_instance.evaluate_signal(
+        symbol, payload, c_macro, c_mid, c_micro
+    )
