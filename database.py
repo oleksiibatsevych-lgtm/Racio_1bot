@@ -15,9 +15,7 @@ def get_connection():
     raw_url = DATABASE_URL
     if raw_url.startswith("postgres://"):
         raw_url = raw_url.replace("postgres://", "postgresql://", 1)
-    raw_url = raw_url.replace("&channel_binding=require", "").replace(
-        "?channel_binding=require", ""
-    )
+    raw_url = raw_url.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
     return psycopg2.connect(raw_url, sslmode="require")
 
 
@@ -145,33 +143,16 @@ def save_signal(
             RETURNING id;
         """,
             (
-                chat_id,
-                message_id,
-                ticker,
-                signal_type,
-                entry_price,
-                primary_tf,
-                score,
-                expiration_mins,
-                timestamp_str,
-                message_text,
-                rsi,
-                adx,
-                bb_width,
-                session_code,
-                hour,
-                divergence,
-                dist_pivot,
-                volatility_ratio,
-                wick_ratio,
-                ema_dist,
+                chat_id, message_id, ticker, signal_type, entry_price, primary_tf,
+                score, expiration_mins, timestamp_str, message_text, rsi, adx, bb_width,
+                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist,
             ),
         )
         signal_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(f"✅ Успішно збережено сигнал #{signal_id} для {ticker}")
+        logger.info(f"✅ Збережено сигнал #{signal_id} для {ticker}")
         return signal_id
     except Exception as e:
         logger.error(f"⚠️ Помилка збереження сигналу в БД: {e}")
@@ -196,9 +177,7 @@ def get_pending_signals():
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(
-            "SELECT * FROM signals WHERE status = 'PENDING' ORDER BY created_at ASC;"
-        )
+        cursor.execute("SELECT * FROM signals WHERE status = 'PENDING' ORDER BY created_at ASC;")
         signals = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -208,9 +187,7 @@ def get_pending_signals():
         return []
 
 
-def update_signal_result(
-    signal_id, result, exit_price, pips=0, status="CLOSED"
-):
+def update_signal_result(signal_id, result, exit_price, pips=0, status="CLOSED"):
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -225,9 +202,7 @@ def update_signal_result(
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(
-            f"✅ Сигнал #{signal_id} закрито: {result} (Ціна виходу: {exit_price})"
-        )
+        logger.info(f"✅ Сигнал #{signal_id} закрито: {result} ({exit_price})")
     except Exception as e:
         logger.error(f"⚠️ Помилка оновлення сигналу #{signal_id}: {e}")
 
@@ -256,7 +231,6 @@ def get_stats():
 
 
 def save_filtered_log(chat_id, log_text):
-    """Зберігає лог відхиленого сигналу у PostgreSQL."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -268,11 +242,10 @@ def save_filtered_log(chat_id, log_text):
         cursor.close()
         conn.close()
     except Exception as e:
-        logger.error(f"⚠️ Помилка збереження логу відхилення: {e}")
+        logger.error(f"⚠️ Помилка збереження логу: {e}")
 
 
 def get_system_logs(chat_id, minutes=120):
-    """Отримує останні відхилені signals за останні N хвилин."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -291,13 +264,10 @@ def get_system_logs(chat_id, minutes=120):
 
 
 def clear_filtered_logs(chat_id):
-    """Очищає застарілі логи відхилень для чату."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM filtered_logs WHERE chat_id = %s", (chat_id,)
-        )
+        cursor.execute("DELETE FROM filtered_logs WHERE chat_id = %s", (chat_id,))
         conn.commit()
         cursor.close()
         conn.close()
