@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
-    logger.error("❌ TELEGRAM_TOKEN не знайдено в Environment Variables!")
+    logger.error("❌ TELEGRAM_TOKEN не знайдено!")
 
 app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -59,9 +59,7 @@ RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 if RENDER_URL:
     webhook_url = f"{RENDER_URL}/webhook"
     try:
-        bot.set_webhook(
-            url=webhook_url, allowed_updates=["message", "callback_query"]
-        )
+        bot.set_webhook(url=webhook_url, allowed_updates=["message", "callback_query"])
         logger.info(f"✅ Webhook оновлено: {webhook_url}")
     except Exception as e:
         logger.error(f"⚠️ Помилка встановлення Webhook: {e}")
@@ -70,8 +68,6 @@ analyzer = AdaptiveTechnicalAnalysis()
 ml_filter = TradingMLFilter()
 
 last_sent_signals = {}
-
-# Кешування макро-таймфреймів для прискорення аналізу
 MACRO_CACHE = {}
 CACHE_TTL = 900  # 15 хвилин
 
@@ -120,7 +116,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)".strip()
+    url = "https://finnhub.io/api/v1/forex/candle".strip()
     params = {
         "symbol": str(symbol).strip(),
         "resolution": str(resolution).strip(),
@@ -155,9 +151,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
 def fetch_yahoo_fallback(ticker, interval="1m", range_period="5d"):
     try:
         tk = yf.Ticker(ticker)
-        df_yf = tk.history(
-            period=range_period, interval=interval, auto_adjust=True
-        )
+        df_yf = tk.history(period=range_period, interval=interval, auto_adjust=True)
 
         if df_yf is None or df_yf.empty:
             df_yf = yf.download(
@@ -211,17 +205,15 @@ def resample_candles(df_1m, rule):
 def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
     global MACRO_CACHE
 
-    df_1m = fetch_finnhub_candles(
-        ticker_finnhub, resolution="1", count_candles=600
-    )
+    df_1m = fetch_finnhub_candles(ticker_finnhub, resolution="1", count_candles=600)
     if df_1m.empty and ticker_yahoo:
-        df_1m = fetch_yahoo_fallback(
-            ticker_yahoo, interval="1m", range_period="5d"
-        )
+        df_1m = fetch_yahoo_fallback(ticker_yahoo, interval="1m", range_period="5d")
 
     if df_1m.empty:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
+    # Ресемплінг 3m та 5m/15m
+    df_3m = resample_candles(df_1m, "3min")
     df_5m = resample_candles(df_1m, "5min")
     df_15m = resample_candles(df_1m, "15min")
 
@@ -233,21 +225,13 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
         df_1h = cached_data["1h"]
         df_daily = cached_data["1d"]
     else:
-        df_1h = fetch_finnhub_candles(
-            ticker_finnhub, resolution="60", count_candles=200
-        )
+        df_1h = fetch_finnhub_candles(ticker_finnhub, resolution="60", count_candles=200)
         if df_1h.empty and ticker_yahoo:
-            df_1h = fetch_yahoo_fallback(
-                ticker_yahoo, interval="1h", range_period="30d"
-            )
+            df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
 
-        df_daily = fetch_finnhub_candles(
-            ticker_finnhub, resolution="D", count_candles=30
-        )
+        df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
         if df_daily.empty and ticker_yahoo:
-            df_daily = fetch_yahoo_fallback(
-                ticker_yahoo, interval="1d", range_period="60d"
-            )
+            df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
 
         if not df_1h.empty and not df_daily.empty:
             MACRO_CACHE[cache_key] = {
@@ -256,17 +240,13 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
                 "1d": df_daily,
             }
 
-    live_p = get_live_price(ticker_finnhub) or (
-        get_live_price(ticker_yahoo) if ticker_yahoo else None
-    )
+    live_p = get_live_price(ticker_finnhub) or (get_live_price(ticker_yahoo) if ticker_yahoo else None)
     if live_p and not df_1m.empty:
         df_1m.iloc[-1, df_1m.columns.get_loc("close")] = live_p
-        if not df_5m.empty:
-            df_5m.iloc[-1, df_5m.columns.get_loc("close")] = live_p
-        if not df_15m.empty:
-            df_15m.iloc[-1, df_15m.columns.get_loc("close")] = live_p
+        if not df_3m.empty: df_3m.iloc[-1, df_3m.columns.get_loc("close")] = live_p
+        if not df_5m.empty: df_5m.iloc[-1, df_5m.columns.get_loc("close")] = live_p
 
-    return df_daily, df_1h, df_15m, df_5m, df_1m
+    return df_daily, df_1h, df_15m, df_5m, df_3m, df_1m
 
 
 def get_current_session_info():
@@ -287,11 +267,7 @@ def get_current_session_info():
         sessions.append("🔥 Перетин Лондон/Нью-Йорк")
         session_code = 3
 
-    return (
-        ", ".join(sessions) if sessions else "Тихоокеанська сесія",
-        session_code,
-        hour,
-    )
+    return ", ".join(sessions) if sessions else "Тихоокеанська сесія", session_code, hour
 
 
 def get_exit_price(ticker, name=""):
@@ -308,9 +284,7 @@ def get_exit_price(ticker, name=""):
         price_yf = get_live_price(yahoo_ticker)
         if price_yf and float(price_yf) > 0:
             return float(price_yf)
-        df_yf = fetch_yahoo_fallback(
-            yahoo_ticker, interval="1m", range_period="1d"
-        )
+        df_yf = fetch_yahoo_fallback(yahoo_ticker, interval="1m", range_period="1d")
         if df_yf is not None and not df_yf.empty:
             return float(df_yf["close"].iloc[-1])
 
@@ -334,9 +308,7 @@ def process_signal_expiration(sig_id):
 
         if 0 <= elapsed_seconds < (target_seconds - 10):
             remaining_delay = target_seconds - elapsed_seconds
-            timer = threading.Timer(
-                remaining_delay, process_signal_expiration, args=[sig_id]
-            )
+            timer = threading.Timer(remaining_delay, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
             return
@@ -350,12 +322,7 @@ def process_signal_expiration(sig_id):
         exit_price = get_exit_price(ticker, pair_name)
 
         if not exit_price:
-            logger.warning(
-                f"⚠️ Повторне отримання ціни для {ticker} (ID: {sig_id}) через 30 сек..."
-            )
-            timer = threading.Timer(
-                30, process_signal_expiration, args=[sig_id]
-            )
+            timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
             return
@@ -377,11 +344,7 @@ def process_signal_expiration(sig_id):
 
         database.update_signal_result(sig_id, result, exit_price, pips)
 
-        res_icon = (
-            "✅ WIN"
-            if result == "WIN"
-            else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
-        )
+        res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
         pips_str = f"+{pips}" if pips > 0 else f"{pips}"
 
         report_str = (
@@ -400,9 +363,6 @@ def process_signal_expiration(sig_id):
                     parse_mode="HTML",
                 )
             except Exception as e:
-                logger.warning(
-                    f"⚠️ Редагування не вдалося для {sig_id}: {e}. Надсилаємо окремо..."
-                )
                 bot.send_message(
                     chat_id=sig_data["chat_id"],
                     text=f"🏁 <b>Результат угоди #{sig_id} ({ticker}):</b>\n{res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>",
@@ -411,7 +371,7 @@ def process_signal_expiration(sig_id):
                 )
 
     except Exception as e:
-        logger.exception(f"Помилка таймера експірації {sig_id}: {e}")
+        logger.exception(f"Помилка таймера {sig_id}: {e}")
 
 
 def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
@@ -419,17 +379,12 @@ def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
         signal_time = parse_dt(timestamp_val)
         expiry_time = signal_time + timedelta(minutes=expiration_mins)
         delay = (expiry_time - datetime.utcnow()).total_seconds()
-
-        if delay <= 0:
-            delay = 1
-
-        timer = threading.Timer(
-            delay, process_signal_expiration, args=[sig_id]
-        )
+        if delay <= 0: delay = 1
+        timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
         timer.daemon = True
         timer.start()
     except Exception as e:
-        logger.exception(f"Помилка планування таймера {sig_id}: {e}")
+        logger.exception(f"Помилка таймера {sig_id}: {e}")
 
 
 def start_background_checker():
@@ -441,12 +396,11 @@ def start_background_checker():
                 for row in pending:
                     sig_id = row["id"]
                     expiration_mins = row["expiration_mins"]
-                    timestamp_str = row["timestamp_str"]
-                    created_at = parse_dt(timestamp_str)
+                    created_at = parse_dt(row["timestamp_str"])
                     if now >= created_at + timedelta(minutes=expiration_mins):
                         process_signal_expiration(sig_id)
             except Exception as e:
-                logger.error(f"⚠️ Помилка перевірки сигналів: {e}")
+                logger.error(f"Помилка фонового перевіряльника: {e}")
             time.sleep(20)
 
     thread = threading.Thread(target=loop, daemon=True)
@@ -470,7 +424,7 @@ def webhook():
             update = Update.de_json(data, bot)
             dispatcher.process_update(update)
     except Exception as e:
-        logger.error(f"⚠️ Помилка обробки вебхука: {e}")
+        logger.error(f"⚠️ Помилка Webhook: {e}")
     return "ok", 200
 
 
@@ -480,13 +434,10 @@ def start(update, context):
 
     keyboard = [
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
-        [
-            KeyboardButton("📈 Статистика"),
-            KeyboardButton("📋 Логи фільтру"),
-        ],
+        [KeyboardButton("📈 Статистика"), KeyboardButton("📋 Логи фільтру")],
     ]
     update.message.reply_text(
-        "Бот Racio_1 готовий до роботи! 🚀 Оберіть дію:",
+        "Бот Racio_1 готовий! 🚀 Оберіть дію:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
     )
 
@@ -499,81 +450,48 @@ def show_pairs_menu(chat_id):
         if len(row) == 3:
             buttons.append(row)
             row = []
-    if row:
-        buttons.append(row)
+    if row: buttons.append(row)
 
-    bot.send_message(
-        chat_id=chat_id,
-        text="Оберіть валютну пару для аналізу:",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    bot.send_message(chat_id=chat_id, text="Оберіть пару:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
-def process_single_pair(
-    chat_id, name, ticker, ignore_cooldown=False, is_background=False
-):
+def process_single_pair(chat_id, name, ticker, ignore_cooldown=False, is_background=False):
     try:
         session_str, session_code, hour = get_current_session_info()
         current_time = time.time()
 
-        if (
-            not ignore_cooldown
-            and ticker in last_sent_signals
-            and (current_time - last_sent_signals[ticker]) < 180
-        ):
+        if not ignore_cooldown and ticker in last_sent_signals and (current_time - last_sent_signals[ticker]) < 180:
             if not is_background:
-                bot.send_message(
-                    chat_id=chat_id,
-                    text=f"⏳ Пара {name} на кулдауні (зачекайте 3 хв).",
-                )
+                bot.send_message(chat_id=chat_id, text=f"⏳ Пара {name} на кулдауні (3 хв).")
             return
 
         ticker_yahoo = YAHOO_PAIRS_MAP.get(name, "")
-        df_daily, df_macro, df_mid, df_fast, df_micro = fetch_all_timeframes(
-            ticker, ticker_yahoo
-        )
+        df_daily, df_macro, df_mid, df_fast, df_3m, df_micro = fetch_all_timeframes(ticker, ticker_yahoo)
 
-        if (
-            df_macro is None
-            or df_macro.empty
-            or df_fast is None
-            or df_fast.empty
-        ):
+        if df_macro is None or df_fast is None or df_macro.empty or df_fast.empty:
             if not is_background:
-                bot.send_message(
-                    chat_id=chat_id, text=f"⚠️ Не вдалося завантажити {name}."
-                )
+                bot.send_message(chat_id=chat_id, text=f"⚠️ Не вдалося завантажити {name}.")
             return
 
-        ws_price = get_live_price(ticker) or (
-            get_live_price(ticker_yahoo) if ticker_yahoo else None
-        )
+        ws_price = get_live_price(ticker) or (get_live_price(ticker_yahoo) if ticker_yahoo else None)
 
         if df_daily is not None and not df_daily.empty:
             df_daily = analyzer.calculate_indicators(df_daily)
         df_macro = analyzer.calculate_indicators(df_macro)
         df_mid = analyzer.calculate_indicators(df_mid)
         df_fast = analyzer.calculate_indicators(df_fast)
-        df_micro = analyzer.calculate_indicators(df_micro)
+        if df_3m is not None and not df_3m.empty: df_3m = analyzer.calculate_indicators(df_3m)
+        if df_micro is not None and not df_micro.empty: df_micro = analyzer.calculate_indicators(df_micro)
 
         global_trend = analyzer.get_trend(df_macro, span_val=200)
         mid_trend = analyzer.get_trend(df_mid, span_val=50)
-        pivots = analyzer.calculate_pivots(
-            df_daily
-            if (df_daily is not None and not df_daily.empty)
-            else df_macro
-        )
+        pivots = analyzer.calculate_pivots(df_daily if (df_daily is not None and not df_daily.empty) else df_macro)
 
-        tf_dict = {"1m": df_micro, "5m": df_fast, "15m": df_mid, "1h": df_macro}
+        tf_dict = {"1m": df_micro, "3m": df_3m, "5m": df_fast, "15m": df_mid, "1h": df_macro}
 
-        sig_data = analyzer.generate_signal(
-            global_trend=global_trend,
-            mid_trend=mid_trend,
-            df_daily=df_daily,
-            tf_dict=tf_dict,
-        )
+        sig_data = analyzer.generate_signal(global_trend=global_trend, mid_trend=mid_trend, df_daily=df_daily, tf_dict=tf_dict)
 
-        signal_type = sig_data.get("signal", "CALL")
+        signal_type = sig_data.get("signal", "NONE")
         signal_score = sig_data.get("score", 60)
         primary_tf = sig_data.get("primary_tf", "5m")
         strategy_type = sig_data.get("strategy_type", "TREND")
@@ -583,163 +501,84 @@ def process_single_pair(
 
         rsi = float(sig_data.get("rsi", 50))
         adx = float(sig_data.get("adx", 20))
-        bb_width = (
-            float(df_fast["bb_width"].iloc[-2])
-            if "bb_width" in df_fast.columns and len(df_fast) >= 2
-            else 0.001
-        )
-
+        bb_width = float(df_fast["bb_width"].iloc[-2]) if "bb_width" in df_fast.columns and len(df_fast) >= 2 else 0.001
         divergence_str = str(sig_data.get("divergence", "NONE"))
         volatility_ratio = float(sig_data.get("volatility_ratio", 1.0))
-        wick_ratio = float(sig_data.get("wick_ratio", 0.0))
-        ema_dist = float(sig_data.get("ema_dist", 0.0))
 
-        current_price = ws_price if ws_price else (
-            float(df_fast["close"].iloc[-1]) if not df_fast.empty else 0.0
-        )
+        current_price = ws_price if ws_price else (float(df_fast["close"].iloc[-1]) if not df_fast.empty else 0.0)
 
-        # 1. ТЕХНІЧНА ПЕРЕВІРКА ФІЛЬТРІВ ТА РІВНІВ
         is_valid, filter_reason = validate_signal_conditions(
-            adx=adx,
-            volatility_ratio=volatility_ratio,
-            requested_exp=5,
-            rsi=rsi,
-            signal_type=signal_type,
-            strategy_type=strategy_type,
-            session_info=session_str,
+            adx=adx, volatility_ratio=volatility_ratio, requested_exp=5, rsi=rsi,
+            signal_type=signal_type, strategy_type=strategy_type, session_info=session_str,
         )
         if not is_valid:
             log_msg = f"⏭ <b>{name} відхилено (Фільтр):</b> {html.escape(filter_reason)}"
             database.save_filtered_log(chat_id, log_msg)
-            if not is_background:
-                bot.send_message(
-                    chat_id=chat_id, text=log_msg, parse_mode="HTML"
-                )
+            if not is_background: bot.send_message(chat_id=chat_id, text=log_msg, parse_mode="HTML")
             return
 
-        is_level_ok, level_reason = check_pivot_level_proximity(
-            current_price=current_price,
-            signal_type=signal_type,
-            pivots=pivots,
-            threshold_pct=0.0015,
-        )
+        is_level_ok, level_reason = check_pivot_level_proximity(current_price, signal_type, pivots, 0.0015)
         if not is_level_ok:
             log_msg = f"⏭ <b>{name} відхилено (Рівень):</b> {html.escape(level_reason)}"
             database.save_filtered_log(chat_id, log_msg)
-            if not is_background:
-                bot.send_message(
-                    chat_id=chat_id, text=log_msg, parse_mode="HTML"
-                )
+            if not is_background: bot.send_message(chat_id=chat_id, text=log_msg, parse_mode="HTML")
             return
 
-        dist_pivot = (
-            (current_price - pivots["P"]) / pivots["P"]
-            if pivots["P"] > 0
-            else 0.0
-        )
+        dist_pivot = (current_price - pivots["P"]) / pivots["P"] if pivots["P"] > 0 else 0.0
 
-        # 2. ЖОРСТКИЙ ML ФІЛЬТР (ПІДНИЩЕНО ДО 65%)
+        # ML ФІЛЬТР >= 65%
         raw_prob = ml_filter.predict_signal_probability(
-            rsi,
-            adx,
-            bb_width,
-            session_code,
-            hour,
-            divergence_str,
-            dist_pivot,
-            volatility_ratio,
-            wick_ratio,
-            ema_dist,
+            rsi, adx, bb_width, session_code, hour, divergence_str, dist_pivot, volatility_ratio, 0.0, 0.0
         )
         win_probability = raw_prob * 100.0 if raw_prob <= 1.0 else raw_prob
 
         if win_probability < 65.0:
-            log_msg = f"❌ <b>{name}:</b> ML відхилив (Ймовірність <code>{win_probability:.1f}%</code> < 65.0%)"
+            log_msg = f"❌ <b>{name}:</b> ML відхилив (<code>{win_probability:.1f}%</code> < 65.0%)"
             database.save_filtered_log(chat_id, log_msg)
-            if not is_background:
-                bot.send_message(
-                    chat_id=chat_id,
-                    text=f"{log_msg}\nСигнал відсіяно ML-моделлю.",
-                    parse_mode="HTML",
-                )
+            if not is_background: bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно ML.", parse_mode="HTML")
             return
 
-        calculated_expiration = calculate_dynamic_expiration(
-            primary_tf=primary_tf,
-            adx=adx,
-            volatility_ratio=volatility_ratio,
-            strategy_type=strategy_type,
-            rsi=rsi,
-            session_info=session_str,
-        )
+        suggested_expiration = sig_data.get("suggested_exp", calculate_dynamic_expiration(primary_tf, adx, volatility_ratio, strategy_type, rsi, session_str))
 
         macro_chart = create_chart_image(df_macro, name, tf_label="1h")
         mid_chart = create_chart_image(df_mid, name, tf_label="15m")
         micro_chart = create_chart_image(df_fast, name, tf_label="5m")
 
         ai_payload = {
-            "signal": signal_type,
-            "score": signal_score,
-            "primary_tf": primary_tf,
-            "strategy_type": strategy_type,
-            "current_price": current_price,
-            "pivot_p": pivots.get("P", 0),
-            "pivot_r1": pivots.get("R1", 0),
-            "pivot_s1": pivots.get("S1", 0),
-            "adx": adx,
-            "rsi": rsi,
-            "global_trend": global_trend,
-            "mid_trend": mid_trend,
-            "divergence": divergence_str,
-            "atr_ratio": volatility_ratio,
-            "reason": sig_data.get("reason", "Аналіз параметрів"),
-            "ml_prob": win_probability,
-            "suggested_exp": calculated_expiration,
+            "signal": signal_type, "score": signal_score, "primary_tf": primary_tf,
+            "strategy_type": strategy_type, "current_price": current_price,
+            "pivot_p": pivots.get("P", 0), "pivot_r1": pivots.get("R1", 0), "pivot_s1": pivots.get("S1", 0),
+            "adx": adx, "rsi": rsi, "global_trend": global_trend, "mid_trend": mid_trend,
+            "divergence": divergence_str, "atr_ratio": volatility_ratio, "reason": sig_data.get("reason", "Аналіз"),
+            "ml_prob": win_probability, "suggested_exp": suggested_expiration,
         }
 
-        # 3. ЖОРСТКИЙ AI ФІЛЬТР (Вимога decision == 'YES' та confidence >= 7)
-        ai_audit = ai_advisor_instance.evaluate_signal(
-            name, ai_payload, macro_chart, mid_chart, micro_chart
-        )
+        # ШІ GEMINI (Вимога decision == YES та confidence >= 7)
+        ai_audit = ai_advisor_instance.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
 
         ai_decision = ai_audit.get("decision", "NO")
         ai_confidence = int(ai_audit.get("confidence", 0))
         ai_reason = str(ai_audit.get("reason", "Аналіз ШІ"))
-        final_expiration = int(
-            ai_audit.get("suggested_expiration", calculated_expiration)
-        )
+        final_expiration = int(ai_audit.get("suggested_expiration", suggested_expiration))
 
-        is_ai_busy = any(
-            kw in ai_reason.lower()
-            for kw in ["недоступні", "зайняті", "quota", "exhausted", "limit", "429"]
-        )
+        is_ai_busy = any(kw in ai_reason.lower() for kw in ["недоступні", "зайняті", "quota", "exhausted", "limit", "429"])
 
         if is_ai_busy:
             if win_probability >= 75.0:
                 ai_confidence = 7
-                ai_reason = f"Авто-схвалення (Надвисокий ML {win_probability:.1f}%), ШІ недоступний."
+                ai_reason = f"Авто-схвалення (ML {win_probability:.1f}%), ШІ недоступний."
             else:
-                log_msg = f"🤖 <b>{name}:</b> ШІ недоступний, ML ({win_probability:.1f}%) недостатній для входу без ШІ."
+                log_msg = f"🤖 <b>{name}:</b> ШІ недоступний, ML ({win_probability:.1f}%) занизький."
                 database.save_filtered_log(chat_id, log_msg)
                 return
         elif ai_decision != "YES" or ai_confidence < 7:
-            log_msg = f"🤖 <b>{name}:</b> ШІ ВІДХИЛИВ — <i>{html.escape(ai_reason)}</i> (Оцінка: {ai_confidence}/10)"
+            log_msg = f"🤖 <b>{name}:</b> ШІ ВІДХИЛИВ — <i>{html.escape(ai_reason)}</i> ({ai_confidence}/10)"
             database.save_filtered_log(chat_id, log_msg)
-            if not is_background:
-                bot.send_message(
-                    chat_id=chat_id,
-                    text=f"{log_msg}\nСигнал відхилено ШІ-радником.",
-                    parse_mode="HTML",
-                )
+            if not is_background: bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал скасовано ШІ.", parse_mode="HTML")
             return
 
         last_sent_signals[ticker] = time.time()
-
-        direction_icon = (
-            "🟢 КУПІВЛЯ (CALL)"
-            if signal_type == "CALL"
-            else "🔴 ПРОДАЖ (PUT)"
-        )
+        direction_icon = "🟢 КУПІВЛЯ (CALL)" if signal_type == "CALL" else "🔴 ПРОДАЖ (PUT)"
 
         msg_text = (
             f"⚡ <b>СИГНАЛ: {name}</b> | {direction_icon}\n"
@@ -757,56 +596,34 @@ def process_single_pair(
             f"💡 <b>Обґрунтування:</b> <i>{html.escape(ai_reason)}</i>"
         )
 
-        sent_msg = bot.send_message(
-            chat_id=chat_id, text=msg_text, parse_mode="HTML"
-        )
+        sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
 
         timestamp_now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         sig_id = database.save_signal(
-            ticker=ticker,
-            signal_type=signal_type,
-            entry_price=current_price,
-            expiration_mins=final_expiration,
-            chat_id=chat_id,
-            message_id=sent_msg.message_id,
-            timestamp_str=timestamp_now,
-            message_text=msg_text,
-            rsi=rsi,
-            adx=adx,
-            bb_width=bb_width,
-            session_code=session_code,
-            hour=hour,
-            divergence=divergence_str,
-            dist_pivot=dist_pivot,
-            volatility_ratio=volatility_ratio,
-            wick_ratio=wick_ratio,
-            ema_dist=ema_dist,
+            ticker=ticker, signal_type=signal_type, entry_price=current_price, expiration_mins=final_expiration,
+            chat_id=chat_id, message_id=sent_msg.message_id, timestamp_str=timestamp_now, message_text=msg_text,
+            rsi=rsi, adx=adx, bb_width=bb_width, session_code=session_code, hour=hour, divergence=divergence_str,
+            dist_pivot=dist_pivot, volatility_ratio=volatility_ratio, wick_ratio=0.0, ema_dist=0.0,
         )
 
         schedule_signal_timer(sig_id, timestamp_now, final_expiration)
 
     except Exception as e:
-        logger.exception(f"Помилка при обробці пари {name}: {e}")
-        if not is_background:
-            bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ Помилка при аналізі пари {name}: {html.escape(str(e))}",
-            )
+        logger.exception(f"Помилка при обробці {name}: {e}")
 
 
 def analyze_all_pairs_async(chat_id):
-    logger.info(f"🚀 Запущено прискорений масовий аналіз для chat_id: {chat_id}")
     database.clear_filtered_logs(chat_id)
     for name, ticker in PAIRS_MAP.items():
         try:
             process_single_pair(chat_id, name, ticker, is_background=True)
-            time.sleep(1.5)  # Завдяки кешуванню час скорочено до 1.5 сек
+            time.sleep(1.5)
         except Exception as e:
-            logger.error(f"⚠️ Помилка фонового аналізу пари {name}: {e}")
+            logger.error(f"Помилка масового аналізу {name}: {e}")
     
     bot.send_message(
         chat_id=chat_id,
-        text="✅ <b>Глибокий аналіз усіх пар завершено!</b>\nВідхилені фільтрами сигнали можна переглянути за допомогою кнопки <b>«📋 Логи фільтру»</b>.",
+        text="✅ <b>Масовий аналіз завершено!</b>\nВідхилені сигнали переглядайте у меню <b>«📋 Логи фільтру»</b>.",
         parse_mode="HTML",
     )
 
@@ -821,9 +638,7 @@ def handle_callback(update, context):
         ticker = PAIRS_MAP.get(pair_name)
         if ticker:
             query.answer(f"Аналізуємо {pair_name}...")
-            process_single_pair(
-                chat_id, pair_name, ticker, ignore_cooldown=True
-            )
+            process_single_pair(chat_id, pair_name, ticker, ignore_cooldown=True)
 
 
 def handle_message(update, context):
@@ -831,15 +646,8 @@ def handle_message(update, context):
     chat_id = update.effective_chat.id
 
     if text == "📊 Аналіз усіх пар":
-        update.message.reply_text(
-            "🔎 <b>Розпочинаю прискорене фонове сканування...</b>\n"
-            "Високоточні сигнали будуть надходити в чат.",
-            parse_mode="HTML",
-        )
-        thread = threading.Thread(
-            target=analyze_all_pairs_async, args=(chat_id,), daemon=True
-        )
-        thread.start()
+        update.message.reply_text("🔎 <b>Запускаю фоновий аналіз...</b>", parse_mode="HTML")
+        threading.Thread(target=analyze_all_pairs_async, args=(chat_id,), daemon=True).start()
 
     elif text == "💵 Пари":
         show_pairs_menu(chat_id)
@@ -849,13 +657,12 @@ def handle_message(update, context):
         total = stats.get("total", 0)
         wins = stats.get("wins", 0)
         losses = stats.get("losses", 0)
-
         closed_trades = wins + losses
         winrate = (wins / closed_trades * 100.0) if closed_trades > 0 else 0.0
 
         stat_msg = (
-            f"📊 <b>Статистика торгівлі бота:</b>\n\n"
-            f"🎯 Всього згенеровано: <b>{total}</b>\n"
+            f"📊 <b>Статистика бота:</b>\n\n"
+            f"🎯 Всього сигналів: <b>{total}</b>\n"
             f"✅ Успішних (WIN): <b>{wins}</b>\n"
             f"❌ Невдалих (LOSS): <b>{losses}</b>\n\n"
             f"📈 <b>Реальний Winrate: {winrate:.1f}%</b>"
@@ -867,18 +674,14 @@ def handle_message(update, context):
         if not logs:
             update.message.reply_text("📭 Немає відхилених сигналів за останні 2 години.")
         else:
-            msg = "📋 <b>Останні відхилені фільтрами сигнали:</b>\n\n" + "\n".join(logs)
-            if len(msg) > 4000:
-                msg = msg[:4000] + "..."
+            msg = "📋 <b>Останні відхилені сигнали:</b>\n\n" + "\n".join(logs)
+            if len(msg) > 4000: msg = msg[:4000] + "..."
             update.message.reply_text(msg, parse_mode="HTML")
 
 
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-dispatcher.add_handler(
-    MessageHandler(Filters.text & ~Filters.command, handle_message)
-)
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
