@@ -51,6 +51,7 @@ class AdaptiveTechnicalAnalysis:
         return df
 
     def get_trend(self, df: pd.DataFrame, span_val: int = 50) -> str:
+        """Визначення тренду з мертвиною зоною 0.05% проти флетового шуму."""
         if df is None or df.empty or len(df) < span_val:
             return "NEUTRAL"
 
@@ -62,9 +63,11 @@ class AdaptiveTechnicalAnalysis:
             else:
                 ema = float(df['close'].ewm(span=span_val, adjust=False).mean().iloc[-1])
 
-            if close > ema:
+            threshold = ema * 0.0005  # Мертва зона (0.05%)
+
+            if close > (ema + threshold):
                 return "BULLISH"
-            elif close < ema:
+            elif close < (ema - threshold):
                 return "BEARISH"
         except Exception:
             pass
@@ -124,7 +127,7 @@ class AdaptiveTechnicalAnalysis:
             if s_level and s_level > 0:
                 dist_pct = (current_price - s_level) / current_price
                 if 0 <= dist_pct <= threshold:
-                    score = 75 + (15 if rsi < 48 else 0)
+                    score = 75 + (15 if rsi < 45 else 0)
                     return {
                         "signal": "CALL",
                         "score": score,
@@ -135,7 +138,7 @@ class AdaptiveTechnicalAnalysis:
             if r_level and r_level > 0:
                 dist_pct = (r_level - current_price) / current_price
                 if 0 <= dist_pct <= threshold:
-                    score = 75 + (15 if rsi > 52 else 0)
+                    score = 75 + (15 if rsi > 55 else 0)
                     return {
                         "signal": "PUT",
                         "score": score,
@@ -179,25 +182,25 @@ class AdaptiveTechnicalAnalysis:
                 "reason": bounce["reason"],
             }
 
-        # 2. ТРЕНДОВА СТРАТЕГІЯ
+        # 2. ТРЕНДОВА СТРАТЕГІЯ (з вимовою синхронізації 3-х ТФ: 1h + 15m + 5m)
         local_trend = self.get_trend(df_fast, span_val=10)
         signal = "NONE"
         score = 0
-        reason = "Відсутність чіткого сетапу"
+        reason = "Відсутність чіткого трендового сетапу"
 
-        if mid_trend == "BULLISH" or (global_trend == "BULLISH" and local_trend == "BULLISH"):
-            if rsi < 65:
+        if global_trend == "BULLISH" and mid_trend == "BULLISH" and local_trend == "BULLISH":
+            if rsi < 60:  # Вхід на ранній стадії імпульсу
                 signal = "CALL"
-                score = 65
-                reason = "Бичачий трендовий імпульс"
+                score = 70
+                reason = "Синхронний бичачий імпульс (1h + 15m + 5m)"
                 if divergence == "BULLISH":
                     score += 15
 
-        elif mid_trend == "BEARISH" or (global_trend == "BEARISH" and local_trend == "BEARISH"):
-            if rsi > 35:
+        elif global_trend == "BEARISH" and mid_trend == "BEARISH" and local_trend == "BEARISH":
+            if rsi > 40:  # Вхід на ранній стадії імпульсу
                 signal = "PUT"
-                score = 65
-                reason = "Ведмежий трендовий імпульс"
+                score = 70
+                reason = "Синхронний ведмежий імпульс (1h + 15m + 5m)"
                 if divergence == "BEARISH":
                     score += 15
 
