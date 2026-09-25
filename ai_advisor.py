@@ -14,10 +14,10 @@ class AITradingAdvisor:
         if self.api_key:
             genai.configure(api_key=self.api_key.strip())
 
+        # Офіційні валідні назви моделей Gemini API
         self.models_to_try = [
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
             "gemini-1.5-flash",
+            "gemini-1.5-pro",
         ]
 
     def evaluate_signal(
