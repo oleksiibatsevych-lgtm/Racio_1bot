@@ -116,7 +116,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "https://finnhub.io/api/v1/forex/candle".strip()
+    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)".strip()
     params = {
         "symbol": str(symbol).strip(),
         "resolution": str(resolution).strip(),
@@ -212,7 +212,6 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
     if df_1m.empty:
         return None, None, None, None, None, None
 
-    # Ресемплінг 3m та 5m/15m
     df_3m = resample_candles(df_1m, "3min")
     df_5m = resample_candles(df_1m, "5min")
     df_15m = resample_candles(df_1m, "15min")
@@ -400,7 +399,7 @@ def start_background_checker():
                     if now >= created_at + timedelta(minutes=expiration_mins):
                         process_signal_expiration(sig_id)
             except Exception as e:
-                logger.error(f"Помилка фонового перевіряльника: {e}")
+                logger.error(f"Помилка перевірки сигналів: {e}")
             time.sleep(20)
 
     thread = threading.Thread(target=loop, daemon=True)
@@ -512,16 +511,16 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False, is_backgro
             signal_type=signal_type, strategy_type=strategy_type, session_info=session_str,
         )
         if not is_valid:
-            log_msg = f"⏭ <b>{name} відхилено (Фільтр):</b> {html.escape(filter_reason)}"
+            log_msg = f"⏭ {name} відхилено (Фільтр): {filter_reason}"
             database.save_filtered_log(chat_id, log_msg)
-            if not is_background: bot.send_message(chat_id=chat_id, text=log_msg, parse_mode="HTML")
+            if not is_background: bot.send_message(chat_id=chat_id, text=html.escape(log_msg))
             return
 
         is_level_ok, level_reason = check_pivot_level_proximity(current_price, signal_type, pivots, 0.0015)
         if not is_level_ok:
-            log_msg = f"⏭ <b>{name} відхилено (Рівень):</b> {html.escape(level_reason)}"
+            log_msg = f"⏭ {name} відхилено (Рівень): {level_reason}"
             database.save_filtered_log(chat_id, log_msg)
-            if not is_background: bot.send_message(chat_id=chat_id, text=log_msg, parse_mode="HTML")
+            if not is_background: bot.send_message(chat_id=chat_id, text=html.escape(log_msg))
             return
 
         dist_pivot = (current_price - pivots["P"]) / pivots["P"] if pivots["P"] > 0 else 0.0
@@ -533,9 +532,9 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False, is_backgro
         win_probability = raw_prob * 100.0 if raw_prob <= 1.0 else raw_prob
 
         if win_probability < 65.0:
-            log_msg = f"❌ <b>{name}:</b> ML відхилив (<code>{win_probability:.1f}%</code> < 65.0%)"
+            log_msg = f"❌ {name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 65.0%)"
             database.save_filtered_log(chat_id, log_msg)
-            if not is_background: bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал відсіяно ML.", parse_mode="HTML")
+            if not is_background: bot.send_message(chat_id=chat_id, text=log_msg)
             return
 
         suggested_expiration = sig_data.get("suggested_exp", calculate_dynamic_expiration(primary_tf, adx, volatility_ratio, strategy_type, rsi, session_str))
@@ -553,7 +552,6 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False, is_backgro
             "ml_prob": win_probability, "suggested_exp": suggested_expiration,
         }
 
-        # ШІ GEMINI (Вимога decision == YES та confidence >= 7)
         ai_audit = ai_advisor_instance.evaluate_signal(name, ai_payload, macro_chart, mid_chart, micro_chart)
 
         ai_decision = ai_audit.get("decision", "NO")
@@ -568,13 +566,13 @@ def process_single_pair(chat_id, name, ticker, ignore_cooldown=False, is_backgro
                 ai_confidence = 7
                 ai_reason = f"Авто-схвалення (ML {win_probability:.1f}%), ШІ недоступний."
             else:
-                log_msg = f"🤖 <b>{name}:</b> ШІ недоступний, ML ({win_probability:.1f}%) занизький."
+                log_msg = f"🤖 {name}: ШІ недоступний, ML ({win_probability:.1f}%) недостатній."
                 database.save_filtered_log(chat_id, log_msg)
                 return
         elif ai_decision != "YES" or ai_confidence < 7:
-            log_msg = f"🤖 <b>{name}:</b> ШІ ВІДХИЛИВ — <i>{html.escape(ai_reason)}</i> ({ai_confidence}/10)"
+            log_msg = f"🤖 {name}: ШІ ВІДХИЛИВ — {ai_reason} (Оцінка: {ai_confidence}/10)"
             database.save_filtered_log(chat_id, log_msg)
-            if not is_background: bot.send_message(chat_id=chat_id, text=f"{log_msg}\nСигнал скасовано ШІ.", parse_mode="HTML")
+            if not is_background: bot.send_message(chat_id=chat_id, text=html.escape(log_msg))
             return
 
         last_sent_signals[ticker] = time.time()
@@ -628,6 +626,13 @@ def analyze_all_pairs_async(chat_id):
     )
 
 
+def reset_stats_cmd(update, context):
+    if database.clear_all_stats():
+        update.message.reply_text("🧹 <b>Статистику та логи успішно очищено!</b>", parse_mode="HTML")
+    else:
+        update.message.reply_text("⚠️ Не вдалося очистити базу даних.")
+
+
 def handle_callback(update, context):
     query = update.callback_query
     chat_id = query.message.chat_id
@@ -674,12 +679,15 @@ def handle_message(update, context):
         if not logs:
             update.message.reply_text("📭 Немає відхилених сигналів за останні 2 години.")
         else:
-            msg = "📋 <b>Останні відхилені сигнали:</b>\n\n" + "\n".join(logs)
-            if len(msg) > 4000: msg = msg[:4000] + "..."
+            safe_logs = [html.escape(log) for log in logs]
+            msg = "📋 <b>Останні відхилені сигнали:</b>\n\n" + "\n".join(safe_logs)
+            if len(msg) > 4000:
+                msg = msg[:4000] + "..."
             update.message.reply_text(msg, parse_mode="HTML")
 
 
 dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("reset", reset_stats_cmd))
 dispatcher.add_handler(CallbackQueryHandler(handle_callback))
 dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
