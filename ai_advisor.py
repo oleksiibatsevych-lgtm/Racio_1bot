@@ -7,99 +7,121 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get(
-    "GEMINI_KEY"
-)
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY.strip())
+class AITradingAdvisor:
+    def __init__(self):
+        self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
+        if self.api_key:
+            genai.configure(api_key=self.api_key.strip())
+        
+        # Пріоритет моделей (як у боті з високим вінрейтом)
+        self.models_to_try = [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash"
+        ]
 
+    def evaluate_signal(self, name, payload, macro_chart=None, mid_chart=None, micro_chart=None):
+        if not self.api_key:
+            logger.warning("⚠️ GEMINI_API_KEY відсутній. ШІ-аналіз пропущено.")
+            return {
+                "decision": "NO",
+                "confidence": 0,
+                "suggested_expiration": payload.get('suggested_exp', 5),
+                "reason": "GEMINI_API_KEY не налаштовано"
+            }
+
+        prompt = f"""
+        Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
+        Параметри сигналу:
+        - Сигнал (Напрямок): {payload.get('signal')}
+        - Поточна ціна: {payload.get('current_price')}
+        - RSI: {payload.get('rsi')}
+        - ADX: {payload.get('adx')}
+        - Глобальний тренд (1h): {payload.get('global_trend', 'Невідомо')}
+        - Середній тренд (15m): {payload.get('mid_trend', 'Невідомо')}
+        - Дивергенція: {payload.get('divergence', 'NONE')}
+        - Технічна причина: {payload.get('reason')}
+        - ATR Ratio: {payload.get('atr_ratio')}
+        - Рекомендована експірація: {payload.get('suggested_exp')} хв
+
+        Оціни доцільність входу в угоду та підтвердь або скоригуй час експірації.
+        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи обгорток markdown:
+        {{
+            "decision": "YES" або "NO",
+            "confidence": <число від 1 до 10>,
+            "suggested_expiration": <число в хвилинах>,
+            "reason": "<Коротке обґрунтування українською мовою>"
+        }}
+        """
+
+        content_parts = [prompt]
+        for chart in [macro_chart, mid_chart, micro_chart]:
+            if chart:
+                try:
+                    chart.seek(0)
+                    content_parts.append(Image.open(chart))
+                except Exception as e:
+                    logger.warning(f"⚠️ Помилка відкриття графіка для ШІ: {e}")
+
+        response_text = None
+        for model_name in self.models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                # Таймаут 10 секунд, щоб Render не обірвав з'єднання
+                response = model.generate_content(
+                    content_parts, 
+                    request_options={"timeout": 10}
+                )
+                if response and response.text:
+                    response_text = response.text
+                    break
+            except google.api_core.exceptions.ResourceExhausted:
+                logger.warning(f"⚠️ Квота вичерпана для {model_name}.")
+                continue
+            except Exception as e:
+                logger.warning(f"⚠️ Модель {model_name} недоступна: {e}")
+                continue
+
+        if not response_text:
+            return {
+                "decision": "NO",
+                "confidence": 1,
+                "suggested_expiration": payload.get('suggested_exp', 5),
+                "reason": "Усі моделі Gemini наразі недоступні або перевищено квоту."
+            }
+
+        try:
+            clean_text = response_text.strip()
+            if clean_text.startswith("```json"):
+                clean_text = clean_text.replace("```json", "", 1)
+            if clean_text.startswith("```"):
+                clean_text = clean_text.replace("```", "", 1)
+            if clean_text.endswith("```"):
+                clean_text = clean_text[::-1].replace("```", "", 1)[::-1]
+            clean_text = clean_text.strip()
+
+            result = json.loads(clean_text)
+            return {
+                "decision": result.get("decision", "NO").upper(),
+                "confidence": int(result.get("confidence", 0)),
+                "suggested_expiration": int(result.get("suggested_expiration", payload.get('suggested_exp', 5))),
+                "reason": str(result.get("reason", "ШІ не надав детального пояснення"))
+            }
+        except Exception as e:
+            logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}. Текст: {response_text}")
+            return {
+                "decision": "NO",
+                "confidence": 1,
+                "suggested_expiration": payload.get('suggested_exp', 5),
+                "reason": "Помилка обробки відповіді ШІ (некоректний JSON)"
+            }
+
+# Створюємо глобальний екземпляр для сумісності з іншими файлами
+ai_advisor_instance = AITradingAdvisor()
 
 def analyze_signal_with_gemini(symbol, payload, chart_images=[]):
-    """ШІ-аналіз торгового сигналу з обробкою таймаутів та обмежень квоти."""
-    suggested_exp = payload.get("suggested_exp", 5)
-
-    if not GEMINI_API_KEY:
-        logger.warning("⚠️ GEMINI_API_KEY відсутній. ШІ-аналіз пропущено.")
-        return {
-            "confidence": 0,
-            "reason": "GEMINI_API_KEY не налаштовано",
-            "suggested_expiration": suggested_exp,
-        }
-
-    prompt = f"""
-    Проаналізуй торговий сигнал для валютної пари {symbol}:
-    - Напрямок: {payload.get('signal')}
-    - Оцінка алгоритму: {payload.get('score')}
-    - Основний таймфрейм: {payload.get('primary_tf')}
-    - Стратегія: {payload.get('strategy_type')}
-    - Поточна ціна: {payload.get('current_price')}
-    - Pivots: P={payload.get('pivot_p')}, R1={payload.get('pivot_r1')}, S1={payload.get('pivot_s1')}
-    - ADX: {payload.get('adx')}, RSI: {payload.get('rsi')}
-    - Дивергенція: {payload.get('divergence')}
-    - ATR Ratio: {payload.get('atr_ratio')}
-    - Причина формування: {payload.get('reason')}
-    - ML Ймовірність: {payload.get('ml_prob')}%
-    - Рекомендована експірація: {suggested_exp} хв.
-
-    Оціни впевненість від 1 до 10 та надай коротке пояснення (до 2 речень).
-    Відповідь надай СУВОРО у форматі JSON без форматування markdown:
-    {{
-        "confidence": <число від 1 до 10>,
-        "reason": "<коротке пояснення>",
-        "suggested_expiration": <число в хвилинах>
-    }}
-    """
-
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
-        contents = [prompt]
-        for img_buf in chart_images:
-            if img_buf:
-                try:
-                    img_buf.seek(0)
-                    image = Image.open(img_buf)
-                    contents.append(image)
-                except Exception as img_err:
-                    logger.warning(
-                        f"⚠️ Не вдалося прочитати графік для Gemini: {img_err}"
-                    )
-
-        # 🟢 Таймаут 5 секунд — бот не зависає в очікуванні відповіді
-        response = model.generate_content(
-            contents=contents, request_options={"timeout": 5}
-        )
-
-        txt = response.text.strip()
-        if txt.startswith("```json"):
-            txt = txt.replace("```json", "").replace("```", "").strip()
-        elif txt.startswith("```"):
-            txt = txt.replace("```", "").strip()
-
-        data = json.loads(txt)
-        return {
-            "confidence": int(data.get("confidence", 0)),
-            "reason": str(data.get("reason", "Оцінка ШІ")),
-            "suggested_expiration": int(
-                data.get("suggested_expiration", suggested_exp)
-            ),
-        }
-
-    except google.api_core.exceptions.ResourceExhausted:
-        # 🟢 Миттєве повернення при перевищенні квоти без 20-секундної паузи
-        logger.warning(
-            f"⚠️ Перевищено ліміт квоти Gemini (ResourceExhausted) для {symbol}. Миттєвий фолбек!"
-        )
-        return {
-            "confidence": 0,
-            "reason": "Перевищено ліміт запитів Gemini (Instant Fallback)",
-            "suggested_expiration": suggested_exp,
-        }
-
-    except Exception as e:
-        logger.warning(f"⚠️ Помилка Gemini API для {symbol}: {e}")
-        return {
-            "confidence": 0,
-            "reason": f"ШІ недоступний ({e})",
-            "suggested_expiration": suggested_exp,
-        }
+    """Обгортка для сумісності зі старим кодом"""
+    c_macro = chart_images[0] if len(chart_images) > 0 else None
+    c_mid = chart_images[1] if len(chart_images) > 1 else None
+    c_micro = chart_images[2] if len(chart_images) > 2 else None
+    return ai_advisor_instance.evaluate_signal(symbol, payload, c_macro, c_mid, c_micro)
