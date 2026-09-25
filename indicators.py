@@ -35,7 +35,8 @@ class AdaptiveTechnicalAnalysis:
             if bb_cols:
                 df['bb_lower'] = df[bb_cols[0]]
                 df['bb_upper'] = df[[c for c in df.columns if 'BBU' in c][0]]
-                df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_lower']
+                df['bb_middle'] = df[[c for c in df.columns if 'BBM' in c][0]]
+                df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
 
             if 'ATR_14' in df.columns:
                 df['atr'] = df['ATR_14']
@@ -51,7 +52,6 @@ class AdaptiveTechnicalAnalysis:
         return df
 
     def get_trend(self, df: pd.DataFrame, span_val: int = 50) -> str:
-        """Визначення тренду з мертвиною зоною 0.05% проти флетового шуму."""
         if df is None or df.empty or len(df) < span_val:
             return "NEUTRAL"
 
@@ -63,7 +63,7 @@ class AdaptiveTechnicalAnalysis:
             else:
                 ema = float(df['close'].ewm(span=span_val, adjust=False).mean().iloc[-1])
 
-            threshold = ema * 0.0005  # Мертва зона (0.05%)
+            threshold = ema * 0.0005  # Мертва зона 0.05%
 
             if close > (ema + threshold):
                 return "BULLISH"
@@ -114,129 +114,182 @@ class AdaptiveTechnicalAnalysis:
 
         return "NONE"
 
-    def _evaluate_bounce_signal(self, current_price: float, pivots: dict, rsi: float) -> dict:
-        if not pivots or current_price <= 0:
-            return {"signal": "NONE", "score": 0, "reason": ""}
-
-        resistances = [pivots.get("R1"), pivots.get("R2"), pivots.get("R3")]
-        supports = [pivots.get("S1"), pivots.get("S2"), pivots.get("S3")]
-
-        threshold = 0.0030
-
-        for s_level in supports:
-            if s_level and s_level > 0:
-                dist_pct = (current_price - s_level) / current_price
-                if 0 <= dist_pct <= threshold:
-                    score = 75 + (15 if rsi < 45 else 0)
-                    return {
-                        "signal": "CALL",
-                        "score": score,
-                        "reason": f"Тест підтримки S ({s_level:.5f}) — зона відскоку вгору",
-                    }
-
-        for r_level in resistances:
-            if r_level and r_level > 0:
-                dist_pct = (r_level - current_price) / current_price
-                if 0 <= dist_pct <= threshold:
-                    score = 75 + (15 if rsi > 55 else 0)
-                    return {
-                        "signal": "PUT",
-                        "score": score,
-                        "reason": f"Тест опору R ({r_level:.5f}) — зона відскоку вниз",
-                    }
-
-        return {"signal": "NONE", "score": 0, "reason": ""}
-
     def generate_signal(
         self, global_trend: str, mid_trend: str, df_daily: pd.DataFrame, tf_dict: dict
     ) -> dict:
-        df_fast = tf_dict.get("5m")
-        if df_fast is None or df_fast.empty or 'rsi' not in df_fast.columns:
+        df_1m = tf_dict.get("1m")
+        df_3m = tf_dict.get("3m")
+        df_5m = tf_dict.get("5m")
+        
+        if df_5m is None or df_fast is None if False else df_5m.empty or 'rsi' not in df_5m.columns:
             return {"signal": "NONE", "score": 0, "reason": "Недостатньо даних (5m)"}
 
-        current_price = float(df_fast['close'].iloc[-1])
-        rsi = float(df_fast['rsi'].iloc[-1])
-        adx = float(df_fast['adx'].iloc[-1]) if 'adx' in df_fast.columns else 20.0
+        current_price = float(df_5m['close'].iloc[-1])
+        rsi_5m = float(df_fast.get('rsi', pd.Series([50])).iloc[-1]) if 'df_fast' in locals() else float(df_5m['rsi'].iloc[-1])
+        adx_5m = float(df_5m['adx'].iloc[-1]) if 'adx' in df_5m.columns else 20.0
         
-        volatility_ratio = 1.0
-        if 'volatility_ratio' in df_fast.columns:
-            volatility_ratio = float(df_fast['volatility_ratio'].iloc[-1])
-            
-        divergence = self.check_divergence(df_fast)
+        volatility_ratio = float(df_5m['volatility_ratio'].iloc[-1]) if 'volatility_ratio' in df_5m.columns else 1.0
+
+        bb_upper_5m = float(df_5m['bb_upper'].iloc[-1]) if 'bb_upper' in df_5m.columns else 0.0
+        bb_lower_5m = float(df_5m['bb_lower'].iloc[-1]) if 'bb_lower' in df_5m.columns else 0.0
+        
+        divergence = self.check_divergence(df_5m)
         pivots = self.calculate_pivots(df_daily if df_daily is not None else tf_dict.get("1h"))
+        local_trend = self.get_trend(df_5m, span_val=10)
 
-        # 1. ПРІОРИТЕТ: ВІДСКОК ВІД РІВНІВ
-        bounce = self._evaluate_bounce_signal(current_price, pivots, rsi)
-        if bounce["signal"] != "NONE":
-            return {
-                "signal": bounce["signal"],
-                "score": bounce["score"],
-                "primary_tf": "5m",
-                "strategy_type": "BOUNCE",
-                "rsi": rsi,
-                "adx": adx,
-                "divergence": divergence,
-                "volatility_ratio": volatility_ratio,
-                "wick_ratio": 0.0,
-                "ema_dist": 0.0,
-                "reason": bounce["reason"],
-            }
-
-        # 2. ТРЕНДОВА СТРАТЕГІЯ (з вимовою синхронізації 3-х ТФ: 1h + 15m + 5m)
-        local_trend = self.get_trend(df_fast, span_val=10)
-        signal = "NONE"
-        score = 0
-        reason = "Відсутність чіткого трендового сетапу"
-
-        if global_trend == "BULLISH" and mid_trend == "BULLISH" and local_trend == "BULLISH":
-            if rsi < 60:  # Вхід на ранній стадії імпульсу
-                signal = "CALL"
-                score = 70
-                reason = "Синхронний бичачий імпульс (1h + 15m + 5m)"
-                if divergence == "BULLISH":
-                    score += 15
-
-        elif global_trend == "BEARISH" and mid_trend == "BEARISH" and local_trend == "BEARISH":
-            if rsi > 40:  # Вхід на ранній стадії імпульсу
-                signal = "PUT"
-                score = 70
-                reason = "Синхронний ведмежий імпульс (1h + 15m + 5m)"
-                if divergence == "BEARISH":
-                    score += 15
-
-        wick_ratio = 0.0
-        ema_dist = 0.0
-        try:
-            high = float(df_fast['high'].iloc[-1])
-            low = float(df_fast['low'].iloc[-1])
-            open_p = float(df_fast['open'].iloc[-1])
-            close_p = float(df_fast['close'].iloc[-1])
+        # ----------------------------------------------------
+        # ГІЛКА 1: МІКРО-ФЛЕТ (Скальпінг на 1m та 3m)
+        # ----------------------------------------------------
+        if df_1m is not None and not df_1m.empty and 'rsi' in df_1m.columns:
+            rsi_1m = float(df_1m['rsi'].iloc[-1])
+            bb_lower_1m = float(df_1m['bb_lower'].iloc[-1]) if 'bb_lower' in df_1m.columns else 0.0
+            bb_upper_1m = float(df_1m['bb_upper'].iloc[-1]) if 'bb_upper' in df_1m.columns else 0.0
             
-            total_len = high - low
-            if total_len > 0:
-                if signal == "CALL":
-                    lower_wick = min(open_p, close_p) - low
-                    wick_ratio = lower_wick / total_len
-                elif signal == "PUT":
-                    upper_wick = high - max(open_p, close_p)
-                    wick_ratio = upper_wick / total_len
+            if bb_lower_1m > 0 and current_price <= bb_lower_1m and rsi_1m <= 32.0:
+                return {
+                    "signal": "CALL",
+                    "score": 80,
+                    "primary_tf": "1m",
+                    "strategy_type": "BOUNCE",
+                    "rsi": rsi_1m, "adx": adx_5m,
+                    "divergence": divergence,
+                    "volatility_ratio": volatility_ratio,
+                    "reason": f"Мікро-флет 1m: Відскок від низу Боллінджера (RSI: {rsi_1m:.1f})",
+                    "suggested_exp": 3
+                }
+            if bb_upper_1m > 0 and current_price >= bb_upper_1m and rsi_1m >= 68.0:
+                return {
+                    "signal": "PUT",
+                    "score": 80,
+                    "primary_tf": "1m",
+                    "strategy_type": "BOUNCE",
+                    "rsi": rsi_1m, "adx": adx_5m,
+                    "divergence": divergence,
+                    "volatility_ratio": volatility_ratio,
+                    "reason": f"Мікро-флет 1m: Відскок від верху Боллінджера (RSI: {rsi_1m:.1f})",
+                    "suggested_exp": 3
+                }
 
-            if 'EMA_10' in df_fast.columns:
-                ema_10 = float(df_fast['EMA_10'].iloc[-1])
-                ema_dist = abs(current_price - ema_10) / ema_10
-        except Exception:
-            pass
+        # ----------------------------------------------------
+        # ГІЛКА 2: СТАНДАРТНИЙ ФЛЕТ НА 5m
+        # ----------------------------------------------------
+        if adx_5m < 22.0:
+            if bb_lower_5m > 0 and current_price <= bb_lower_5m * 1.0005 and rsi_5m <= 40.0:
+                return {
+                    "signal": "CALL",
+                    "score": 75,
+                    "primary_tf": "5m",
+                    "strategy_type": "BOUNCE",
+                    "rsi": rsi_5m, "adx": adx_5m,
+                    "divergence": divergence,
+                    "volatility_ratio": volatility_ratio,
+                    "reason": f"Флет 5m: Відскок від нижньої межі каналу (RSI: {rsi_5m:.1f})",
+                    "suggested_exp": 5
+                }
 
-        return {
-            "signal": signal,
-            "score": score,
-            "primary_tf": "5m",
-            "strategy_type": "TREND",
-            "rsi": rsi,
-            "adx": adx,
-            "divergence": divergence,
-            "volatility_ratio": volatility_ratio,
-            "wick_ratio": wick_ratio,
-            "ema_dist": ema_dist,
-            "reason": reason,
-        }
+            if bb_upper_5m > 0 and current_price >= bb_upper_5m * 0.9995 and rsi_5m >= 60.0:
+                return {
+                    "signal": "PUT",
+                    "score": 75,
+                    "primary_tf": "5m",
+                    "strategy_type": "BOUNCE",
+                    "rsi": rsi_5m, "adx": adx_5m,
+                    "divergence": divergence,
+                    "volatility_ratio": volatility_ratio,
+                    "reason": f"Флет 5m: Відскок від верхньої межі каналу (RSI: {rsi_5m:.1f})",
+                    "suggested_exp": 5
+                }
+
+            supports = [pivots.get("S1"), pivots.get("S2"), pivots.get("S3")]
+            for s_level in supports:
+                if s_level and s_level > 0 and abs(current_price - s_level) / current_price <= 0.0012:
+                    if rsi_5m <= 45.0:
+                        return {
+                            "signal": "CALL",
+                            "score": 80,
+                            "primary_tf": "5m",
+                            "strategy_type": "BOUNCE",
+                            "rsi": rsi_5m, "adx": adx_5m,
+                            "divergence": divergence,
+                            "volatility_ratio": volatility_ratio,
+                            "reason": f"Флет 5m: Відскок від підтримки Pivot ({s_level:.5f})",
+                            "suggested_exp": 5
+                        }
+
+            resistances = [pivots.get("R1"), pivots.get("R2"), pivots.get("R3")]
+            for r_level in resistances:
+                if r_level and r_level > 0 and abs(r_level - current_price) / current_price <= 0.0012:
+                    if rsi_5m >= 55.0:
+                        return {
+                            "signal": "PUT",
+                            "score": 80,
+                            "primary_tf": "5m",
+                            "strategy_type": "BOUNCE",
+                            "rsi": rsi_5m, "adx": adx_5m,
+                            "divergence": divergence,
+                            "volatility_ratio": volatility_ratio,
+                            "reason": f"Флет 5m: Відскок від опору Pivot ({r_level:.5f})",
+                            "suggested_exp": 5
+                        }
+
+        # ----------------------------------------------------
+        # ГІЛКА 3: ТРЕНДОВА СТРАТЕГІЯ (1h + 15m + 5m)
+        # ----------------------------------------------------
+        else:
+            if global_trend == "BULLISH" and mid_trend == "BULLISH" and local_trend == "BULLISH":
+                if rsi_5m < 62.0:
+                    score = 70 + (15 if divergence == "BULLISH" else 0)
+                    return {
+                        "signal": "CALL",
+                        "score": score,
+                        "primary_tf": "5m",
+                        "strategy_type": "TREND",
+                        "rsi": rsi_5m, "adx": adx_5m,
+                        "divergence": divergence,
+                        "volatility_ratio": volatility_ratio,
+                        "reason": f"Тренд ВГОРУ: Синхронізація ТФ (ADX: {adx_5m:.1f})",
+                        "suggested_exp": 10
+                    }
+
+            if global_trend == "BEARISH" and mid_trend == "BEARISH" and local_trend == "BEARISH":
+                if rsi_5m > 38.0:
+                    score = 70 + (15 if divergence == "BEARISH" else 0)
+                    return {
+                        "signal": "PUT",
+                        "score": score,
+                        "primary_tf": "5m",
+                        "strategy_type": "TREND",
+                        "rsi": rsi_5m, "adx": adx_5m,
+                        "divergence": divergence,
+                        "volatility_ratio": volatility_ratio,
+                        "reason": f"Тренд ВНИЗ: Синхронізація ТФ (ADX: {adx_5m:.1f})",
+                        "suggested_exp": 10
+                    }
+
+            if divergence == "BULLISH" and rsi_5m < 50.0:
+                return {
+                    "signal": "CALL",
+                    "score": 75,
+                    "primary_tf": "5m",
+                    "strategy_type": "TREND",
+                    "rsi": rsi_5m, "adx": adx_5m,
+                    "divergence": divergence,
+                    "volatility_ratio": volatility_ratio,
+                    "reason": f"Трендова бычача дивергенція (ADX: {adx_5m:.1f})",
+                    "suggested_exp": 10
+                }
+
+            if divergence == "BEARISH" and rsi_5m > 50.0:
+                return {
+                    "signal": "PUT",
+                    "score": 75,
+                    "primary_tf": "5m",
+                    "strategy_type": "TREND",
+                    "rsi": rsi_5m, "adx": adx_5m,
+                    "divergence": divergence,
+                    "volatility_ratio": volatility_ratio,
+                    "reason": f"Трендова ведмежа дивергенція (ADX: {adx_5m:.1f})",
+                    "suggested_exp": 10
+                }
+
+        return {"signal": "NONE", "score": 0, "reason": "Умови не сформовані"}
