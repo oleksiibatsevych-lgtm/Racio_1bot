@@ -16,7 +16,6 @@ import requests
 import yfinance as yf
 
 matplotlib.use("Agg")
-from flask import Flask, request
 from telegram import (
     Bot,
     InlineKeyboardButton,
@@ -28,9 +27,9 @@ from telegram import (
 from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
-    Dispatcher,
     Filters,
     MessageHandler,
+    Updater,
 )
 
 from config import FINNHUB_API_KEY, FINNHUB_TOKEN, PAIRS_MAP, YAHOO_PAIRS_MAP
@@ -56,9 +55,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN не знайдено!")
 
-app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
-dispatcher = Dispatcher(bot, None, use_context=True)
 
 analyzer = AdaptiveTechnicalAnalysis()
 ml_filter = TradingMLFilter()
@@ -538,24 +535,6 @@ def run_mass_analysis(chat_id):
     bot.send_message(chat_id=chat_id, text=reply_text)
 
 
-@app.route("/")
-def index():
-    return "Racio_1bot is active"
-
-
-@app.route("/webhook", methods=["POST"])
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def webhook():
-    try:
-        data = request.get_json(force=True)
-        if data:
-            update = Update.de_json(data, bot)
-            dispatcher.process_update(update)
-    except Exception as e:
-        logger.error(f"⚠️ Помилка Webhook: {e}")
-    return "ok", 200
-
-
 def start(update, context):
     user = update.effective_user
     database.register_user(user.id, user.username)
@@ -617,11 +596,17 @@ def handle_callback(update, context):
             ).start()
 
 
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    bot.delete_webhook(drop_pending_updates=True)
+    logger.info("🧹 Старий вебхук очищено.")
+
+    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    dispatcher.add_handler(CallbackQueryHandler(handle_callback))
+
+    logger.info("🚀 Бот запущено в режимі Polling!")
+    updater.start_polling()
+    updater.idle()
