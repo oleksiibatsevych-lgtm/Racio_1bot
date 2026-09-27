@@ -60,15 +60,6 @@ app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
-if RENDER_URL:
-    webhook_url = f"{RENDER_URL}/webhook"
-    try:
-        bot.set_webhook(url=webhook_url, allowed_updates=["message", "callback_query"])
-        logger.info(f"✅ Webhook оновлено: {webhook_url}")
-    except Exception as e:
-        logger.error(f"⚠️ Помилка встановлення Webhook: {e}")
-
 analyzer = AdaptiveTechnicalAnalysis()
 ml_filter = TradingMLFilter()
 
