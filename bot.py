@@ -5,6 +5,11 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import matplotlib
 import pandas as pd
 import requests
@@ -116,7 +121,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
+    url = "https://finnhub.io/api/v1/forex/candle"
     params = {
         "symbol": str(symbol).strip(),
         "resolution": str(resolution).strip(),
@@ -429,7 +434,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             database.save_filtered_log(chat_id, f"❌ {pair_name}: {reason_val}")
             return False
 
-        # Перевірка ML фільтра
         session_str, s_code, s_hour = get_current_session_info()
         ml_features = {
             "rsi": analysis.get("rsi", 50),
@@ -445,14 +449,12 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             database.save_filtered_log(chat_id, log_msg)
             return False
 
-        # Перевірка рівнів Pivot
         is_pivot_ok, pivot_reason = check_pivot_level_proximity(analysis)
         if not is_pivot_ok:
             log_msg = f"⏭ {pair_name} відхилено (Рівень): {pivot_reason}"
             database.save_filtered_log(chat_id, log_msg)
             return False
 
-        # Підготовка зображень для ШІ
         c_macro = create_chart_image(df_1h, f"{pair_name} - 1H Global", timeframe="1H")
         c_mid = create_chart_image(df_15m, f"{pair_name} - 15M Mid", timeframe="15M")
         c_micro = create_chart_image(df_1m, f"{pair_name} - 1M Entry", timeframe="1M")
@@ -475,7 +477,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             pair_name, payload, c_macro, c_mid, c_micro
         )
 
-        # ПОКРАЩЕНА ЛОГІКА: Якщо ШІ недоступний (confidence <= 1), але ML >= 65.0%, пропускаємо сигнал!
         is_ai_busy = ai_res.get("confidence", 0) <= 1 or "недоступний" in ai_res.get("reason", "").lower()
 
         if is_ai_busy:
@@ -499,7 +500,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
                 database.save_filtered_log(chat_id, log_msg)
                 return False
 
-        # Формування повідомлення з сигналом
         direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if payload["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
         msg_text = (
             f"🎯 <b>СИГНАЛ: {pair_name}</b>\n\n"
