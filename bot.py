@@ -354,7 +354,7 @@ def process_signal_expiration(sig_id):
                     text=f"{orig_txt}\n{report_str}",
                     parse_mode="HTML",
                 )
-            except Exception as e:
+            except Exception:
                 bot.send_message(
                     chat_id=sig_data["chat_id"],
                     text=f"🏁 <b>Результат угоди #{sig_id} ({ticker}):</b>\n{res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>",
@@ -416,6 +416,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         analysis = analyzer.analyze_all_timeframes(
             df_daily, df_1h, df_15m, df_5m, df_3m, df_1m
         )
+        
         is_valid, reason_val = validate_signal_conditions(analysis)
 
         if not is_valid:
@@ -426,9 +427,11 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         ml_features = {
             "rsi": analysis.get("rsi", 50),
             "adx": analysis.get("adx", 20),
-            "atr_ratio": analysis.get("atr_ratio", 1.0),
+            "bb_width": analysis.get("bb_width", 0.001),
             "session_code": s_code,
             "hour": s_hour,
+            "divergence": analysis.get("divergence", "NONE"),
+            "volatility_ratio": analysis.get("volatility_ratio", 1.0)
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
@@ -443,9 +446,9 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             database.save_filtered_log(chat_id, log_msg)
             return False
 
-        c_macro = create_chart_image(df_1h, f"{pair_name} - 1H Global", timeframe="1H")
-        c_mid = create_chart_image(df_15m, f"{pair_name} - 15M Mid", timeframe="15M")
-        c_micro = create_chart_image(df_1m, f"{pair_name} - 1M Entry", timeframe="1M")
+        c_macro = create_chart_image(df_1h, f"{pair_name} - 1H Global", tf_label="1H")
+        c_mid = create_chart_image(df_15m, f"{pair_name} - 15M Mid", tf_label="15M")
+        c_micro = create_chart_image(df_1m, f"{pair_name} - 1M Entry", tf_label="1M")
 
         exp_time = calculate_dynamic_expiration(analysis)
         payload = {
@@ -509,6 +512,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             entry_price=payload["current_price"],
             expiration_mins=ai_exp,
             message_text=msg_text,
+            timestamp_str=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
         )
         schedule_signal_timer(sig_id, datetime.utcnow(), ai_exp)
         return True
@@ -567,10 +571,17 @@ def handle_message(update, context):
             buttons.append(row)
         update.message.reply_text("Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(buttons))
     elif text == "📈 Статистика":
-        stats = database.get_statistics(chat_id)
-        update.message.reply_text(f"📊 <b>Ваша статистика:</b>\n\n{stats}", parse_mode="HTML")
+        stats = database.get_stats()
+        msg = (
+            f"📊 <b>Загальна статистика:</b>\n\n"
+            f"Всього сигналів: {stats.get('total', 0)}\n"
+            f"✅ Перемог (WIN): {stats.get('wins', 0)}\n"
+            f"❌ Узбитків (LOSS): {stats.get('losses', 0)}\n"
+            f"⏳ В очікуванні: {stats.get('pending', 0)}"
+        )
+        update.message.reply_text(msg, parse_mode="HTML")
     elif text == "📋 Логи фільтру":
-        logs = database.get_filtered_logs(chat_id)
+        logs = database.get_system_logs(chat_id)
         if not logs:
             update.message.reply_text("📋 Логи фільтру порожні.")
         else:
