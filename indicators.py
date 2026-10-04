@@ -63,7 +63,7 @@ class AdaptiveTechnicalAnalysis:
             else:
                 ema = float(df['close'].ewm(span=span_val, adjust=False).mean().iloc[-1])
 
-            threshold = ema * 0.0005  # Мертва зона 0.05%
+            threshold = ema * 0.0005
 
             if close > (ema + threshold):
                 return "BULLISH"
@@ -94,7 +94,7 @@ class AdaptiveTechnicalAnalysis:
         return {"P": p, "R1": r1, "R2": r2, "R3": r3, "S1": s1, "S2": s2, "S3": s3}
 
     def check_divergence(self, df: pd.DataFrame) -> str:
-        if len(df) < 20 or 'rsi' not in df.columns:
+        if df is None or len(df) < 20 or 'rsi' not in df.columns:
             return "NONE"
 
         recent_price_low = df['low'].iloc[-10:].min()
@@ -121,11 +121,11 @@ class AdaptiveTechnicalAnalysis:
         df_3m = tf_dict.get("3m")
         df_5m = tf_dict.get("5m")
         
-        if df_5m is None or df_fast is None if False else df_5m.empty or 'rsi' not in df_5m.columns:
+        if df_5m is None or df_5m.empty or 'rsi' not in df_5m.columns:
             return {"signal": "NONE", "score": 0, "reason": "Недостатньо даних (5m)"}
 
         current_price = float(df_5m['close'].iloc[-1])
-        rsi_5m = float(df_fast.get('rsi', pd.Series([50])).iloc[-1]) if 'df_fast' in locals() else float(df_5m['rsi'].iloc[-1])
+        rsi_5m = float(df_5m['rsi'].iloc[-1])
         adx_5m = float(df_5m['adx'].iloc[-1]) if 'adx' in df_5m.columns else 20.0
         
         volatility_ratio = float(df_5m['volatility_ratio'].iloc[-1]) if 'volatility_ratio' in df_5m.columns else 1.0
@@ -137,9 +137,7 @@ class AdaptiveTechnicalAnalysis:
         pivots = self.calculate_pivots(df_daily if df_daily is not None else tf_dict.get("1h"))
         local_trend = self.get_trend(df_5m, span_val=10)
 
-        # ----------------------------------------------------
-        # ГІЛКА 1: МІКРО-ФЛЕТ (Скальпінг на 1m та 3m)
-        # ----------------------------------------------------
+        # 1. МІКРО-ФЛЕТ (Скальпінг на 1m)
         if df_1m is not None and not df_1m.empty and 'rsi' in df_1m.columns:
             rsi_1m = float(df_1m['rsi'].iloc[-1])
             bb_lower_1m = float(df_1m['bb_lower'].iloc[-1]) if 'bb_lower' in df_1m.columns else 0.0
@@ -170,9 +168,7 @@ class AdaptiveTechnicalAnalysis:
                     "suggested_exp": 3
                 }
 
-        # ----------------------------------------------------
-        # ГІЛКА 2: СТАНДАРТНИЙ ФЛЕТ НА 5m
-        # ----------------------------------------------------
+        # 2. СТАНДАРТНИЙ ФЛЕТ НА 5m
         if adx_5m < 22.0:
             if bb_lower_5m > 0 and current_price <= bb_lower_5m * 1.0005 and rsi_5m <= 40.0:
                 return {
@@ -232,9 +228,7 @@ class AdaptiveTechnicalAnalysis:
                             "suggested_exp": 5
                         }
 
-        # ----------------------------------------------------
-        # ГІЛКА 3: ТРЕНДОВА СТРАТЕГІЯ (1h + 15m + 5m)
-        # ----------------------------------------------------
+        # 3. ТРЕНДОВА СТРАТЕГІЯ
         else:
             if global_trend == "BULLISH" and mid_trend == "BULLISH" and local_trend == "BULLISH":
                 if rsi_5m < 62.0:
@@ -275,7 +269,7 @@ class AdaptiveTechnicalAnalysis:
                     "rsi": rsi_5m, "adx": adx_5m,
                     "divergence": divergence,
                     "volatility_ratio": volatility_ratio,
-                    "reason": f"Трендова бычача дивергенція (ADX: {adx_5m:.1f})",
+                    "reason": f"Трендова бичача дивергенція (ADX: {adx_5m:.1f})",
                     "suggested_exp": 10
                 }
 
@@ -293,3 +287,51 @@ class AdaptiveTechnicalAnalysis:
                 }
 
         return {"signal": "NONE", "score": 0, "reason": "Умови не сформовані"}
+
+    def analyze_all_timeframes(
+        self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m
+    ) -> dict:
+        """Головний метод мультитаймфреймового аналізу."""
+        tf_dict = {}
+        for name, df in [
+            ("daily", df_daily),
+            ("1h", df_1h),
+            ("15m", df_15m),
+            ("5m", df_5m),
+            ("3m", df_3m),
+            ("1m", df_1m),
+        ]:
+            if df is not None and not df.empty:
+                tf_dict[name] = self.calculate_indicators(df.copy())
+            else:
+                tf_dict[name] = pd.DataFrame()
+
+        global_trend = self.get_trend(tf_dict.get("1h"), span_val=50)
+        mid_trend = self.get_trend(tf_dict.get("15m"), span_val=20)
+        
+        df_daily_calc = tf_dict.get("daily")
+        if df_daily_calc is None or df_daily_calc.empty:
+            df_daily_calc = tf_dict.get("1h")
+            
+        pivots = self.calculate_pivots(df_daily_calc)
+
+        res = self.generate_signal(global_trend, mid_trend, df_daily_calc, tf_dict)
+
+        df_5m = tf_dict.get("5m")
+        if df_5m is not None and not df_5m.empty:
+            curr_price = float(df_5m["close"].iloc[-1])
+            bb_w = float(df_5m["bb_width"].iloc[-1]) if "bb_width" in df_5m.columns else 0.001
+        else:
+            curr_price = 0.0
+            bb_w = 0.001
+
+        res["current_price"] = curr_price
+        res["bb_width"] = bb_w
+        res["global_trend"] = global_trend
+        res["mid_trend"] = mid_trend
+        res["pivots"] = pivots
+        if "volatility_ratio" not in res:
+            res["volatility_ratio"] = 1.0
+        res["atr_ratio"] = res["volatility_ratio"]
+
+        return res
