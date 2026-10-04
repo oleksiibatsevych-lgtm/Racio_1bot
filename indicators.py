@@ -137,13 +137,46 @@ class AdaptiveTechnicalAnalysis:
         pivots = self.calculate_pivots(df_daily if df_daily is not None else tf_dict.get("1h"))
         local_trend = self.get_trend(df_5m, span_val=10)
 
+        # 0. ПЕРЕВІРКА ПІВОТ-РІВНІВ (Сигнал на відскок у протилежному напрямку)
+        supports = [pivots.get("S1"), pivots.get("S2"), pivots.get("S3")]
+        for s_level in supports:
+            if s_level and s_level > 0 and abs(current_price - s_level) / current_price <= 0.0015:
+                if rsi_5m <= 42.0:
+                    return {
+                        "signal": "CALL",
+                        "score": 85,
+                        "primary_tf": "5m",
+                        "strategy_type": "BOUNCE",
+                        "rsi": rsi_5m, "adx": adx_5m,
+                        "divergence": divergence,
+                        "volatility_ratio": volatility_ratio,
+                        "reason": f"Контртренд: Відскок ВГОРУ від підтримки Pivot ({s_level:.5f}) з RSI {rsi_5m:.1f}",
+                        "suggested_exp": 5
+                    }
+
+        resistances = [pivots.get("R1"), pivots.get("R2"), pivots.get("R3")]
+        for r_level in resistances:
+            if r_level and r_level > 0 and abs(r_level - current_price) / current_price <= 0.0015:
+                if rsi_5m >= 58.0:
+                    return {
+                        "signal": "PUT",
+                        "score": 85,
+                        "primary_tf": "5m",
+                        "strategy_type": "BOUNCE",
+                        "rsi": rsi_5m, "adx": adx_5m,
+                        "divergence": divergence,
+                        "volatility_ratio": volatility_ratio,
+                        "reason": f"Контртренд: Відскок ВНИЗ від опору Pivot ({r_level:.5f}) з RSI {rsi_5m:.1f}",
+                        "suggested_exp": 5
+                    }
+
         # 1. МІКРО-ФЛЕТ (Скальпінг на 1m)
         if df_1m is not None and not df_1m.empty and 'rsi' in df_1m.columns:
             rsi_1m = float(df_1m['rsi'].iloc[-1])
             bb_lower_1m = float(df_1m['bb_lower'].iloc[-1]) if 'bb_lower' in df_1m.columns else 0.0
             bb_upper_1m = float(df_1m['bb_upper'].iloc[-1]) if 'bb_upper' in df_1m.columns else 0.0
             
-            if bb_lower_1m > 0 and current_price <= bb_lower_1m and rsi_1m <= 32.0:
+            if bb_lower_1m > 0 and current_price <= bb_lower_1m and rsi_1m <= 30.0:
                 return {
                     "signal": "CALL",
                     "score": 80,
@@ -155,7 +188,7 @@ class AdaptiveTechnicalAnalysis:
                     "reason": f"Мікро-флет 1m: Відскок від низу Боллінджера (RSI: {rsi_1m:.1f})",
                     "suggested_exp": 3
                 }
-            if bb_upper_1m > 0 and current_price >= bb_upper_1m and rsi_1m >= 68.0:
+            if bb_upper_1m > 0 and current_price >= bb_upper_1m and rsi_1m >= 70.0:
                 return {
                     "signal": "PUT",
                     "score": 80,
@@ -170,7 +203,7 @@ class AdaptiveTechnicalAnalysis:
 
         # 2. СТАНДАРТНИЙ ФЛЕТ НА 5m
         if adx_5m < 22.0:
-            if bb_lower_5m > 0 and current_price <= bb_lower_5m * 1.0005 and rsi_5m <= 40.0:
+            if bb_lower_5m > 0 and current_price <= bb_lower_5m * 1.0005 and rsi_5m <= 38.0:
                 return {
                     "signal": "CALL",
                     "score": 75,
@@ -183,7 +216,7 @@ class AdaptiveTechnicalAnalysis:
                     "suggested_exp": 5
                 }
 
-            if bb_upper_5m > 0 and current_price >= bb_upper_5m * 0.9995 and rsi_5m >= 60.0:
+            if bb_upper_5m > 0 and current_price >= bb_upper_5m * 0.9995 and rsi_5m >= 62.0:
                 return {
                     "signal": "PUT",
                     "score": 75,
@@ -196,42 +229,10 @@ class AdaptiveTechnicalAnalysis:
                     "suggested_exp": 5
                 }
 
-            supports = [pivots.get("S1"), pivots.get("S2"), pivots.get("S3")]
-            for s_level in supports:
-                if s_level and s_level > 0 and abs(current_price - s_level) / current_price <= 0.0012:
-                    if rsi_5m <= 45.0:
-                        return {
-                            "signal": "CALL",
-                            "score": 80,
-                            "primary_tf": "5m",
-                            "strategy_type": "BOUNCE",
-                            "rsi": rsi_5m, "adx": adx_5m,
-                            "divergence": divergence,
-                            "volatility_ratio": volatility_ratio,
-                            "reason": f"Флет 5m: Відскок від підтримки Pivot ({s_level:.5f})",
-                            "suggested_exp": 5
-                        }
-
-            resistances = [pivots.get("R1"), pivots.get("R2"), pivots.get("R3")]
-            for r_level in resistances:
-                if r_level and r_level > 0 and abs(r_level - current_price) / current_price <= 0.0012:
-                    if rsi_5m >= 55.0:
-                        return {
-                            "signal": "PUT",
-                            "score": 80,
-                            "primary_tf": "5m",
-                            "strategy_type": "BOUNCE",
-                            "rsi": rsi_5m, "adx": adx_5m,
-                            "divergence": divergence,
-                            "volatility_ratio": volatility_ratio,
-                            "reason": f"Флет 5m: Відскок від опору Pivot ({r_level:.5f})",
-                            "suggested_exp": 5
-                        }
-
         # 3. ТРЕНДОВА СТРАТЕГІЯ
         else:
             if global_trend == "BULLISH" and mid_trend == "BULLISH" and local_trend == "BULLISH":
-                if rsi_5m < 62.0:
+                if rsi_5m < 65.0:
                     score = 70 + (15 if divergence == "BULLISH" else 0)
                     return {
                         "signal": "CALL",
@@ -246,7 +247,7 @@ class AdaptiveTechnicalAnalysis:
                     }
 
             if global_trend == "BEARISH" and mid_trend == "BEARISH" and local_trend == "BEARISH":
-                if rsi_5m > 38.0:
+                if rsi_5m > 35.0:
                     score = 70 + (15 if divergence == "BEARISH" else 0)
                     return {
                         "signal": "PUT",
@@ -260,7 +261,7 @@ class AdaptiveTechnicalAnalysis:
                         "suggested_exp": 10
                     }
 
-            if divergence == "BULLISH" and rsi_5m < 50.0:
+            if divergence == "BULLISH" and rsi_5m < 52.0:
                 return {
                     "signal": "CALL",
                     "score": 75,
@@ -273,7 +274,7 @@ class AdaptiveTechnicalAnalysis:
                     "suggested_exp": 10
                 }
 
-            if divergence == "BEARISH" and rsi_5m > 50.0:
+            if divergence == "BEARISH" and rsi_5m > 48.0:
                 return {
                     "signal": "PUT",
                     "score": 75,
@@ -334,4 +335,6 @@ class AdaptiveTechnicalAnalysis:
             res["volatility_ratio"] = 1.0
         res["atr_ratio"] = res["volatility_ratio"]
 
+        res["primary_tf"] = res.get("primary_tf", "5m")
+        res["strategy_type"] = res.get("strategy_type", "TREND")
         return res
