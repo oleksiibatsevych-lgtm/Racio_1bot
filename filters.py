@@ -65,6 +65,7 @@ def check_pivot_level_proximity(
     resistances = [pivots_val.get("R1"), pivots_val.get("R2"), pivots_val.get("R3")]
     supports = [pivots_val.get("S1"), pivots_val.get("S2"), pivots_val.get("S3")]
 
+    # Забороняємо CALL якщо впритул до опору (щоб не купувати на хаях)
     if sig_val == "CALL":
         for r_level in resistances:
             if r_level and r_level > 0:
@@ -72,6 +73,7 @@ def check_pivot_level_proximity(
                 if 0 <= dist <= threshold_pct:
                     return False, f"Ціна занадто близько до опору R ({r_level:.5f})"
 
+    # Забороняємо PUT якщо впритул до підтримки (щоб не продавати на лоях)
     elif sig_val == "PUT":
         for s_level in supports:
             if s_level and s_level > 0:
@@ -92,7 +94,7 @@ def validate_signal_conditions(
     session_info: str = "Азія",
     atr_ratio: float = None,
 ) -> tuple[bool, str]:
-    """Фільтрація умов входу."""
+    """Фільтрація умов входу з пом'якшеними межами RSI (28 - 72)."""
     if isinstance(adx, dict):
         d = adx
         if d.get("signal") == "NONE":
@@ -110,20 +112,21 @@ def validate_signal_conditions(
         strat_val = str(strategy_type)
 
     if strat_val == "BOUNCE":
-        if adx_val > 32.0:
-            return False, f"Сильний тренд для відскоку (ADX {adx_val:.1f} > 32.0)"
-        if vol_val < 0.65:
-            return False, f"Занадто низька волатильність ({vol_val:.2f} < 0.65)"
+        if adx_val > 35.0:
+            return False, f"Сильний тренд для відскоку (ADX {adx_val:.1f} > 35.0)"
+        if vol_val < 0.55:
+            return False, f"Занадто низька волатильність ({vol_val:.2f} < 0.55)"
     else:
-        if adx_val < 20.0:
-            return False, f"Слабкий тренд (ADX {adx_val:.1f} < 20.0)"
-        if vol_val < 0.85:
-            return False, f"Слабкий імпульс ({vol_val:.2f} < 0.85)"
+        if adx_val < 18.0:
+            return False, f"Слабкий тренд (ADX {adx_val:.1f} < 18.0)"
+        if vol_val < 0.75:
+            return False, f"Слабкий імпульс ({vol_val:.2f} < 0.75)"
 
-    if sig_val == "CALL" and rsi_val > 66.0:
-        return False, f"Перекупленість (RSI {rsi_val:.1f} > 66)"
+    # Пом'якшені межі RSI замість 66 та 34
+    if sig_val == "CALL" and rsi_val > 72.0:
+        return False, f"Сильна перекупленість (RSI {rsi_val:.1f} > 72)"
 
-    if sig_val == "PUT" and rsi_val < 34.0:
-        return False, f"Перепроданість (RSI {rsi_val:.1f} < 34)"
+    if sig_val == "PUT" and rsi_val < 28.0:
+        return False, f"Сильна перепроданість (RSI {rsi_val:.1f} < 28)"
 
     return True, "OK"
