@@ -38,10 +38,10 @@ class TradingMLFilter:
                                    volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
         if self.model is None:
             base = 0.58
-            if rsi < 35 or rsi > 65: base += 0.06
-            if adx > 25: base += 0.05
+            if float(rsi) < 35 or float(rsi) > 65: base += 0.06
+            if float(adx) > 25: base += 0.05
             if divergence and str(divergence) != "NONE": base += 0.08
-            if wick_ratio >= 0.40: base += 0.05
+            if float(wick_ratio) >= 0.40: base += 0.05
             return min(round(base, 2), 0.95)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist)
@@ -49,6 +49,39 @@ class TradingMLFilter:
             return float(proba)
         except Exception:
             return 0.62
+
+    def predict_proba(self, features_dict_or_kwargs) -> float:
+        """Повертає ймовірність у відсотках (0.0 - 100.0)."""
+        if isinstance(features_dict_or_kwargs, dict):
+            f = features_dict_or_kwargs
+            rsi = f.get("rsi", 50)
+            adx = f.get("adx", 20)
+            bb_width = f.get("bb_width", 0.001)
+            session_code = f.get("session_code", 1)
+            hour = f.get("hour", 12)
+            divergence = f.get("divergence", "NONE")
+            dist_pivot = f.get("dist_pivot", 0.0)
+            volatility_ratio = f.get("volatility_ratio", f.get("atr_ratio", 1.0))
+            wick_ratio = f.get("wick_ratio", 0.0)
+            ema_dist = f.get("ema_dist", 0.0)
+        else:
+            rsi = 50
+            adx = 20
+            bb_width = 0.001
+            session_code = 1
+            hour = 12
+            divergence = "NONE"
+            dist_pivot = 0.0
+            volatility_ratio = 1.0
+            wick_ratio = 0.0
+            ema_dist = 0.0
+
+        p = self.predict_signal_probability(
+            rsi=rsi, adx=adx, bb_width=bb_width, session_code=session_code,
+            hour=hour, divergence=divergence, dist_pivot=dist_pivot,
+            volatility_ratio=volatility_ratio, wick_ratio=wick_ratio, ema_dist=ema_dist
+        )
+        return float(p * 100.0 if p <= 1.0 else p)
 
     def train_model(self):
         try:
