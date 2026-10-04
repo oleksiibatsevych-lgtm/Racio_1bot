@@ -9,6 +9,7 @@ yfinance>=0.2.52
 curl_cffi>=0.7.0
 google-generativeai
 matplotlib==3.9.0
+pandas-ta
 scikit-learn
 joblib
 Pillow>=10.0.0
