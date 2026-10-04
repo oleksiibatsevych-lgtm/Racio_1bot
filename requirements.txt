@@ -5,7 +5,7 @@ requests==2.32.3
 urllib3<2.0
 setuptools==69.5.1
 pandas>=2.0.0
-git+https://github.com/twopirllc/pandas-ta.git
+https://github.com/twopirllc/pandas-ta/archive/refs/heads/development.zip
 yfinance>=0.2.52
 curl_cffi>=0.7.0
 google-generativeai
