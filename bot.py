@@ -109,7 +109,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "https://finnhub.io/api/v1/forex/candle"
+    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
     params = {
         "symbol": str(symbol).strip(),
         "resolution": str(resolution).strip(),
