@@ -109,7 +109,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
+    url = "https://finnhub.io/api/v1/forex/candle"
     params = {
         "symbol": str(symbol).strip(),
         "resolution": str(resolution).strip(),
@@ -435,8 +435,9 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
-        if win_probability < 65.0:
-            log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 65.0%)"
+        # Поріг ML оптимізовано до 56.0%
+        if win_probability < 56.0:
+            log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 56.0%)"
             database.save_filtered_log(chat_id, log_msg)
             return False
 
@@ -471,7 +472,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         is_ai_busy = ai_res.get("confidence", 0) <= 1 or "недоступний" in ai_res.get("reason", "").lower()
 
         if is_ai_busy:
-            if win_probability >= 65.0:
+            if win_probability >= 56.0:
                 ai_decision = "YES"
                 ai_confidence = 7
                 ai_exp = exp_time
