@@ -137,11 +137,15 @@ class AdaptiveTechnicalAnalysis:
         pivots = self.calculate_pivots(df_daily if df_daily is not None else tf_dict.get("1h"))
         local_trend = self.get_trend(df_5m, span_val=10)
 
-        # 0. ПЕРЕВІРКА ПІВОТ-РІВНІВ (Сигнал на відскок у протилежному напрямку)
+        # Lookback Window (вікно пам'яті на 3 свічки для RSI та цін)
+        rsi_5m_min = float(df_5m['rsi'].iloc[-3:].min()) if len(df_5m) >= 3 else rsi_5m
+        rsi_5m_max = float(df_5m['rsi'].iloc[-3:].max()) if len(df_5m) >= 3 else rsi_5m
+
+        # 0. ПЕРЕВІРКА ПІВОТ-РІВНІВ (з порогом 0.0003 ~ 2-3 піпси та вікном пам'яті)
         supports = [pivots.get("S1"), pivots.get("S2"), pivots.get("S3")]
         for s_level in supports:
-            if s_level and s_level > 0 and abs(current_price - s_level) / current_price <= 0.0015:
-                if rsi_5m <= 42.0:
+            if s_level and s_level > 0 and abs(current_price - s_level) / current_price <= 0.0003:
+                if rsi_5m <= 42.0 or rsi_5m_min <= 42.0:
                     return {
                         "signal": "CALL",
                         "score": 85,
@@ -156,8 +160,8 @@ class AdaptiveTechnicalAnalysis:
 
         resistances = [pivots.get("R1"), pivots.get("R2"), pivots.get("R3")]
         for r_level in resistances:
-            if r_level and r_level > 0 and abs(r_level - current_price) / current_price <= 0.0015:
-                if rsi_5m >= 58.0:
+            if r_level and r_level > 0 and abs(r_level - current_price) / current_price <= 0.0003:
+                if rsi_5m >= 58.0 or rsi_5m_max >= 58.0:
                     return {
                         "signal": "PUT",
                         "score": 85,
@@ -170,13 +174,19 @@ class AdaptiveTechnicalAnalysis:
                         "suggested_exp": 5
                     }
 
-        # 1. МІКРО-ФЛЕТ (Скальпінг на 1m)
+        # 1. МІКРО-ФЛЕТ (Скальпінг на 1m з вікном пам'яті 3 свічки)
         if df_1m is not None and not df_1m.empty and 'rsi' in df_1m.columns:
             rsi_1m = float(df_1m['rsi'].iloc[-1])
+            rsi_1m_min = float(df_1m['rsi'].iloc[-3:].min()) if len(df_1m) >= 3 else rsi_1m
+            rsi_1m_max = float(df_1m['rsi'].iloc[-3:].max()) if len(df_1m) >= 3 else rsi_1m
+
             bb_lower_1m = float(df_1m['bb_lower'].iloc[-1]) if 'bb_lower' in df_1m.columns else 0.0
             bb_upper_1m = float(df_1m['bb_upper'].iloc[-1]) if 'bb_upper' in df_1m.columns else 0.0
-            
-            if bb_lower_1m > 0 and current_price <= bb_lower_1m and rsi_1m <= 30.0:
+
+            low_1m_3 = float(df_1m['low'].iloc[-3:].min()) if len(df_1m) >= 3 else current_price
+            high_1m_3 = float(df_1m['high'].iloc[-3:].max()) if len(df_1m) >= 3 else current_price
+
+            if bb_lower_1m > 0 and (current_price <= bb_lower_1m or low_1m_3 <= bb_lower_1m) and (rsi_1m <= 32.0 or rsi_1m_min <= 30.0):
                 return {
                     "signal": "CALL",
                     "score": 80,
@@ -188,7 +198,7 @@ class AdaptiveTechnicalAnalysis:
                     "reason": f"Мікро-флет 1m: Відскок від низу Боллінджера (RSI: {rsi_1m:.1f})",
                     "suggested_exp": 3
                 }
-            if bb_upper_1m > 0 and current_price >= bb_upper_1m and rsi_1m >= 70.0:
+            if bb_upper_1m > 0 and (current_price >= bb_upper_1m or high_1m_3 >= bb_upper_1m) and (rsi_1m >= 68.0 or rsi_1m_max >= 70.0):
                 return {
                     "signal": "PUT",
                     "score": 80,
@@ -201,9 +211,12 @@ class AdaptiveTechnicalAnalysis:
                     "suggested_exp": 3
                 }
 
-        # 2. СТАНДАРТНИЙ ФЛЕТ НА 5m
+        # 2. СТАНДАРТНИЙ ФЛЕТ НА 5m (з вікном пам'яті)
         if adx_5m < 22.0:
-            if bb_lower_5m > 0 and current_price <= bb_lower_5m * 1.0005 and rsi_5m <= 38.0:
+            low_5m_3 = float(df_5m['low'].iloc[-3:].min()) if len(df_5m) >= 3 else current_price
+            high_5m_3 = float(df_5m['high'].iloc[-3:].max()) if len(df_5m) >= 3 else current_price
+
+            if bb_lower_5m > 0 and (current_price <= bb_lower_5m * 1.0005 or low_5m_3 <= bb_lower_5m * 1.0005) and (rsi_5m <= 40.0 or rsi_5m_min <= 38.0):
                 return {
                     "signal": "CALL",
                     "score": 75,
@@ -216,7 +229,7 @@ class AdaptiveTechnicalAnalysis:
                     "suggested_exp": 5
                 }
 
-            if bb_upper_5m > 0 and current_price >= bb_upper_5m * 0.9995 and rsi_5m >= 62.0:
+            if bb_upper_5m > 0 and (current_price >= bb_upper_5m * 0.9995 or high_5m_3 >= bb_upper_5m * 0.9995) and (rsi_5m >= 60.0 or rsi_5m_max >= 62.0):
                 return {
                     "signal": "PUT",
                     "score": 75,
