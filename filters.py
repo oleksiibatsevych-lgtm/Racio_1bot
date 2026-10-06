@@ -46,7 +46,7 @@ def check_pivot_level_proximity(
     current_price=0.0,
     signal_type: str = "CALL",
     pivots: dict = None,
-    threshold_pct: float = 0.0015,
+    threshold_pct: float = 0.0003,  # Зменшено буфер відступу до ~2-3 піпсів
 ) -> tuple[bool, str]:
     """Перевірка наближеності до Pivot рівнів."""
     if isinstance(current_price, dict):
@@ -94,7 +94,7 @@ def validate_signal_conditions(
     session_info: str = "Азія",
     atr_ratio: float = None,
 ) -> tuple[bool, str]:
-    """Фільтрація умов входу з пом'якшеними межами RSI (28 - 72)."""
+    """Фільтрація умов входу з підвищеним лімітом ADX для відскоків та пом'якшеними межами RSI (28 - 72)."""
     if isinstance(adx, dict):
         d = adx
         if d.get("signal") == "NONE":
@@ -112,17 +112,19 @@ def validate_signal_conditions(
         strat_val = str(strategy_type)
 
     if strat_val == "BOUNCE":
-        if adx_val > 35.0:
-            return False, f"Сильний тренд для відскоку (ADX {adx_val:.1f} > 35.0)"
+        # Піднято ліміт ADX для відскоку з 35.0 до 42.0
+        if adx_val > 42.0:
+            return False, f"Занадто сильний тренд для відскоку (ADX {adx_val:.1f} > 42.0)"
         if vol_val < 0.55:
             return False, f"Занадто низька волатильність ({vol_val:.2f} < 0.55)"
     else:
+        # Для трендових угод високий ADX (> 30) вважається підтвердженням
         if adx_val < 18.0:
             return False, f"Слабкий тренд (ADX {adx_val:.1f} < 18.0)"
         if vol_val < 0.75:
             return False, f"Слабкий імпульс ({vol_val:.2f} < 0.75)"
 
-    # Пом'якшені межі RSI замість 66 та 34
+    # Пом'якшені межі RSI
     if sig_val == "CALL" and rsi_val > 72.0:
         return False, f"Сильна перекупленість (RSI {rsi_val:.1f} > 72)"
 
