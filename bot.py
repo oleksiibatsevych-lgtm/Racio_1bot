@@ -62,7 +62,7 @@ ml_filter = TradingMLFilter()
 
 last_sent_signals = {}
 MACRO_CACHE = {}
-CACHE_TTL = 900  # 15 хвилин
+CACHE_TTL = 900
 
 database.init_db()
 start_finnhub_ws()
@@ -109,7 +109,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "https://finnhub.io/api/v1/forex/candle"
+    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
     params = {
         "symbol": str(symbol).strip(),
         "resolution": str(resolution).strip(),
@@ -345,6 +345,11 @@ def process_signal_expiration(sig_id):
             f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>"
         )
 
+        # Додаємо інлайн-кнопку «🔍 Аналіз помилки» для збиткових чи інших закритих угод
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Аналіз помилки (ШІ)", callback_data=f"review_{sig_id}")]
+        ])
+
         orig_txt = sig_data.get("message_text", "")
         if orig_txt and "🏁 Результат" not in orig_txt:
             try:
@@ -353,6 +358,7 @@ def process_signal_expiration(sig_id):
                     message_id=sig_data["message_id"],
                     text=f"{orig_txt}\n{report_str}",
                     parse_mode="HTML",
+                    reply_markup=keyboard,
                 )
             except Exception:
                 bot.send_message(
@@ -360,6 +366,7 @@ def process_signal_expiration(sig_id):
                     text=f"🏁 <b>Результат угоди #{sig_id} ({ticker}):</b>\n{res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>",
                     parse_mode="HTML",
                     reply_to_message_id=sig_data["message_id"],
+                    reply_markup=keyboard,
                 )
 
     except Exception as e:
@@ -435,8 +442,9 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
-        if win_probability < 56.0:
-            log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 56.0%)"
+        # Знижено поріг ML з 56% до 50% для збільшення кількості сигналів
+        if win_probability < 50.0:
+            log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 50.0%)"
             database.save_filtered_log(chat_id, log_msg)
             return False
 
@@ -475,17 +483,17 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
                 "decision": "YES", 
                 "confidence": 7, 
                 "suggested_expiration": exp_time, 
-                "reason": "Миттєвий вхід (ШІ вимкнено для усунення Slippage)"
+                "reason": "Миттєвий вхід (ШІ вимкнено)"
             }
 
         is_ai_busy = ai_res.get("confidence", 0) <= 1 or "недоступний" in ai_res.get("reason", "").lower()
 
         if is_ai_busy:
-            if win_probability >= 56.0:
+            if win_probability >= 50.0:
                 ai_decision = "YES"
                 ai_confidence = 7
                 ai_exp = exp_time
-                ai_reason = f"Авто-схвалення (ML {win_probability:.1f}%), ШІ-затримку усунуто."
+                ai_reason = f"Авто-схвалення (ML {win_probability:.1f}%)."
             else:
                 log_msg = f"🤖 {pair_name}: ШІ недоступний, ML ({win_probability:.1f}%) недостатній."
                 database.save_filtered_log(chat_id, log_msg)
@@ -496,7 +504,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             ai_exp = ai_res.get("suggested_expiration", exp_time)
             ai_reason = ai_res.get("reason", "")
 
-            if ai_decision != "YES" or ai_confidence < 6:
+            if ai_decision != "YES" or ai_confidence < 5:
                 log_msg = f"🤖 {pair_name}: ШІ відхилив (Оцінка: {ai_confidence}/10). Причина: {ai_reason}"
                 database.save_filtered_log(chat_id, log_msg)
                 return False
@@ -587,7 +595,6 @@ def handle_message(update, context):
         losses = stats.get('losses', 0)
         pending = stats.get('pending', 0)
         
-        # Розраховуємо вінрейт лише для завершених угод
         finished = wins + losses
         winrate = (wins / finished * 100) if finished > 0 else 0.0
 
@@ -600,7 +607,6 @@ def handle_message(update, context):
             f"🏆 <b>Поточний вінрейт: {winrate:.1f}%</b>"
         )
         
-        # Інлайн-кнопки для керування
         keyboard = [
             [InlineKeyboardButton("🤖 Перенавчити ML модель", callback_data="retrain_ml")],
             [InlineKeyboardButton("🗑 Очистити статистику", callback_data="clear_stats_confirm")]
@@ -636,8 +642,38 @@ def handle_callback(update, context):
                 args=[chat_id, pair_name, ticker],
                 daemon=True,
             ).start()
+
+    elif data.startswith("review_"):
+        sig_id = int(data.replace("review_", ""))
+        query.edit_message_text(f"🔍 Формую ретроспективний ШІ-аналіз для угоди #{sig_id}... ⏳")
+        
+        def run_ai_review():
+            try:
+                sig_data = database.get_signal_by_id(sig_id)
+                if not sig_data:
+                    bot.send_message(chat_id=chat_id, text="❌ Дані угоди не знайдено.")
+                    return
+                
+                review_text = ai_advisor_instance.evaluate_closed_trade(sig_data)
+                database.save_signal_ai_review(sig_id, review_text)
+                
+                orig_text = sig_data.get("message_text", "")
+                result_part = f"\n🏁 <b>Результат:</b> {sig_data.get('result')} ({sig_data.get('pips')} п.)"
+                review_formatted = f"\n\n🤖 <b>Ретроспективний розбір ШІ:</b>\n<i>{review_text}</i>"
+                
+                full_updated_text = orig_text + result_part + review_formatted
+                
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=query.message.message_id,
+                    text=full_updated_text,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                bot.send_message(chat_id=chat_id, text=f"❌ Помилка формування аналізу: {e}")
+
+        threading.Thread(target=run_ai_review, daemon=True).start()
             
-    # --- НОВІ ОБРОБНИКИ ДЛЯ СТАТИСТИКИ ТА ML ---
     elif data == "clear_stats_confirm":
         keyboard = [
             [InlineKeyboardButton("⚠️ ТАК, ВИДАЛИТИ", callback_data="clear_stats_do")],
@@ -650,14 +686,14 @@ def handle_callback(update, context):
         
     elif data == "clear_stats_do":
         database.clear_all_stats()
-        query.edit_message_text("✅ Статистику успішно очищено! Починаємо з чистого аркуша.")
+        query.edit_message_text("✅ Статистику успішно очищено!")
         
     elif data == "cancel_action":
-        query.edit_message_text("Дію скасовано. Дані збережені.")
+        query.edit_message_text("Дію скасовано.")
         
     elif data == "retrain_ml":
         query.edit_message_text(
-            "🤖 Запускаю аналіз історії угод та перенавчання ML-моделі... ⏳\n<i>Це може зайняти кілька хвилин.</i>", 
+            "🤖 Запускаю перенавчання ML-моделі... ⏳", 
             parse_mode="HTML"
         )
         
