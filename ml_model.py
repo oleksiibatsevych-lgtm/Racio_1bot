@@ -37,21 +37,19 @@ class TradingMLFilter:
     def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0,
                                    volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
         if self.model is None:
-            base = 0.58
-            if float(rsi) < 35 or float(rsi) > 65: base += 0.06
-            if float(adx) > 25: base += 0.05
+            base = 0.55
+            if float(rsi) < 40 or float(rsi) > 60: base += 0.05
+            if float(adx) > 22: base += 0.05
             if divergence and str(divergence) != "NONE": base += 0.08
-            if float(wick_ratio) >= 0.40: base += 0.05
             return min(round(base, 2), 0.95)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist)
             proba = self.model.predict_proba(X)[0][1]
             return float(proba)
         except Exception:
-            return 0.62
+            return 0.58
 
     def predict_proba(self, features_dict_or_kwargs) -> float:
-        """Повертає ймовірність у відсотках (0.0 - 100.0)."""
         if isinstance(features_dict_or_kwargs, dict):
             f = features_dict_or_kwargs
             rsi = f.get("rsi", 50)
@@ -124,6 +122,6 @@ class TradingMLFilter:
             self.model = RandomForestClassifier(n_estimators=100, random_state=42)
             self.model.fit(X, y)
             self.save_model()
-            return True, f"✅ ШІ успішно перенавчено на реальній базі з {len(df)} угод!"
+            return True, f"✅ ШІ успішно перенавчено на базі з {len(df)} угод!"
         except Exception as e:
             return False, f"❌ Помилка навчання моделі: {e}"
