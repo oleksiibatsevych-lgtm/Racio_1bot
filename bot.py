@@ -336,6 +336,14 @@ def process_signal_expiration(sig_id):
 
         database.update_signal_result(sig_id, result, exit_price, pips)
 
+        # Автоматичне фонове перенавчання ML моделей після закриття кожних 5 угод
+        if result in ["WIN", "LOSS"]:
+            stats = database.get_stats()
+            finished = stats.get('wins', 0) + stats.get('losses', 0)
+            if finished >= 10 and finished % 5 == 0:
+                logger.info("🤖 Запускаю автоматичне перенавчання ML-моделі...")
+                threading.Thread(target=ml_filter.train_model, daemon=True).start()
+
         res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
         pips_str = f"+{pips}" if pips > 0 else f"{pips}"
 
@@ -345,7 +353,6 @@ def process_signal_expiration(sig_id):
             f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>"
         )
 
-        # Додаємо інлайн-кнопку «🔍 Аналіз помилки» для збиткових чи інших закритих угод
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔍 Аналіз помилки (ШІ)", callback_data=f"review_{sig_id}")]
         ])
@@ -442,9 +449,9 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
-        # Знижено поріг ML з 56% до 50% для збільшення кількості сигналів
-        if win_probability < 50.0:
-            log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 50.0%)"
+        # Знижено поріг ML до 45% для максимальної генерації якісних сигналів
+        if win_probability < 45.0:
+            log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 45.0%)"
             database.save_filtered_log(chat_id, log_msg)
             return False
 
@@ -489,9 +496,9 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         is_ai_busy = ai_res.get("confidence", 0) <= 1 or "недоступний" in ai_res.get("reason", "").lower()
 
         if is_ai_busy:
-            if win_probability >= 50.0:
+            if win_probability >= 45.0:
                 ai_decision = "YES"
-                ai_confidence = 7
+                ai_confidence = 6
                 ai_exp = exp_time
                 ai_reason = f"Авто-схвалення (ML {win_probability:.1f}%)."
             else:
@@ -504,6 +511,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             ai_exp = ai_res.get("suggested_expiration", exp_time)
             ai_reason = ai_res.get("reason", "")
 
+            # Знижено поріг проходження ШІ до >= 5
             if ai_decision != "YES" or ai_confidence < 5:
                 log_msg = f"🤖 {pair_name}: ШІ відхилив (Оцінка: {ai_confidence}/10). Причина: {ai_reason}"
                 database.save_filtered_log(chat_id, log_msg)
@@ -522,6 +530,8 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         )
 
         sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+        
+        # Передаємо всі технічні параметри у базу даних для коректного навчання ML
         sig_id = database.save_signal(
             chat_id=chat_id,
             message_id=sent_msg.message_id,
@@ -530,7 +540,14 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             entry_price=payload["current_price"],
             expiration_mins=ai_exp,
             message_text=msg_text,
-            timestamp_str=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp_str=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            rsi=payload.get("rsi"),
+            adx=payload.get("adx"),
+            bb_width=analysis.get("bb_width"),
+            session_code=s_code,
+            hour=s_hour,
+            divergence=payload.get("divergence"),
+            volatility_ratio=analysis.get("volatility_ratio")
         )
         schedule_signal_timer(sig_id, datetime.utcnow(), ai_exp)
         return True
