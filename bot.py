@@ -435,7 +435,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
-        # Поріг ML на рівні 56.0% зберігається як перевірений та ефективний
         if win_probability < 56.0:
             log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 56.0%)"
             database.save_filtered_log(chat_id, log_msg)
@@ -461,9 +460,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             "suggested_exp": exp_time,
         }
 
-        # ОПТИМІЗАЦІЯ SLIPPAGE (усунення затримок графіків та ШІ):
-        # Відмальовування 3 графіків через matplotlib займало 3-6 секунд.
-        # Якщо ключа Gemini немає (або ви його видалите з .env), цей блок миттєво пропускається.
         ai_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
         
         if ai_key:
@@ -586,14 +582,35 @@ def handle_message(update, context):
         update.message.reply_text("Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(buttons))
     elif text == "📈 Статистика":
         stats = database.get_stats()
+        total = stats.get('total', 0)
+        wins = stats.get('wins', 0)
+        losses = stats.get('losses', 0)
+        pending = stats.get('pending', 0)
+        
+        # Розраховуємо вінрейт лише для завершених угод
+        finished = wins + losses
+        winrate = (wins / finished * 100) if finished > 0 else 0.0
+
         msg = (
             f"📊 <b>Загальна статистика:</b>\n\n"
-            f"Всього сигналів: {stats.get('total', 0)}\n"
-            f"✅ Перемог (WIN): {stats.get('wins', 0)}\n"
-            f"❌ Збитків (LOSS): {stats.get('losses', 0)}\n"
-            f"⏳ В очікуванні: {stats.get('pending', 0)}"
+            f"Всього сигналів: {total}\n"
+            f"✅ Перемог (WIN): {wins}\n"
+            f"❌ Збитків (LOSS): {losses}\n"
+            f"⏳ В очікуванні: {pending}\n\n"
+            f"🏆 <b>Поточний вінрейт: {winrate:.1f}%</b>"
         )
-        update.message.reply_text(msg, parse_mode="HTML")
+        
+        # Інлайн-кнопки для керування
+        keyboard = [
+            [InlineKeyboardButton("🤖 Перенавчити ML модель", callback_data="retrain_ml")],
+            [InlineKeyboardButton("🗑 Очистити статистику", callback_data="clear_stats_confirm")]
+        ]
+        
+        update.message.reply_text(
+            msg, 
+            parse_mode="HTML", 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     elif text == "📋 Логи фільтру":
         logs = database.get_system_logs(chat_id)
         if not logs:
@@ -619,6 +636,44 @@ def handle_callback(update, context):
                 args=[chat_id, pair_name, ticker],
                 daemon=True,
             ).start()
+            
+    # --- НОВІ ОБРОБНИКИ ДЛЯ СТАТИСТИКИ ТА ML ---
+    elif data == "clear_stats_confirm":
+        keyboard = [
+            [InlineKeyboardButton("⚠️ ТАК, ВИДАЛИТИ", callback_data="clear_stats_do")],
+            [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_action")]
+        ]
+        query.edit_message_text(
+            "Ви впевнені, що хочете видалити всю статистику сигналів? Дія незворотня.", 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    elif data == "clear_stats_do":
+        database.clear_all_stats()
+        query.edit_message_text("✅ Статистику успішно очищено! Починаємо з чистого аркуша.")
+        
+    elif data == "cancel_action":
+        query.edit_message_text("Дію скасовано. Дані збережені.")
+        
+    elif data == "retrain_ml":
+        query.edit_message_text(
+            "🤖 Запускаю аналіз історії угод та перенавчання ML-моделі... ⏳\n<i>Це може зайняти кілька хвилин.</i>", 
+            parse_mode="HTML"
+        )
+        
+        def run_ml_retrain():
+            try:
+                success, info_msg = ml_filter.train_model()
+                status_icon = "✅" if success else "❌"
+                bot.send_message(
+                    chat_id=chat_id, 
+                    text=f"{status_icon} <b>Результат перенавчання:</b>\n\n📝 <i>{info_msg}</i>", 
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                bot.send_message(chat_id=chat_id, text=f"❌ Помилка перенавчання: {e}")
+                
+        threading.Thread(target=run_ml_retrain, daemon=True).start()
 
 
 if __name__ == "__main__":
