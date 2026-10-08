@@ -62,6 +62,7 @@ def init_db():
                 volatility_ratio NUMERIC,
                 wick_ratio NUMERIC,
                 ema_dist NUMERIC,
+                ai_review TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """
@@ -74,6 +75,15 @@ def init_db():
                 chat_id BIGINT,
                 log_text TEXT,
                 timestamp REAL
+            );
+        """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_prompts (
+                prompt_key VARCHAR(100) PRIMARY KEY,
+                prompt_text TEXT
             );
         """
         )
@@ -207,6 +217,54 @@ def update_signal_result(signal_id, result, exit_price, pips=0, status="CLOSED")
         logger.error(f"⚠️ Помилка оновлення сигналу #{signal_id}: {e}")
 
 
+def save_signal_ai_review(signal_id, review_text):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE signals SET ai_review = %s WHERE id = %s;", (review_text, signal_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка збереження AI-огляду угоди #{signal_id}: {e}")
+
+
+def get_system_prompt(prompt_key, default_text=""):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT prompt_text FROM system_prompts WHERE prompt_key = %s;", (prompt_key,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except Exception as e:
+        logger.error(f"⚠️ Помилка отримання системного промпту {prompt_key}: {e}")
+    return default_text
+
+
+def set_system_prompt(prompt_key, prompt_text):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO system_prompts (prompt_key, prompt_text)
+            VALUES (%s, %s)
+            ON CONFLICT (prompt_key) DO UPDATE SET prompt_text = EXCLUDED.prompt_text;
+        """,
+            (prompt_key, prompt_text),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"⚠️ Помилка збереження промпту {prompt_key}: {e}")
+        return False
+
+
 def get_stats():
     try:
         conn = get_connection()
@@ -276,7 +334,6 @@ def clear_filtered_logs(chat_id):
 
 
 def clear_all_stats():
-    """Скидає статистику сигналів та логи відхилень."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
