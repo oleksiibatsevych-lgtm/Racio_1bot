@@ -162,7 +162,7 @@ def save_signal(
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(f"✅ Збережено сигнал #{signal_id} для {ticker}")
+        logger.info(f"✅ Збережено сигнал #{signal_id} для {ticker} з усіма індикаторами.")
         return signal_id
     except Exception as e:
         logger.error(f"⚠️ Помилка збереження сигналу в БД: {e}")
@@ -227,6 +227,40 @@ def save_signal_ai_review(signal_id, review_text):
         conn.close()
     except Exception as e:
         logger.error(f"⚠️ Помилка збереження AI-огляду угоди #{signal_id}: {e}")
+
+
+def get_recent_trades_summary(limit=6) -> str:
+    """Формує вибірку останніх закритих WIN та LOSS угод для контекстного навчання ШІ."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            SELECT ticker, signal_type, result, pips, rsi, adx, divergence, expiration_mins
+            FROM signals 
+            WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
+            ORDER BY id DESC LIMIT %s;
+            """,
+            (limit,),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            return "Історія угод порожня."
+
+        summary_lines = []
+        for r in rows:
+            res_flag = "✅ WIN" if r["result"] == "WIN" else "❌ LOSS"
+            summary_lines.append(
+                f"- {r['ticker']} | {r['signal_type']} | {res_flag} ({r['pips']} pips) | "
+                f"Експірація: {r['expiration_mins']}хв | RSI: {r['rsi']}, ADX: {r['adx']}, Дивергенція: {r['divergence']}"
+            )
+        return "\n".join(summary_lines)
+    except Exception as e:
+        logger.error(f"⚠️ Помилка вибірки історії угод: {e}")
+        return "Не вдалося завантажити історію угод."
 
 
 def get_system_prompt(prompt_key, default_text=""):
