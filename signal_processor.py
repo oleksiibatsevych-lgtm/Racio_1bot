@@ -13,11 +13,11 @@ def process_and_filter_signal(
     adx = float(market_data.get("adx", 20.0))
     volatility_ratio = float(market_data.get("volatility_ratio", market_data.get("atr_ratio", 1.0)))
 
-    # 1. Розраховуємо динамічний час експірації
+    # 1. Розраховуємо динамічний час експірації (1-60 хв)
     calculated_exp = calculate_dynamic_expiration(market_data)
     market_data["suggested_exp"] = calculated_exp
 
-    # 2. Перевіряємо жорсткі фільтри ринку
+    # 2. Перевіряємо фільтри ринку
     is_valid, filter_reason = validate_signal_conditions(market_data)
 
     if not is_valid:
@@ -32,12 +32,12 @@ def process_and_filter_signal(
     # 4. Записуємо отримані параметри
     market_data["ai_confidence"] = ai_result.get("confidence", 0)
     market_data["ai_reason"] = html.escape(str(ai_result.get("reason", "")))
-    market_data["suggested_exp"] = ai_result.get(
-        "suggested_expiration", calculated_exp
-    )
+    
+    parsed_exp = int(ai_result.get("suggested_expiration", calculated_exp))
+    market_data["suggested_exp"] = max(1, min(60, parsed_exp))
 
-    # 5. Відкидаємо сигнали з оцінкою нижче 6
-    if ai_result.get("confidence", 0) < 6:
+    # 5. Відкидаємо сигнали з оцінкою нижче 5
+    if ai_result.get("confidence", 0) < 5:
         logger.info(
             f"⏭️ Сигнал для {pair_name} відхилено ШІ. Оцінка: {ai_result.get('confidence', 0)}/10"
         )
