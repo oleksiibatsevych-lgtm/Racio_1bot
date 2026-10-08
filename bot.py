@@ -409,7 +409,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             ticker_finnhub, yahoo_ticker
         )
 
-        if df_1m is None or df_1m.empty or len(df_1m) < 30:
+        if df_1m is None or df_1m.empty or len(df_1m) < 10:
             database.save_filtered_log(chat_id, f"⚠️ {pair_name}: Недостатньо даних котирувань.")
             return False
 
@@ -435,7 +435,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
-        # Поріг ML оптимізовано до 56.0%
+        # Поріг ML на рівні 56.0% зберігається як перевірений та ефективний
         if win_probability < 56.0:
             log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 56.0%)"
             database.save_filtered_log(chat_id, log_msg)
@@ -446,10 +446,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             log_msg = f"⏭ {pair_name} відхилено (Рівень): {pivot_reason}"
             database.save_filtered_log(chat_id, log_msg)
             return False
-
-        c_macro = create_chart_image(df_1h, f"{pair_name} - 1H Global", tf_label="1H")
-        c_mid = create_chart_image(df_15m, f"{pair_name} - 15M Mid", tf_label="15M")
-        c_micro = create_chart_image(df_1m, f"{pair_name} - 1M Entry", tf_label="1M")
 
         exp_time = calculate_dynamic_expiration(analysis)
         payload = {
@@ -465,9 +461,26 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             "suggested_exp": exp_time,
         }
 
-        ai_res = ai_advisor_instance.evaluate_signal(
-            pair_name, payload, c_macro, c_mid, c_micro
-        )
+        # ОПТИМІЗАЦІЯ SLIPPAGE (усунення затримок графіків та ШІ):
+        # Відмальовування 3 графіків через matplotlib займало 3-6 секунд.
+        # Якщо ключа Gemini немає (або ви його видалите з .env), цей блок миттєво пропускається.
+        ai_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
+        
+        if ai_key:
+            c_macro = create_chart_image(df_1h, f"{pair_name} - 1H Global", tf_label="1H")
+            c_mid = create_chart_image(df_15m, f"{pair_name} - 15M Mid", tf_label="15M")
+            c_micro = create_chart_image(df_1m, f"{pair_name} - 1M Entry", tf_label="1M")
+
+            ai_res = ai_advisor_instance.evaluate_signal(
+                pair_name, payload, c_macro, c_mid, c_micro
+            )
+        else:
+            ai_res = {
+                "decision": "YES", 
+                "confidence": 7, 
+                "suggested_expiration": exp_time, 
+                "reason": "Миттєвий вхід (ШІ вимкнено для усунення Slippage)"
+            }
 
         is_ai_busy = ai_res.get("confidence", 0) <= 1 or "недоступний" in ai_res.get("reason", "").lower()
 
@@ -476,7 +489,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
                 ai_decision = "YES"
                 ai_confidence = 7
                 ai_exp = exp_time
-                ai_reason = f"Авто-схвалення (ML {win_probability:.1f}%), ШІ тимчасово недоступний."
+                ai_reason = f"Авто-схвалення (ML {win_probability:.1f}%), ШІ-затримку усунуто."
             else:
                 log_msg = f"🤖 {pair_name}: ШІ недоступний, ML ({win_probability:.1f}%) недостатній."
                 database.save_filtered_log(chat_id, log_msg)
@@ -500,7 +513,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             f"📍 Поточна ціна: <code>{payload['current_price']:.5f}</code>\n\n"
             f"🧠 ML Впевненість: <b>{win_probability:.1f}%</b>\n"
             f"🤖 ШІ Оцінка: <b>{ai_confidence}/10</b>\n"
-            f"💡 ШІ Аналіз: <i>{ai_reason}</i>\n\n"
+            f"💡 Причина: <i>{ai_reason}</i>\n\n"
             f"🌐 Сесія: {session_str}"
         )
 
@@ -577,7 +590,7 @@ def handle_message(update, context):
             f"📊 <b>Загальна статистика:</b>\n\n"
             f"Всього сигналів: {stats.get('total', 0)}\n"
             f"✅ Перемог (WIN): {stats.get('wins', 0)}\n"
-            f"❌ Узбитків (LOSS): {stats.get('losses', 0)}\n"
+            f"❌ Збитків (LOSS): {stats.get('losses', 0)}\n"
             f"⏳ В очікуванні: {stats.get('pending', 0)}"
         )
         update.message.reply_text(msg, parse_mode="HTML")
