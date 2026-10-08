@@ -1,353 +1,207 @@
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
 
-
 class AdaptiveTechnicalAnalysis:
-    def __init__(self):
-        pass
-
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or df.empty or len(df) < 30:
+        if df is None or df.empty or len(df) < 14:
             return df
+        
+        # Нативний розрахунок RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        df['rsi'] = df['rsi'].fillna(50)
 
-        try:
-            df.ta.rsi(length=14, append=True)
-            df.ta.adx(length=14, append=True)
-            df.ta.bbands(length=20, std=2, append=True)
-            df.ta.atr(length=14, append=True)
-            
-            df.ta.ema(length=10, append=True)
-            df.ta.ema(length=50, append=True)
-            df.ta.ema(length=200, append=True)
+        # Лінії Боллінджера
+        sma = df['close'].rolling(window=20).mean()
+        std = df['close'].rolling(window=20).std()
+        df['bb_upper'] = sma + (std * 2)
+        df['bb_lower'] = sma - (std * 2)
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
+        df['bb_width'] = df['bb_width'].fillna(0.001)
 
-            if 'RSI_14' in df.columns:
-                df['rsi'] = df['RSI_14']
-            else:
-                df['rsi'] = 50.0
+        # Нативний розрахунок ATR та ADX
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        up_move = high - high.shift(1)
+        down_move = low.shift(1) - low
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=14).mean()
+        df['atr'] = atr.fillna(0.0010)
 
-            if 'ADX_14' in df.columns:
-                df['adx'] = df['ADX_14']
-            else:
-                df['adx'] = 20.0
+        plus_di = 100 * pd.Series(plus_dm, index=df.index).rolling(window=14).mean() / (atr + 1e-9)
+        minus_di = 100 * pd.Series(minus_dm, index=df.index).rolling(window=14).mean() / (atr + 1e-9)
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
+        df['adx'] = dx.rolling(window=14).mean().fillna(20)
 
-            bb_cols = [c for c in df.columns if 'BBL' in c]
-            if bb_cols:
-                df['bb_lower'] = df[bb_cols[0]]
-                df['bb_upper'] = df[[c for c in df.columns if 'BBU' in c][0]]
-                df['bb_middle'] = df[[c for c in df.columns if 'BBM' in c][0]]
-                df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
-
-            if 'ATR_14' in df.columns:
-                df['atr'] = df['ATR_14']
-                df['atr_sma'] = df['atr'].rolling(window=14).mean()
-                df['volatility_ratio'] = df['atr'] / df['atr_sma']
-                df['volatility_ratio'] = df['volatility_ratio'].fillna(1.0)
-            else:
-                df['volatility_ratio'] = 1.0
-
-        except Exception as e:
-            print(f"Помилка розрахунку індикаторів: {e}")
-
+        df['ema_10'] = df['close'].ewm(span=10, adjust=False).mean()
         return df
 
-    def get_trend(self, df: pd.DataFrame, span_val: int = 50) -> str:
+    def get_trend(self, df: pd.DataFrame, span_val=50) -> str:
         if df is None or df.empty or len(df) < span_val:
             return "NEUTRAL"
-
-        close = float(df['close'].iloc[-1])
-        try:
-            ema_col = f"EMA_{span_val}"
-            if ema_col in df.columns:
-                ema = float(df[ema_col].iloc[-1])
-            else:
-                ema = float(df['close'].ewm(span=span_val, adjust=False).mean().iloc[-1])
-
-            threshold = ema * 0.0005
-
-            if close > (ema + threshold):
-                return "BULLISH"
-            elif close < (ema - threshold):
-                return "BEARISH"
-        except Exception:
-            pass
+        ema = df['close'].ewm(span=span_val, adjust=False).mean()
+        current_price = df['close'].iloc[-1]
+        current_ema = ema.iloc[-1]
+        if current_price > current_ema * 1.001:
+            return "BULLISH"
+        elif current_price < current_ema * 0.999:
+            return "BEARISH"
         return "NEUTRAL"
 
-    def calculate_pivots(self, df: pd.DataFrame) -> dict:
-        pivots = {"P": 0.0, "R1": 0.0, "R2": 0.0, "R3": 0.0, "S1": 0.0, "S2": 0.0, "S3": 0.0}
-        if df is None or len(df) < 2:
-            return pivots
-
-        prev_candle = df.iloc[-2]
-        high = float(prev_candle['high'])
-        low = float(prev_candle['low'])
-        close = float(prev_candle['close'])
-
+    def calculate_pivots(self, df_macro: pd.DataFrame) -> dict:
+        if df_macro is None or df_macro.empty or len(df_macro) < 2:
+            return {"P": 0, "R1": 0, "S1": 0, "R2": 0, "S2": 0}
+        high = float(df_macro['high'].iloc[-2])
+        low = float(df_macro['low'].iloc[-2])
+        close = float(df_macro['close'].iloc[-2])
         p = (high + low + close) / 3
         r1 = (2 * p) - low
         s1 = (2 * p) - high
         r2 = p + (high - low)
         s2 = p - (high - low)
-        r3 = high + 2 * (p - low)
-        s3 = low - 2 * (high - p)
+        return {"P": p, "R1": r1, "S1": s1, "R2": r2, "S2": s2}
 
-        return {"P": p, "R1": r1, "R2": r2, "R3": r3, "S1": s1, "S2": s2, "S3": s3}
-
-    def check_divergence(self, df: pd.DataFrame) -> str:
-        if df is None or len(df) < 20 or 'rsi' not in df.columns:
+    def detect_divergence(self, df: pd.DataFrame) -> str:
+        if df is None or df.empty or 'rsi' not in df.columns or len(df) < 35:
             return "NONE"
+        
+        recent_prices = df['close'].iloc[-30:].values
+        recent_rsi = df['rsi'].iloc[-30:].values
+        
+        price_lower_low = recent_prices[-1] < recent_prices[-15] and recent_prices[-15] < recent_prices[0]
+        rsi_higher_low = recent_rsi[-1] > recent_rsi[-15] and recent_rsi[-15] > recent_rsi[0]
+        if price_lower_low and rsi_higher_low:
+            return "BULLISH_DIV"
 
-        recent_price_low = df['low'].iloc[-10:].min()
-        past_price_low = df['low'].iloc[-20:-10].min()
-        recent_rsi_low = df['rsi'].iloc[-10:].min()
-        past_rsi_low = df['rsi'].iloc[-20:-10].min()
-
-        recent_price_high = df['high'].iloc[-10:].max()
-        past_price_high = df['high'].iloc[-20:-10].max()
-        recent_rsi_high = df['rsi'].iloc[-10:].max()
-        past_rsi_high = df['rsi'].iloc[-20:-10].max()
-
-        if recent_price_low < past_price_low and recent_rsi_low > past_rsi_low:
-            return "BULLISH"
-        if recent_price_high > past_price_high and recent_rsi_high < past_rsi_high:
-            return "BEARISH"
+        price_higher_high = recent_prices[-1] > recent_prices[-15] and recent_prices[-15] > recent_prices[0]
+        rsi_lower_high = recent_rsi[-1] < recent_rsi[-15] and recent_rsi[-15] > recent_rsi[0]
+        if price_higher_high and rsi_lower_high:
+            return "BEARISH_DIV"
 
         return "NONE"
 
-    def generate_signal(
-        self, global_trend: str, mid_trend: str, df_daily: pd.DataFrame, tf_dict: dict
-    ) -> dict:
-        df_1m = tf_dict.get("1m")
-        df_3m = tf_dict.get("3m")
-        df_5m = tf_dict.get("5m")
+    def generate_signal(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame, global_trend: str, mid_trend: str, df_macro: pd.DataFrame=None) -> dict:
+        if df_5m is None or df_5m.empty or len(df_5m) < 15 or df_1m is None or df_1m.empty or len(df_1m) < 10:
+            return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5}
+
+        if global_trend != mid_trend and global_trend != 'NEUTRAL' and mid_trend != 'NEUTRAL':
+            return {'signal': 'HOLD', 'reason': 'Конфлікт трендів між 1h та 15m', 'suggested_exp': 5}
+
+        last_5m = df_5m.iloc[-1]
+        last_1m = df_1m.iloc[-1]
         
-        if df_5m is None or df_5m.empty or 'rsi' not in df_5m.columns:
-            return {"signal": "NONE", "score": 0, "reason": "Недостатньо даних (5m)"}
+        rsi_5m = float(last_5m.get('rsi', 50))
+        rsi_1m = float(last_1m.get('rsi', 50))
+        adx = float(last_5m.get('adx', 20))
+        atr = float(last_5m.get('atr', 0.001))
+        bb_upper = float(last_5m.get('bb_upper', 0))
+        bb_lower = float(last_5m.get('bb_lower', 0))
+        close_5m = float(last_5m['close'])
+        close_1m = float(last_1m['close'])
+        div = self.detect_divergence(df_5m)
 
-        current_price = float(df_5m['close'].iloc[-1])
-        rsi_5m = float(df_5m['rsi'].iloc[-1])
-        adx_5m = float(df_5m['adx'].iloc[-1]) if 'adx' in df_5m.columns else 20.0
-        
-        volatility_ratio = float(df_5m['volatility_ratio'].iloc[-1]) if 'volatility_ratio' in df_5m.columns else 1.0
+        pivots = self.calculate_pivots(df_macro) if df_macro is not None and not df_macro.empty else {}
+        r1 = pivots.get('R1', 0)
+        s1 = pivots.get('S1', 0)
 
-        bb_upper_5m = float(df_5m['bb_upper'].iloc[-1]) if 'bb_upper' in df_5m.columns else 0.0
-        bb_lower_5m = float(df_5m['bb_lower'].iloc[-1]) if 'bb_lower' in df_5m.columns else 0.0
-        
-        divergence = self.check_divergence(df_5m)
-        pivots = self.calculate_pivots(df_daily if df_daily is not None else tf_dict.get("1h"))
-        local_trend = self.get_trend(df_5m, span_val=10)
+        signal = 'HOLD'
+        reason_parts = []
+        expiration = 5
 
-        # Lookback Window (вікно пам'яті на 3 свічки для RSI та цін)
-        rsi_5m_min = float(df_5m['rsi'].iloc[-3:].min()) if len(df_5m) >= 3 else rsi_5m
-        rsi_5m_max = float(df_5m['rsi'].iloc[-3:].max()) if len(df_5m) >= 3 else rsi_5m
+        effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
 
-        # 0. ПЕРЕВІРКА ПІВОТ-РІВНІВ (з порогом 0.0003 ~ 2-3 піпси та вікном пам'яті)
-        supports = [pivots.get("S1"), pivots.get("S2"), pivots.get("S3")]
-        for s_level in supports:
-            if s_level and s_level > 0 and abs(current_price - s_level) / current_price <= 0.0003:
-                if rsi_5m <= 42.0 or rsi_5m_min <= 42.0:
-                    return {
-                        "signal": "CALL",
-                        "score": 85,
-                        "primary_tf": "5m",
-                        "strategy_type": "BOUNCE",
-                        "rsi": rsi_5m, "adx": adx_5m,
-                        "divergence": divergence,
-                        "volatility_ratio": volatility_ratio,
-                        "reason": f"Контртренд: Відскок ВГОРУ від підтримки Pivot ({s_level:.5f}) з RSI {rsi_5m:.1f}",
-                        "suggested_exp": 5
-                    }
-
-        resistances = [pivots.get("R1"), pivots.get("R2"), pivots.get("R3")]
-        for r_level in resistances:
-            if r_level and r_level > 0 and abs(r_level - current_price) / current_price <= 0.0003:
-                if rsi_5m >= 58.0 or rsi_5m_max >= 58.0:
-                    return {
-                        "signal": "PUT",
-                        "score": 85,
-                        "primary_tf": "5m",
-                        "strategy_type": "BOUNCE",
-                        "rsi": rsi_5m, "adx": adx_5m,
-                        "divergence": divergence,
-                        "volatility_ratio": volatility_ratio,
-                        "reason": f"Контртренд: Відскок ВНИЗ від опору Pivot ({r_level:.5f}) з RSI {rsi_5m:.1f}",
-                        "suggested_exp": 5
-                    }
-
-        # 1. МІКРО-ФЛЕТ (Скальпінг на 1m з вікном пам'яті 3 свічки)
-        if df_1m is not None and not df_1m.empty and 'rsi' in df_1m.columns:
-            rsi_1m = float(df_1m['rsi'].iloc[-1])
-            rsi_1m_min = float(df_1m['rsi'].iloc[-3:].min()) if len(df_1m) >= 3 else rsi_1m
-            rsi_1m_max = float(df_1m['rsi'].iloc[-3:].max()) if len(df_1m) >= 3 else rsi_1m
-
-            bb_lower_1m = float(df_1m['bb_lower'].iloc[-1]) if 'bb_lower' in df_1m.columns else 0.0
-            bb_upper_1m = float(df_1m['bb_upper'].iloc[-1]) if 'bb_upper' in df_1m.columns else 0.0
-
-            low_1m_3 = float(df_1m['low'].iloc[-3:].min()) if len(df_1m) >= 3 else current_price
-            high_1m_3 = float(df_1m['high'].iloc[-3:].max()) if len(df_1m) >= 3 else current_price
-
-            if bb_lower_1m > 0 and (current_price <= bb_lower_1m or low_1m_3 <= bb_lower_1m) and (rsi_1m <= 32.0 or rsi_1m_min <= 30.0):
-                return {
-                    "signal": "CALL",
-                    "score": 80,
-                    "primary_tf": "1m",
-                    "strategy_type": "BOUNCE",
-                    "rsi": rsi_1m, "adx": adx_5m,
-                    "divergence": divergence,
-                    "volatility_ratio": volatility_ratio,
-                    "reason": f"Мікро-флет 1m: Відскок від низу Боллінджера (RSI: {rsi_1m:.1f})",
-                    "suggested_exp": 3
-                }
-            if bb_upper_1m > 0 and (current_price >= bb_upper_1m or high_1m_3 >= bb_upper_1m) and (rsi_1m >= 68.0 or rsi_1m_max >= 70.0):
-                return {
-                    "signal": "PUT",
-                    "score": 80,
-                    "primary_tf": "1m",
-                    "strategy_type": "BOUNCE",
-                    "rsi": rsi_1m, "adx": adx_5m,
-                    "divergence": divergence,
-                    "volatility_ratio": volatility_ratio,
-                    "reason": f"Мікро-флет 1m: Відскок від верху Боллінджера (RSI: {rsi_1m:.1f})",
-                    "suggested_exp": 3
-                }
-
-        # 2. СТАНДАРТНИЙ ФЛЕТ НА 5m (з вікном пам'яті)
-        if adx_5m < 22.0:
-            low_5m_3 = float(df_5m['low'].iloc[-3:].min()) if len(df_5m) >= 3 else current_price
-            high_5m_3 = float(df_5m['high'].iloc[-3:].max()) if len(df_5m) >= 3 else current_price
-
-            if bb_lower_5m > 0 and (current_price <= bb_lower_5m * 1.0005 or low_5m_3 <= bb_lower_5m * 1.0005) and (rsi_5m <= 40.0 or rsi_5m_min <= 38.0):
-                return {
-                    "signal": "CALL",
-                    "score": 75,
-                    "primary_tf": "5m",
-                    "strategy_type": "BOUNCE",
-                    "rsi": rsi_5m, "adx": adx_5m,
-                    "divergence": divergence,
-                    "volatility_ratio": volatility_ratio,
-                    "reason": f"Флет 5m: Відскок від нижньої межі каналу (RSI: {rsi_5m:.1f})",
-                    "suggested_exp": 5
-                }
-
-            if bb_upper_5m > 0 and (current_price >= bb_upper_5m * 0.9995 or high_5m_3 >= bb_upper_5m * 0.9995) and (rsi_5m >= 60.0 or rsi_5m_max >= 62.0):
-                return {
-                    "signal": "PUT",
-                    "score": 75,
-                    "primary_tf": "5m",
-                    "strategy_type": "BOUNCE",
-                    "rsi": rsi_5m, "adx": adx_5m,
-                    "divergence": divergence,
-                    "volatility_ratio": volatility_ratio,
-                    "reason": f"Флет 5m: Відскок від верхньої межі каналу (RSI: {rsi_5m:.1f})",
-                    "suggested_exp": 5
-                }
-
-        # 3. ТРЕНДОВА СТРАТЕГІЯ
+        # Логіка успішного бота
+        if adx < 22:
+            if close_1m <= bb_lower and rsi_1m < 40:
+                signal = 'CALL'
+                expiration = 5
+                reason_parts.append("Флет: відскок знизу")
+                reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
+            elif close_1m >= bb_upper and rsi_1m > 60:
+                signal = 'PUT'
+                expiration = 5
+                reason_parts.append("Флет: відскок зверху")
+                reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
         else:
-            if global_trend == "BULLISH" and mid_trend == "BULLISH" and local_trend == "BULLISH":
-                if rsi_5m < 65.0:
-                    score = 70 + (15 if divergence == "BULLISH" else 0)
-                    return {
-                        "signal": "CALL",
-                        "score": score,
-                        "primary_tf": "5m",
-                        "strategy_type": "TREND",
-                        "rsi": rsi_5m, "adx": adx_5m,
-                        "divergence": divergence,
-                        "volatility_ratio": volatility_ratio,
-                        "reason": f"Тренд ВГОРУ: Синхронізація ТФ (ADX: {adx_5m:.1f})",
-                        "suggested_exp": 10
-                    }
+            if effective_trend == 'BULLISH' and rsi_5m < 65:
+                if (bb_lower > 0 and close_5m <= bb_lower * 1.003) or (s1 > 0 and close_5m <= s1 * 1.002) or (rsi_5m < 45) or (div == 'BULLISH_DIV'):
+                    signal = 'CALL'
+                    expiration = 10
+                    reason_parts.append(f"Тренд вгору (ADX: {adx:.1f})")
+                    if rsi_5m < 45: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
+                    if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
+            elif effective_trend == 'BEARISH' and rsi_5m > 35:
+                if (bb_upper > 0 and close_5m >= bb_upper * 0.997) or (r1 > 0 and close_5m >= r1 * 0.998) or (rsi_5m > 55) or (div == 'BEARISH_DIV'):
+                    signal = 'PUT'
+                    expiration = 10
+                    reason_parts.append(f"Тренд вниз (ADX: {adx:.1f})")
+                    if rsi_5m > 55: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
+                    if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
 
-            if global_trend == "BEARISH" and mid_trend == "BEARISH" and local_trend == "BEARISH":
-                if rsi_5m > 35.0:
-                    score = 70 + (15 if divergence == "BEARISH" else 0)
-                    return {
-                        "signal": "PUT",
-                        "score": score,
-                        "primary_tf": "5m",
-                        "strategy_type": "TREND",
-                        "rsi": rsi_5m, "adx": adx_5m,
-                        "divergence": divergence,
-                        "volatility_ratio": volatility_ratio,
-                        "reason": f"Тренд ВНИЗ: Синхронізація ТФ (ADX: {adx_5m:.1f})",
-                        "suggested_exp": 10
-                    }
+        reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
+        return {
+            'signal': signal,
+            'rsi': round(rsi_5m, 1),
+            'adx': round(adx, 1),
+            'atr': atr,
+            'divergence': div,
+            'suggested_exp': expiration,
+            'reason': reason
+        }
 
-            if divergence == "BULLISH" and rsi_5m < 52.0:
-                return {
-                    "signal": "CALL",
-                    "score": 75,
-                    "primary_tf": "5m",
-                    "strategy_type": "TREND",
-                    "rsi": rsi_5m, "adx": adx_5m,
-                    "divergence": divergence,
-                    "volatility_ratio": volatility_ratio,
-                    "reason": f"Трендова бичача дивергенція (ADX: {adx_5m:.1f})",
-                    "suggested_exp": 10
-                }
-
-            if divergence == "BEARISH" and rsi_5m > 48.0:
-                return {
-                    "signal": "PUT",
-                    "score": 75,
-                    "primary_tf": "5m",
-                    "strategy_type": "TREND",
-                    "rsi": rsi_5m, "adx": adx_5m,
-                    "divergence": divergence,
-                    "volatility_ratio": volatility_ratio,
-                    "reason": f"Трендова ведмежа дивергенція (ADX: {adx_5m:.1f})",
-                    "suggested_exp": 10
-                }
-
-        return {"signal": "NONE", "score": 0, "reason": "Умови не сформовані"}
-
-    def analyze_all_timeframes(
-        self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m
-    ) -> dict:
-        """Головний метод мультитаймфреймового аналізу."""
-        tf_dict = {}
-        for name, df in [
-            ("daily", df_daily),
-            ("1h", df_1h),
-            ("15m", df_15m),
-            ("5m", df_5m),
-            ("3m", df_3m),
-            ("1m", df_1m),
-        ]:
-            if df is not None and not df.empty:
-                tf_dict[name] = self.calculate_indicators(df.copy())
-            else:
-                tf_dict[name] = pd.DataFrame()
-
-        global_trend = self.get_trend(tf_dict.get("1h"), span_val=50)
-        mid_trend = self.get_trend(tf_dict.get("15m"), span_val=20)
+    def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m) -> dict:
+        """ Адаптер для сумісності з архітектурою бота №1 """
+        df_macro = df_1h
+        df_mid = df_15m
+        df_fast = df_5m
+        df_micro = df_1m
         
-        df_daily_calc = tf_dict.get("daily")
-        if df_daily_calc is None or df_daily_calc.empty:
-            df_daily_calc = tf_dict.get("1h")
-            
-        pivots = self.calculate_pivots(df_daily_calc)
+        global_trend = self.get_trend(df_macro, span_val=200)
+        mid_trend = self.get_trend(df_mid, span_val=50)
+        pivots = self.calculate_pivots(df_macro)
+        
+        df_indicators_5m = self.calculate_indicators(df_fast.copy()) if df_fast is not None and not df_fast.empty else pd.DataFrame()
+        df_indicators_1m = self.calculate_indicators(df_micro.copy()) if df_micro is not None and not df_micro.empty else pd.DataFrame()
+        
+        if df_indicators_5m.empty or df_indicators_1m.empty:
+            return {"signal": "NONE", "reason": "Недостатньо даних"}
 
-        res = self.generate_signal(global_trend, mid_trend, df_daily_calc, tf_dict)
+        sig_data = self.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
+        
+        current_price = float(df_indicators_5m['close'].iloc[-1]) if not df_indicators_5m.empty else 0.0
+        atr = float(df_indicators_5m['atr'].iloc[-1]) if not df_indicators_5m.empty and 'atr' in df_indicators_5m.columns else 0.001
+        volatility_ratio = (atr / current_price) * 1000 if current_price > 0 else 1.0
 
-        df_5m = tf_dict.get("5m")
-        if df_5m is not None and not df_5m.empty:
-            curr_price = float(df_5m["close"].iloc[-1])
-            bb_w = float(df_5m["bb_width"].iloc[-1]) if "bb_width" in df_5m.columns else 0.001
-        else:
-            curr_price = 0.0
-            bb_w = 0.001
+        res_signal = sig_data.get("signal", "HOLD")
+        if res_signal == "HOLD":
+            res_signal = "NONE"
 
-        res["current_price"] = curr_price
-        res["bb_width"] = bb_w
-        res["global_trend"] = global_trend
-        res["mid_trend"] = mid_trend
-        res["pivots"] = pivots
-        if "volatility_ratio" not in res:
-            res["volatility_ratio"] = 1.0
-        res["atr_ratio"] = res["volatility_ratio"]
-
-        res["primary_tf"] = res.get("primary_tf", "5m")
-        res["strategy_type"] = res.get("strategy_type", "TREND")
+        res = {
+            "signal": res_signal,
+            "reason": sig_data.get("reason", "Умови не виконано"),
+            "rsi": sig_data.get("rsi", 50),
+            "adx": sig_data.get("adx", 20),
+            "atr": atr,
+            "volatility_ratio": volatility_ratio,
+            "atr_ratio": volatility_ratio,
+            "divergence": sig_data.get("divergence", "NONE"),
+            "suggested_exp": sig_data.get("suggested_exp", 5),
+            "global_trend": global_trend,
+            "mid_trend": mid_trend,
+            "pivots": pivots,
+            "current_price": current_price,
+            "bb_width": float(df_indicators_5m['bb_width'].iloc[-1]) if not df_indicators_5m.empty and 'bb_width' in df_indicators_5m.columns else 0.001,
+        }
         return res
