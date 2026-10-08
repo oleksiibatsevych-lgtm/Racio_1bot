@@ -4,6 +4,7 @@ import os
 import google.api_core.exceptions
 import google.generativeai as genai
 from PIL import Image
+import database
 
 logger = logging.getLogger(__name__)
 
@@ -15,14 +16,12 @@ class AITradingAdvisor:
             genai.configure(api_key=self.api_key.strip())
 
     def get_available_models(self) -> list:
-        """Динамічно отримує список усіх доступних моделей з Google API."""
         try:
             available_models = []
             for m in genai.list_models():
                 if "generateContent" in m.supported_generation_methods:
                     available_models.append(m.name)
 
-            # Пріоритетизуємо швидші моделі (flash попереду)
             available_models.sort(
                 key=lambda name: (
                     0 if "flash" in name else (1 if "pro" in name else 2)
@@ -33,7 +32,6 @@ class AITradingAdvisor:
         except Exception as e:
             logger.warning(f"⚠️ Не вдалося отримати список моделей через API: {e}")
 
-        # Резервний список на випадок тимчасового збою опитування API
         return [
             "gemini-1.5-flash",
             "gemini-1.5-flash-latest",
@@ -61,9 +59,9 @@ class AITradingAdvisor:
                 "reason": "GEMINI_API_KEY не налаштовано",
             }
 
-        prompt = f"""
+        default_prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
-        Цей сигнал ВЖЕ пройшов попередній відбір технічними індикаторами та ML-моделлю (поріг >56%).
+        Цей сигнал ВЖЕ пройшов попередній відбір технічними індикаторами та ML-моделлю (поріг >50%).
         
         Параметри сигналу:
         - Напрямок: {payload.get('signal')}
@@ -78,7 +76,7 @@ class AITradingAdvisor:
         - Рекомендована експірація: {suggested_exp} хв
 
         Оціни доцільність входу в угоду та підтвердь або скоригуй час експірації.
-        Оскільки сигнал вже попередньо перевірено математичною моделлю, підтверджуй входження ("YES" з оцінкою confidence >= 6-7 балів), якщо на графіках та параметрах немає ОЧЕВИДНОГО критичного протиріччя.
+        Підтверджуй входження ("YES" з оцінкою confidence >= 6-7 балів), якщо немає очевидного критичного протиріччя.
 
         Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи обгорток markdown:
         {{
@@ -89,6 +87,8 @@ class AITradingAdvisor:
         }}
         """
 
+        prompt = database.get_system_prompt("signal_evaluation_prompt", default_prompt)
+        
         content_parts = [prompt]
         for chart in [macro_chart, mid_chart, micro_chart]:
             if chart:
@@ -109,13 +109,8 @@ class AITradingAdvisor:
                 )
                 if response and response.text:
                     response_text = response.text
-                    logger.info(f"✅ Успішна відповідь від ШІ-моделі: {model_name}")
                     break
-            except google.api_core.exceptions.ResourceExhausted:
-                logger.warning(f"⚠️ Квота вичерпана для моделі {model_name}.")
-                continue
-            except Exception as e:
-                logger.warning(f"⚠️ Модель {model_name} недоступна: {e}")
+            except Exception:
                 continue
 
         if not response_text:
@@ -123,7 +118,7 @@ class AITradingAdvisor:
                 "decision": "NO",
                 "confidence": 0,
                 "suggested_expiration": suggested_exp,
-                "reason": "ШІ недоступний (усі моделі зайняті або перевищено квоту)",
+                "reason": "ШІ недоступний",
             }
 
         try:
@@ -144,13 +139,50 @@ class AITradingAdvisor:
                 "reason": str(result.get("reason", "ШІ не надав детального пояснення")),
             }
         except Exception as e:
-            logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}. Текст: {response_text}")
+            logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}")
             return {
                 "decision": "NO",
                 "confidence": 0,
                 "suggested_expiration": suggested_exp,
-                "reason": "Помилка обробки відповіді ШІ (некоректний JSON)",
+                "reason": "Помилка обробки відповіді ШІ",
             }
+
+    def evaluate_closed_trade(self, sig_data: dict) -> str:
+        """Ретроспективний розбір завершеної угоди (зокрема збиткової)."""
+        if not self.api_key:
+            return "❌ GEMINI_API_KEY не налаштовано для ретроспективного аналізу."
+
+        default_review_prompt = f"""
+        Ти експерт-трейдер та ризик-менеджер. Проведи ретроспективний розбір закритих бінарних опціонів/угоди.
+        
+        Параметри угоди:
+        - Актив: {sig_data.get('ticker')}
+        - Напрямок: {sig_data.get('signal_type')}
+        - Ціна входу: {sig_data.get('entry_price')}
+        - Ціна виходу (закриття): {sig_data.get('exit_price')}
+        - Результат: {sig_data.get('result')} ({sig_data.get('pips')} пунктів)
+        - Тривалість експірації: {sig_data.get('expiration_mins')} хв
+        - RSI на момент входу: {sig_data.get('rsi')}
+        - ADX: {sig_data.get('adx')}
+        - Дивергенція: {sig_data.get('divergence')}
+        - Початкова причина входу: {sig_data.get('message_text')}
+
+        Дай короткий, чіткий професійний аналіз українською мовою: чому угода закрилася з таким результатом (наприклад: передчасна/запізніла експірація, хибний пробій рівня, протитрендовий рух чи ринковий шум) та що варто врахувати в майбутньому. Зроби висновок у 3-4 реченнях без зайвої "води".
+        """
+
+        prompt = database.get_system_prompt("trade_review_prompt", default_review_prompt)
+        models_to_try = self.get_available_models()
+
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt, request_options={"timeout": 12})
+                if response and response.text:
+                    return response.text.strip()
+            except Exception:
+                continue
+
+        return "⚠️ Не вдалося отримати ретроспективний звіт від ШІ через зайнятість моделі."
 
 
 ai_advisor_instance = AITradingAdvisor()
