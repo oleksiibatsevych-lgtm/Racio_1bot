@@ -89,14 +89,32 @@ class AdaptiveTechnicalAnalysis:
 
         return "NONE"
 
-    def generate_signal(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame, global_trend: str, mid_trend: str, df_macro: pd.DataFrame=None) -> dict:
+    def calculate_flexible_expiration(self, adx: float, bb_width: float, div: str, global_trend: str, mid_trend: str) -> int:
+        """
+        Динамічний розрахунок експірації в діапазоні від 1 до 60 хвилин.
+        """
+        if bb_width > 0.005 and adx < 18:
+            exp = int(np.clip(round(bb_width * 500), 1, 4))
+        elif adx < 25:
+            exp = 5
+        elif 25 <= adx < 35:
+            exp = 10 if global_trend == mid_trend else 7
+        elif 35 <= adx < 45:
+            exp = 15
+        else:
+            exp = 30
+
+        if div != "NONE":
+            exp = min(60, exp + 15)
+
+        if global_trend != "NEUTRAL" and global_trend == mid_trend and adx > 30:
+            exp = min(60, int(exp * 1.5))
+
+        return int(max(1, min(60, exp)))
+
+    def generate_signal(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame, global_trend: str, mid_trend: str, df_macro: pd.DataFrame=None, df_3m: pd.DataFrame=None) -> dict:
         if df_5m is None or df_5m.empty or len(df_5m) < 15 or df_1m is None or df_1m.empty or len(df_1m) < 10:
             return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5}
-
-        # Гнучкий фільтр трендів: дозволяємо торгівлю, якщо хоча б один тренд нейтральний
-        if global_trend != mid_trend and global_trend != 'NEUTRAL' and mid_trend != 'NEUTRAL':
-            # Замість жорсткого блокування пом'якшуємо перевірку або даємо нейтральний прохід
-            pass
 
         last_5m = df_5m.iloc[-1]
         last_1m = df_1m.iloc[-1]
@@ -119,38 +137,45 @@ class AdaptiveTechnicalAnalysis:
         signal = 'HOLD'
         reason_parts = []
         
-        # Динамічний вибір часу експірації залежно від волатильності (atr) та ширини Боллінджера
-        if bb_width > 0.004 or adx < 20:
-            expiration = 3  # Швидкі імпульси / висока волатильність або флет
-        elif adx > 30:
-            expiration = 10 # Сильний тренд потребує більшого часу відпрацювання
-        else:
-            expiration = 5  # Стандартний час
-
+        expiration = self.calculate_flexible_expiration(adx, bb_width, div, global_trend, mid_trend)
         effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
 
+        # Пом'якшені умови RSI для збільшення кількості сигналів
         if adx < 25:
-            if close_1m <= bb_lower and rsi_1m < 42:
+            if close_1m <= bb_lower or rsi_1m < 46:
                 signal = 'CALL'
                 reason_parts.append("Флет: відскок знизу")
                 reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
-            elif close_1m >= bb_upper and rsi_1m > 58:
+            elif close_1m >= bb_upper or rsi_1m > 54:
                 signal = 'PUT'
                 reason_parts.append("Флет: відскок зверху")
                 reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
         else:
-            if effective_trend == 'BULLISH' and rsi_5m < 70:
-                if (bb_lower > 0 and close_5m <= bb_lower * 1.004) or (s1 > 0 and close_5m <= s1 * 1.003) or (rsi_5m < 48) or (div == 'BULLISH_DIV'):
+            if effective_trend == 'BULLISH' and rsi_5m < 72:
+                if (bb_lower > 0 and close_5m <= bb_lower * 1.004) or (s1 > 0 and close_5m <= s1 * 1.003) or (rsi_5m < 50) or (div == 'BULLISH_DIV'):
                     signal = 'CALL'
                     reason_parts.append(f"Тренд вгору (ADX: {adx:.1f})")
-                    if rsi_5m < 48: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
+                    if rsi_5m < 50: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
                     if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
-            elif effective_trend == 'BEARISH' and rsi_5m > 30:
-                if (bb_upper > 0 and close_5m >= bb_upper * 0.996) or (r1 > 0 and close_5m >= r1 * 0.997) or (rsi_5m > 52) or (div == 'BEARISH_DIV'):
+            elif effective_trend == 'BEARISH' and rsi_5m > 28:
+                if (bb_upper > 0 and close_5m >= bb_upper * 0.996) or (r1 > 0 and close_5m >= r1 * 0.997) or (rsi_5m > 50) or (div == 'BEARISH_DIV'):
                     signal = 'PUT'
                     reason_parts.append(f"Тренд вниз (ADX: {adx:.1f})")
-                    if rsi_5m > 52: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
+                    if rsi_5m > 50: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
+
+        # Перевірка 3M таймфрейму, якщо на 5M сигнал відсутній
+        if signal == 'HOLD' and df_3m is not None and not df_3m.empty and len(df_3m) >= 10:
+            last_3m = df_3m.iloc[-1]
+            rsi_3m = float(last_3m.get('rsi', 50))
+            if rsi_3m < 38:
+                signal = 'CALL'
+                reason_parts.append("Скальпінг 3M: імпульс перепроданості")
+                expiration = max(1, min(60, int(expiration // 1.5)))
+            elif rsi_3m > 62:
+                signal = 'PUT'
+                reason_parts.append("Скальпінг 3M: імпульс перекупленості")
+                expiration = max(1, min(60, int(expiration // 1.5)))
 
         reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
         return {
@@ -174,12 +199,13 @@ class AdaptiveTechnicalAnalysis:
         pivots = self.calculate_pivots(df_macro)
         
         df_indicators_5m = self.calculate_indicators(df_fast.copy()) if df_fast is not None and not df_fast.empty else pd.DataFrame()
+        df_indicators_3m = self.calculate_indicators(df_3m.copy()) if df_3m is not None and not df_3m.empty else pd.DataFrame()
         df_indicators_1m = self.calculate_indicators(df_micro.copy()) if df_micro is not None and not df_micro.empty else pd.DataFrame()
         
         if df_indicators_5m.empty or df_indicators_1m.empty:
             return {"signal": "NONE", "reason": "Недостатньо даних"}
 
-        sig_data = self.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro)
+        sig_data = self.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro, df_indicators_3m)
         
         current_price = float(df_indicators_5m['close'].iloc[-1]) if not df_indicators_5m.empty else 0.0
         atr = float(df_indicators_5m['atr'].iloc[-1]) if not df_indicators_5m.empty and 'atr' in df_indicators_5m.columns else 0.001
