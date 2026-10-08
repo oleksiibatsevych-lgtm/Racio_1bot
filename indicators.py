@@ -6,7 +6,6 @@ class AdaptiveTechnicalAnalysis:
         if df is None or df.empty or len(df) < 14:
             return df
         
-        # Нативний розрахунок RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -14,7 +13,6 @@ class AdaptiveTechnicalAnalysis:
         df['rsi'] = 100 - (100 / (1 + rs))
         df['rsi'] = df['rsi'].fillna(50)
 
-        # Лінії Боллінджера
         sma = df['close'].rolling(window=20).mean()
         std = df['close'].rolling(window=20).std()
         df['bb_upper'] = sma + (std * 2)
@@ -22,7 +20,6 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
 
-        # Нативний розрахунок ATR та ADX
         high = df['high']
         low = df['low']
         close = df['close']
@@ -96,8 +93,10 @@ class AdaptiveTechnicalAnalysis:
         if df_5m is None or df_5m.empty or len(df_5m) < 15 or df_1m is None or df_1m.empty or len(df_1m) < 10:
             return {'signal': 'HOLD', 'reason': 'Мало даних', 'suggested_exp': 5}
 
+        # Гнучкий фільтр трендів: дозволяємо торгівлю, якщо хоча б один тренд нейтральний
         if global_trend != mid_trend and global_trend != 'NEUTRAL' and mid_trend != 'NEUTRAL':
-            return {'signal': 'HOLD', 'reason': 'Конфлікт трендів між 1h та 15m', 'suggested_exp': 5}
+            # Замість жорсткого блокування пом'якшуємо перевірку або даємо нейтральний прохід
+            pass
 
         last_5m = df_5m.iloc[-1]
         last_1m = df_1m.iloc[-1]
@@ -108,6 +107,7 @@ class AdaptiveTechnicalAnalysis:
         atr = float(last_5m.get('atr', 0.001))
         bb_upper = float(last_5m.get('bb_upper', 0))
         bb_lower = float(last_5m.get('bb_lower', 0))
+        bb_width = float(last_5m.get('bb_width', 0.001))
         close_5m = float(last_5m['close'])
         close_1m = float(last_1m['close'])
         div = self.detect_divergence(df_5m)
@@ -118,36 +118,38 @@ class AdaptiveTechnicalAnalysis:
 
         signal = 'HOLD'
         reason_parts = []
-        expiration = 5
+        
+        # Динамічний вибір часу експірації залежно від волатильності (atr) та ширини Боллінджера
+        if bb_width > 0.004 or adx < 20:
+            expiration = 3  # Швидкі імпульси / висока волатильність або флет
+        elif adx > 30:
+            expiration = 10 # Сильний тренд потребує більшого часу відпрацювання
+        else:
+            expiration = 5  # Стандартний час
 
         effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
 
-        # Логіка успішного бота
-        if adx < 22:
-            if close_1m <= bb_lower and rsi_1m < 40:
+        if adx < 25:
+            if close_1m <= bb_lower and rsi_1m < 42:
                 signal = 'CALL'
-                expiration = 5
                 reason_parts.append("Флет: відскок знизу")
                 reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
-            elif close_1m >= bb_upper and rsi_1m > 60:
+            elif close_1m >= bb_upper and rsi_1m > 58:
                 signal = 'PUT'
-                expiration = 5
                 reason_parts.append("Флет: відскок зверху")
                 reason_parts.append(f"RSI 1m ({rsi_1m:.1f})")
         else:
-            if effective_trend == 'BULLISH' and rsi_5m < 65:
-                if (bb_lower > 0 and close_5m <= bb_lower * 1.003) or (s1 > 0 and close_5m <= s1 * 1.002) or (rsi_5m < 45) or (div == 'BULLISH_DIV'):
+            if effective_trend == 'BULLISH' and rsi_5m < 70:
+                if (bb_lower > 0 and close_5m <= bb_lower * 1.004) or (s1 > 0 and close_5m <= s1 * 1.003) or (rsi_5m < 48) or (div == 'BULLISH_DIV'):
                     signal = 'CALL'
-                    expiration = 10
                     reason_parts.append(f"Тренд вгору (ADX: {adx:.1f})")
-                    if rsi_5m < 45: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
+                    if rsi_5m < 48: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
                     if div == 'BULLISH_DIV': reason_parts.append("Бичача дивергенція")
-            elif effective_trend == 'BEARISH' and rsi_5m > 35:
-                if (bb_upper > 0 and close_5m >= bb_upper * 0.997) or (r1 > 0 and close_5m >= r1 * 0.998) or (rsi_5m > 55) or (div == 'BEARISH_DIV'):
+            elif effective_trend == 'BEARISH' and rsi_5m > 30:
+                if (bb_upper > 0 and close_5m >= bb_upper * 0.996) or (r1 > 0 and close_5m >= r1 * 0.997) or (rsi_5m > 52) or (div == 'BEARISH_DIV'):
                     signal = 'PUT'
-                    expiration = 10
                     reason_parts.append(f"Тренд вниз (ADX: {adx:.1f})")
-                    if rsi_5m > 55: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
+                    if rsi_5m > 52: reason_parts.append(f"Корекція RSI ({rsi_5m:.1f})")
                     if div == 'BEARISH_DIV': reason_parts.append("Ведмежа дивергенція")
 
         reason = " + ".join(reason_parts) if reason_parts else "Умови не виконано"
@@ -162,7 +164,6 @@ class AdaptiveTechnicalAnalysis:
         }
 
     def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m) -> dict:
-        """ Адаптер для сумісності з архітектурою бота №1 """
         df_macro = df_1h
         df_mid = df_15m
         df_fast = df_5m
