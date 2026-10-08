@@ -59,11 +59,17 @@ class AITradingAdvisor:
                 "reason": "GEMINI_API_KEY не налаштовано",
             }
 
+        # Отримання вибірки закритих WIN/LOSS угод для Few-Shot Prompting
+        recent_history = database.get_recent_trades_summary(limit=6)
+
         default_prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
-        Цей сигнал ВЖЕ пройшов попередній відбір технічними індикаторами та ML-моделлю (поріг >50%).
+        Цей сигнал пройшов попередній відбір технічними індикаторами та ML-моделлю.
+
+        ІСТОРІЯ ОСТАННІХ УГОД СИСТЕМИ (Використовуй для порівняння паттернів WIN/LOSS):
+        {recent_history}
         
-        Параметри сигналу:
+        Параметри поточного сигналу:
         - Напрямок: {payload.get('signal')}
         - Поточна ціна: {payload.get('current_price')}
         - RSI: {payload.get('rsi')}
@@ -73,16 +79,18 @@ class AITradingAdvisor:
         - Дивергенція: {payload.get('divergence', 'NONE')}
         - Технічна причина: {payload.get('reason')}
         - ATR Ratio: {payload.get('atr_ratio')}
-        - Рекомендована експірація: {suggested_exp} хв
+        - Початкова рекомендація експірації: {suggested_exp} хв
 
-        Оціни доцільність входу в угоду та підтвердь або скоригуй час експірації.
-        Підтверджуй входження ("YES" з оцінкою confidence >= 6-7 балів), якщо немає очевидного критичного протиріччя.
+        Завдання:
+        1. Оціни доцільність входу в угоду ("YES" або "NO").
+        2. Вкажи динамічний час експірації у хвилинах ВІД 1 ДО 60 ХВИЛИН (наприклад: 1, 3, 5, 12, 20, 45, 60), враховуючи силу тренду та волатильність.
+        3. Підтверджуй вхід ("YES" з оцінкою confidence >= 5), якщо немає критичного протиріччя з трендом.
 
         Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи обгорток markdown:
         {{
             "decision": "YES" або "NO",
             "confidence": <число від 1 до 10>,
-            "suggested_expiration": <число в хвилинах>,
+            "suggested_expiration": <число від 1 до 60>,
             "reason": "<коротке обґрунтування українською мовою>"
         }}
         """
@@ -132,10 +140,13 @@ class AITradingAdvisor:
             clean_text = clean_text.strip()
 
             result = json.loads(clean_text)
+            parsed_exp = int(result.get("suggested_expiration", suggested_exp))
+            parsed_exp = max(1, min(60, parsed_exp))
+
             return {
                 "decision": str(result.get("decision", "NO")).upper(),
                 "confidence": int(result.get("confidence", 0)),
-                "suggested_expiration": int(result.get("suggested_expiration", suggested_exp)),
+                "suggested_expiration": parsed_exp,
                 "reason": str(result.get("reason", "ШІ не надав детального пояснення")),
             }
         except Exception as e:
@@ -148,7 +159,7 @@ class AITradingAdvisor:
             }
 
     def evaluate_closed_trade(self, sig_data: dict) -> str:
-        """Ретроспективний розбір завершеної угоди (зокрема збиткової)."""
+        """Ретроспективний розбір завершеної угоди (WIN/LOSS)."""
         if not self.api_key:
             return "❌ GEMINI_API_KEY не налаштовано для ретроспективного аналізу."
 
@@ -167,7 +178,7 @@ class AITradingAdvisor:
         - Дивергенція: {sig_data.get('divergence')}
         - Початкова причина входу: {sig_data.get('message_text')}
 
-        Дай короткий, чіткий професійний аналіз українською мовою: чому угода закрилася з таким результатом (наприклад: передчасна/запізніла експірація, хибний пробій рівня, протитрендовий рух чи ринковий шум) та що варто врахувати в майбутньому. Зроби висновок у 3-4 реченнях без зайвої "води".
+        Дай короткий, чіткий професійний аналіз українською мовою: чому угода закрилася з таким результатом та що варто врахувати в майбутньому. Зроби висновок у 3-4 реченнях.
         """
 
         prompt = database.get_system_prompt("trade_review_prompt", default_review_prompt)
