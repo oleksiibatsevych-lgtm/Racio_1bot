@@ -2,6 +2,7 @@ import html
 import io
 import logging
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -76,6 +77,16 @@ def make_progress_bar(val_pct):
     return f"[{filled}{empty}]"
 
 
+def clean_ai_html(text_val: str) -> str:
+    """Очищає та безпечно форматує текст під Telegram HTML."""
+    if not text_val:
+        return ""
+    txt = html.escape(str(text_val))
+    txt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', txt)
+    txt = re.sub(r'\*(.*?)\*', r'<i>\1</i>', txt)
+    return txt
+
+
 def parse_dt(dt_val):
     if isinstance(dt_val, datetime):
         return dt_val
@@ -117,7 +128,7 @@ def fetch_finnhub_candles(symbol, resolution="1", count_candles=500):
     else:
         start_time = end_time - (count_candles * 300)
 
-    url = "[https://finnhub.io/api/v1/forex/candle](https://finnhub.io/api/v1/forex/candle)"
+    url = "https://finnhub.io/api/v1/forex/candle"
     params = {
         "symbol": str(symbol).strip(),
         "resolution": str(resolution).strip(),
@@ -357,7 +368,7 @@ def process_signal_expiration(sig_id):
         report_str = (
             f"\n----------------------------------\n"
             f"🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n"
-            f"📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>"
+            f"📍 Вхід: {entry_price:.5f} ➔ 🏁 Закриття: {exit_price:.5f}"
         )
 
         keyboard = InlineKeyboardMarkup([
@@ -377,7 +388,7 @@ def process_signal_expiration(sig_id):
             except Exception:
                 bot.send_message(
                     chat_id=sig_data["chat_id"],
-                    text=f"🏁 <b>Результат угоди #{sig_id} ({ticker}):</b>\n{res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: <code>{entry_price:.5f}</code> ➔ 🏁 Закриття: <code>{exit_price:.5f}</code>",
+                    text=f"🏁 <b>Результат угоди #{sig_id} ({ticker}):</b>\n{res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: {entry_price:.5f} ➔ 🏁 Закриття: {exit_price:.5f}",
                     parse_mode="HTML",
                     reply_to_message_id=sig_data["message_id"],
                     reply_markup=keyboard,
@@ -434,7 +445,7 @@ def start_auto_scanner_loop():
                                 logger.error(f"Авто-сканер помилка для {pair_name}: {ex}")
             except Exception as e:
                 logger.error(f"Помилка циклу авто-сканера: {e}")
-            time.sleep(180) # Перевірка кожні 3 хвилини
+            time.sleep(180)
 
     thread = threading.Thread(target=loop, daemon=True)
     thread.start()
@@ -444,16 +455,30 @@ start_background_checker()
 start_auto_scanner_loop()
 
 
-def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False):
+def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, status_msg_id=None):
     try:
         yahoo_ticker = normalize_yahoo_ticker(ticker_finnhub, pair_name)
         df_daily, df_1h, df_15m, df_5m, df_3m, df_1m = fetch_all_timeframes(
             ticker_finnhub, yahoo_ticker
         )
 
-        if df_1m is None or df_1m.empty or len(df_1m) < 10:
+        def report_no_signal(reason_text):
             if not auto_mode:
-                database.save_filtered_log(chat_id, f"⚠️ {pair_name}: Недостатньо даних котирувань.")
+                database.save_filtered_log(chat_id, f"❌ {pair_name}: {reason_text}")
+            if status_msg_id:
+                try:
+                    safe_reason = clean_ai_html(reason_text)
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=status_msg_id,
+                        text=f"⏸ <b><code>{pair_name}</code>: Сигнал відсутній</b>\n\n💡 <i>Причина: {safe_reason}</i>",
+                        parse_mode="HTML"
+                    )
+                except Exception as ex:
+                    logger.warning(f"Failed to edit status msg: {ex}")
+
+        if df_1m is None or df_1m.empty or len(df_1m) < 10:
+            report_no_signal("Недостатньо даних котирувань з біржі.")
             return False
 
         analysis = analyzer.analyze_all_timeframes(
@@ -463,8 +488,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False):
         is_valid, reason_val = validate_signal_conditions(analysis)
 
         if not is_valid:
-            if not auto_mode:
-                database.save_filtered_log(chat_id, f"❌ {pair_name}: {reason_val}")
+            report_no_signal(reason_val)
             return False
 
         session_str, s_code, s_hour = get_current_session_info()
@@ -482,17 +506,14 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False):
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
-        # Поріг ML: 45% для ручного режиму, 58% для авто-сканера
         min_ml_threshold = 58.0 if auto_mode else 45.0
         if win_probability < min_ml_threshold:
-            if not auto_mode:
-                database.save_filtered_log(chat_id, f"❌ {pair_name}: ML відхилив ({win_probability:.1f}% < {min_ml_threshold}%)")
+            report_no_signal(f"ML-модель оцінила ймовірність у {win_probability:.1f}% (потрібно > {min_ml_threshold:.0f}%)")
             return False
 
         is_pivot_ok, pivot_reason = check_pivot_level_proximity(analysis)
         if not is_pivot_ok:
-            if not auto_mode:
-                database.save_filtered_log(chat_id, f"⏭ {pair_name} відхилено (Рівень): {pivot_reason}")
+            report_no_signal(f"Невдале розташування відносно рівнів: {pivot_reason}")
             return False
 
         exp_time = calculate_dynamic_expiration(analysis)
@@ -535,11 +556,9 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False):
         ai_exp = ai_res.get("suggested_expiration", exp_time)
         ai_reason = ai_res.get("reason", "")
 
-        # Для авто-сканера вимагаємо вищу оцінку ШІ (>= 6/10)
         min_ai_conf = 6 if auto_mode else 5
         if ai_decision != "YES" or ai_confidence < min_ai_conf:
-            if not auto_mode:
-                database.save_filtered_log(chat_id, f"🤖 {pair_name}: ШІ відхилив ({ai_confidence}/10). {ai_reason}")
+            report_no_signal(f"ШІ оцінив сигнал у {ai_confidence}/10: {ai_reason}")
             return False
 
         direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if payload["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
@@ -547,23 +566,37 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False):
         confluence_val = payload.get("confluence_count", 1)
 
         msg_text = (
-            f"🎯 <b>СИГНАЛ: {pair_name}</b> [<code>#{payload['strategy']}</code>]\n\n"
+            f"🎯 <b>АКТИВ: <code>{pair_name}</code></b> <i>(натисніть, щоб скопіювати)</i>\n\n"
             f"📊 Напрямок: <b>{direction_icon}</b>\n"
             f"⏳ Час експірації: <b>{ai_exp} хв</b>\n"
-            f"📍 Поточна ціна: <code>{payload['current_price']:.5f}</code> <i>(клик для копіювання)</i>\n\n"
-            f"📋 Стратегія: <b>{strat_title}</b>\n"
+            f"📍 Поточна ціна: {payload['current_price']:.5f}\n\n"
+            f"📋 Стратегія: <b>{strat_title}</b> [<code>#{payload['strategy']}</code>]\n"
             f"🧠 Впевненість ML: <b>{make_progress_bar(win_probability)} {win_probability:.1f}%</b>\n"
             f"🤖 Оцінка Gemini:  <b>{make_progress_bar(ai_confidence * 10)} {ai_confidence}/10</b>\n"
             f"🔥 Підтверджень:   <b>{confluence_val} із 7 стратегій</b>\n\n"
-            f"💡 Причина: <i>{ai_reason}</i>\n"
+            f"💡 Причина: <i>{clean_ai_html(ai_reason)}</i>\n"
             f"🌐 Сесія: {session_str}"
         )
 
-        sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+        if status_msg_id:
+            try:
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=status_msg_id,
+                    text=msg_text,
+                    parse_mode="HTML"
+                )
+                sent_msg_id = status_msg_id
+            except Exception:
+                sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+                sent_msg_id = sent_msg.message_id
+        else:
+            sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+            sent_msg_id = sent_msg.message_id
         
         sig_id = database.save_signal(
             chat_id=chat_id,
-            message_id=sent_msg.message_id,
+            message_id=sent_msg_id,
             ticker=ticker_finnhub,
             signal_type=payload["signal"],
             entry_price=payload["current_price"],
@@ -587,6 +620,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False):
 
     except Exception as e:
         logger.exception(f"Помилка аналізу {pair_name}: {e}")
+        report_no_signal("Виникла технічна помилка під час аналізу.")
         return False
 
 
@@ -691,8 +725,14 @@ def handle_message(update, context):
         if not logs:
             update.message.reply_text("📋 Логи фільтру порожні.")
         else:
-            msg = "📋 <b>Останні відхилені сигнали:</b>\n\n" + "\n".join(logs)
-            update.message.reply_text(msg, parse_mode="HTML")
+            safe_logs = [clean_ai_html(l) for l in logs]
+            msg = "📋 <b>Останні відхилені сигнали:</b>\n\n" + "\n".join(safe_logs)
+            try:
+                update.message.reply_text(msg, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Error sending logs via HTML, fallback to plain text: {e}")
+                plain_msg = "📋 Останні відхилені сигнали:\n\n" + "\n".join(logs)
+                update.message.reply_text(plain_msg)
 
 
 def handle_callback(update, context):
@@ -705,10 +745,10 @@ def handle_callback(update, context):
         pair_name = data.replace("analyze_", "")
         ticker = PAIRS_MAP.get(pair_name)
         if ticker:
-            query.edit_message_text(f"🔍 Аналізую {pair_name} за 7 стратегіями...")
+            status_msg = query.edit_message_text(f"🔍 Аналізую {pair_name} за 7 стратегіями...")
             threading.Thread(
                 target=analyze_single_pair,
-                args=[chat_id, pair_name, ticker],
+                args=[chat_id, pair_name, ticker, False, status_msg.message_id],
                 daemon=True,
             ).start()
 
@@ -728,7 +768,9 @@ def handle_callback(update, context):
                 
                 orig_text = sig_data.get("message_text", "")
                 result_part = f"\n🏁 <b>Результат:</b> {sig_data.get('result')} ({sig_data.get('pips')} п.)"
-                review_formatted = f"\n\n🤖 <b>Ретроспективний розбір ШІ:</b>\n<i>{review_text}</i>"
+                
+                safe_review = clean_ai_html(review_text)
+                review_formatted = f"\n\n🤖 <b>Ретроспективний розбір ШІ:</b>\n{safe_review}"
                 
                 full_updated_text = orig_text + result_part + review_formatted
                 
@@ -739,6 +781,7 @@ def handle_callback(update, context):
                     parse_mode="HTML"
                 )
             except Exception as e:
+                logger.exception(f"Помилка відправки ШІ аналізу: {e}")
                 bot.send_message(chat_id=chat_id, text=f"❌ Помилка формування аналізу: {e}")
 
         threading.Thread(target=run_ai_review, daemon=True).start()
