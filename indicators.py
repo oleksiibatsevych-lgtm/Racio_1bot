@@ -123,37 +123,36 @@ class AdaptiveTechnicalAnalysis:
 
         return min(distances) if distances else 0.001
 
-    # --- 7 СТРАТЕГІЙ ---
-
     def _check_trend_following(self, df_5m, df_1m, global_trend, adx) -> dict:
-        """Стратегія 1: Вхід за трендом на відкотах (ADX > 25)"""
-        if adx < 25 or global_trend == "NEUTRAL" or df_5m.empty:
+        """Стратегія 1: Вхід за трендом на відкотах (з фільтром розвороту свічки M1)"""
+        if adx < 25 or global_trend == "NEUTRAL" or df_5m.empty or df_1m.empty:
             return {"signal": "NONE"}
         
-        last_5m = df_5m.iloc[-1]
-        rsi_5m = float(last_5m.get('rsi', 50))
-        close_5m = float(last_5m['close'])
-        bb_lower = float(last_5m.get('bb_lower', 0))
-        bb_upper = float(last_5m.get('bb_upper', 0))
+        last_1m = df_1m.iloc[-1]
+        rsi_1m = float(last_1m.get('rsi', 50))
+        close_1m = float(last_1m['close'])
+        open_1m = float(last_1m['open'])
+        lower_wick_ratio = float(last_1m.get('lower_wick_ratio', 0))
+        upper_wick_ratio = float(last_1m.get('upper_wick_ratio', 0))
 
-        if global_trend == 'BULLISH' and rsi_5m < 58:
-            if close_5m <= bb_lower * 1.002 or rsi_5m < 48:
+        if global_trend == 'BULLISH':
+            if 48.0 <= rsi_1m <= 65.0 and (close_1m > open_1m or lower_wick_ratio >= 0.25):
                 return {
                     "signal": "CALL",
                     "strategy": "TREND_FOLLOWING",
                     "strategy_title": "1. Вхід за трендом (ADX > 25)",
                     "suggested_exp": 5,
-                    "reason": f"Відкат у бичачому тренді (ADX: {adx:.1f}, RSI: {rsi_5m:.1f})"
+                    "reason": f"Підтверджений відкат у бичачому тренді (ADX: {adx:.1f}, RSI 1m: {rsi_1m:.1f})"
                 }
 
-        elif global_trend == 'BEARISH' and rsi_5m > 42:
-            if close_5m >= bb_upper * 0.998 or rsi_5m > 52:
+        elif global_trend == 'BEARISH':
+            if 35.0 <= rsi_1m <= 52.0 and (close_1m < open_1m or upper_wick_ratio >= 0.25):
                 return {
                     "signal": "PUT",
                     "strategy": "TREND_FOLLOWING",
                     "strategy_title": "1. Вхід за трендом (ADX > 25)",
                     "suggested_exp": 5,
-                    "reason": f"Відкат у ведмежому тренді (ADX: {adx:.1f}, RSI: {rsi_5m:.1f})"
+                    "reason": f"Підтверджений відкат у ведмежому тренді (ADX: {adx:.1f}, RSI 1m: {rsi_1m:.1f})"
                 }
 
         return {"signal": "NONE"}
@@ -312,7 +311,7 @@ class AdaptiveTechnicalAnalysis:
         return {"signal": "NONE"}
 
     def _check_hybrid_adaptive(self, df_1m, df_5m, df_3m, global_trend, mid_trend, pivots) -> dict:
-        """Стратегія 7: Адаптивний Гібрид (Поточна класична)"""
+        """Стратегія 7: Адаптивний Гібрид"""
         if df_5m.empty or df_1m.empty:
             return {"signal": "NONE"}
 
@@ -399,7 +398,6 @@ class AdaptiveTechnicalAnalysis:
         div = self.detect_divergence(df_5m)
         pivots = self.calculate_pivots(df_macro) if df_macro is not None and not df_macro.empty else {}
 
-        # Масив усіх 7 стратегій
         strategies = [
             self._check_divergence(df_5m, div),
             self._check_breakout(df_5m, bb_width, adx),
