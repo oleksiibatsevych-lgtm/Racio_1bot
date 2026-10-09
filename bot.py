@@ -63,9 +63,17 @@ ml_filter = TradingMLFilter()
 last_sent_signals = {}
 MACRO_CACHE = {}
 CACHE_TTL = 900
+AUTO_SCAN_CHATS = set()
 
 database.init_db()
 start_finnhub_ws()
+
+
+def make_progress_bar(val_pct):
+    score = max(0, min(10, int(round(val_pct / 10))))
+    filled = "█" * score
+    empty = "░" * (10 - score)
+    return f"[{filled}{empty}]"
 
 
 def parse_dt(dt_val):
@@ -336,7 +344,6 @@ def process_signal_expiration(sig_id):
 
         database.update_signal_result(sig_id, result, exit_price, pips)
 
-        # Автоматичне фонове перенавчання ML моделей після закриття кожних 5 угод
         if result in ["WIN", "LOSS"]:
             stats = database.get_stats()
             finished = stats.get('wins', 0) + stats.get('losses', 0)
@@ -413,10 +420,31 @@ def start_background_checker():
     thread.start()
 
 
+def start_auto_scanner_loop():
+    def loop():
+        while True:
+            try:
+                if AUTO_SCAN_CHATS:
+                    logger.info(f"🔄 Авто-сканер аналізує ринок для {len(AUTO_SCAN_CHATS)} чатів...")
+                    for chat_id in list(AUTO_SCAN_CHATS):
+                        for pair_name, ticker in PAIRS_MAP.items():
+                            try:
+                                analyze_single_pair(chat_id, pair_name, ticker, auto_mode=True)
+                            except Exception as ex:
+                                logger.error(f"Авто-сканер помилка для {pair_name}: {ex}")
+            except Exception as e:
+                logger.error(f"Помилка циклу авто-сканера: {e}")
+            time.sleep(180) # Перевірка кожні 3 хвилини
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+
+
 start_background_checker()
+start_auto_scanner_loop()
 
 
-def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
+def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False):
     try:
         yahoo_ticker = normalize_yahoo_ticker(ticker_finnhub, pair_name)
         df_daily, df_1h, df_15m, df_5m, df_3m, df_1m = fetch_all_timeframes(
@@ -424,7 +452,8 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         )
 
         if df_1m is None or df_1m.empty or len(df_1m) < 10:
-            database.save_filtered_log(chat_id, f"⚠️ {pair_name}: Недостатньо даних котирувань.")
+            if not auto_mode:
+                database.save_filtered_log(chat_id, f"⚠️ {pair_name}: Недостатньо даних котирувань.")
             return False
 
         analysis = analyzer.analyze_all_timeframes(
@@ -434,7 +463,8 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
         is_valid, reason_val = validate_signal_conditions(analysis)
 
         if not is_valid:
-            database.save_filtered_log(chat_id, f"❌ {pair_name}: {reason_val}")
+            if not auto_mode:
+                database.save_filtered_log(chat_id, f"❌ {pair_name}: {reason_val}")
             return False
 
         session_str, s_code, s_hour = get_current_session_info()
@@ -445,25 +475,32 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             "session_code": s_code,
             "hour": s_hour,
             "divergence": analysis.get("divergence", "NONE"),
-            "volatility_ratio": analysis.get("volatility_ratio", 1.0)
+            "volatility_ratio": analysis.get("volatility_ratio", 1.0),
+            "wick_ratio": analysis.get("wick_ratio", 0.0),
+            "ema_dist": analysis.get("ema_dist", 0.0),
+            "dist_pivot": analysis.get("dist_pivot", 0.0)
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
-        # Знижено поріг ML до 45% для максимальної генерації якісних сигналів
-        if win_probability < 45.0:
-            log_msg = f"❌ {pair_name}: ML відхилив (Ймовірність {win_probability:.1f}% нижче 45.0%)"
-            database.save_filtered_log(chat_id, log_msg)
+        # Поріг ML: 45% для ручного режиму, 58% для авто-сканера
+        min_ml_threshold = 58.0 if auto_mode else 45.0
+        if win_probability < min_ml_threshold:
+            if not auto_mode:
+                database.save_filtered_log(chat_id, f"❌ {pair_name}: ML відхилив ({win_probability:.1f}% < {min_ml_threshold}%)")
             return False
 
         is_pivot_ok, pivot_reason = check_pivot_level_proximity(analysis)
         if not is_pivot_ok:
-            log_msg = f"⏭ {pair_name} відхилено (Рівень): {pivot_reason}"
-            database.save_filtered_log(chat_id, log_msg)
+            if not auto_mode:
+                database.save_filtered_log(chat_id, f"⏭ {pair_name} відхилено (Рівень): {pivot_reason}")
             return False
 
         exp_time = calculate_dynamic_expiration(analysis)
         payload = {
             "signal": analysis.get("signal"),
+            "strategy": analysis.get("strategy", "HYBRID_ADAPTIVE"),
+            "strategy_title": analysis.get("strategy_title", "7. Адаптивний Гібрид"),
+            "confluence_count": analysis.get("confluence_count", 1),
             "current_price": analysis.get("current_price"),
             "rsi": analysis.get("rsi"),
             "adx": analysis.get("adx"),
@@ -493,45 +530,37 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
                 "reason": "Миттєвий вхід (ШІ вимкнено)"
             }
 
-        is_ai_busy = ai_res.get("confidence", 0) <= 1 or "недоступний" in ai_res.get("reason", "").lower()
+        ai_decision = ai_res.get("decision", "YES")
+        ai_confidence = ai_res.get("confidence", 6)
+        ai_exp = ai_res.get("suggested_expiration", exp_time)
+        ai_reason = ai_res.get("reason", "")
 
-        if is_ai_busy:
-            if win_probability >= 45.0:
-                ai_decision = "YES"
-                ai_confidence = 6
-                ai_exp = exp_time
-                ai_reason = f"Авто-схвалення (ML {win_probability:.1f}%)."
-            else:
-                log_msg = f"🤖 {pair_name}: ШІ недоступний, ML ({win_probability:.1f}%) недостатній."
-                database.save_filtered_log(chat_id, log_msg)
-                return False
-        else:
-            ai_decision = ai_res.get("decision", "NO")
-            ai_confidence = ai_res.get("confidence", 0)
-            ai_exp = ai_res.get("suggested_expiration", exp_time)
-            ai_reason = ai_res.get("reason", "")
-
-            # Знижено поріг проходження ШІ до >= 5
-            if ai_decision != "YES" or ai_confidence < 5:
-                log_msg = f"🤖 {pair_name}: ШІ відхилив (Оцінка: {ai_confidence}/10). Причина: {ai_reason}"
-                database.save_filtered_log(chat_id, log_msg)
-                return False
+        # Для авто-сканера вимагаємо вищу оцінку ШІ (>= 6/10)
+        min_ai_conf = 6 if auto_mode else 5
+        if ai_decision != "YES" or ai_confidence < min_ai_conf:
+            if not auto_mode:
+                database.save_filtered_log(chat_id, f"🤖 {pair_name}: ШІ відхилив ({ai_confidence}/10). {ai_reason}")
+            return False
 
         direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if payload["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
+        strat_title = payload.get("strategy_title", "7. Адаптивний Гібрид")
+        confluence_val = payload.get("confluence_count", 1)
+
         msg_text = (
-            f"🎯 <b>СИГНАЛ: {pair_name}</b>\n\n"
+            f"🎯 <b>СИГНАЛ: {pair_name}</b> [<code>#{payload['strategy']}</code>]\n\n"
             f"📊 Напрямок: <b>{direction_icon}</b>\n"
             f"⏳ Час експірації: <b>{ai_exp} хв</b>\n"
-            f"📍 Поточна ціна: <code>{payload['current_price']:.5f}</code>\n\n"
-            f"🧠 ML Впевненість: <b>{win_probability:.1f}%</b>\n"
-            f"🤖 ШІ Оцінка: <b>{ai_confidence}/10</b>\n"
-            f"💡 Причина: <i>{ai_reason}</i>\n\n"
+            f"📍 Поточна ціна: <code>{payload['current_price']:.5f}</code> <i>(клик для копіювання)</i>\n\n"
+            f"📋 Стратегія: <b>{strat_title}</b>\n"
+            f"🧠 Впевненість ML: <b>{make_progress_bar(win_probability)} {win_probability:.1f}%</b>\n"
+            f"🤖 Оцінка Gemini:  <b>{make_progress_bar(ai_confidence * 10)} {ai_confidence}/10</b>\n"
+            f"🔥 Підтверджень:   <b>{confluence_val} із 7 стратегій</b>\n\n"
+            f"💡 Причина: <i>{ai_reason}</i>\n"
             f"🌐 Сесія: {session_str}"
         )
 
         sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
         
-        # Передаємо всі технічні параметри у базу даних для коректного навчання ML
         sig_id = database.save_signal(
             chat_id=chat_id,
             message_id=sent_msg.message_id,
@@ -547,7 +576,11 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
             session_code=s_code,
             hour=s_hour,
             divergence=payload.get("divergence"),
-            volatility_ratio=analysis.get("volatility_ratio")
+            volatility_ratio=analysis.get("volatility_ratio"),
+            wick_ratio=analysis.get("wick_ratio"),
+            ema_dist=analysis.get("ema_dist"),
+            dist_pivot=analysis.get("dist_pivot"),
+            strategy=payload.get("strategy")
         )
         schedule_signal_timer(sig_id, datetime.utcnow(), ai_exp)
         return True
@@ -558,7 +591,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub):
 
 
 def run_mass_analysis(chat_id):
-    bot.send_message(chat_id=chat_id, text="🔍 Запускаю фоновий аналіз...")
+    bot.send_message(chat_id=chat_id, text="🔍 Запускаю масовий аналіз усіх 21 пар...")
     database.clear_filtered_logs(chat_id)
 
     found_any = False
@@ -567,9 +600,9 @@ def run_mass_analysis(chat_id):
             found_any = True
 
     reply_text = (
-        "✅ Масовий аналіз завершено!"
+        "✅ Масовий аналіз завершено! Сигнали згенеровано."
         if found_any
-        else "✅ Масовий аналіз завершено! Відхилені сигнали переглядайте у меню «📋 Логи фільтру»."
+        else "✅ Масовий аналіз завершено! Активних сигналів за фільтрами не знайдено. Дивіться «📋 Логи фільтру»."
     )
     bot.send_message(chat_id=chat_id, text=reply_text)
 
@@ -579,11 +612,12 @@ def start(update, context):
     database.register_user(user.id, user.username)
 
     keyboard = [
-        [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("💵 Пари")],
-        [KeyboardButton("📈 Статистика"), KeyboardButton("📋 Логи фільтру")],
+        [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("🔔 Авто-сканер")],
+        [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
+        [KeyboardButton("📋 Логи фільтру")]
     ]
     update.message.reply_text(
-        "Бот Racio_1 готовий! 🚀 Оберіть дію:",
+        "Бот Racio_1 із 7 стратегіями готовий! 🚀 Оберіть дію:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
     )
 
@@ -594,6 +628,14 @@ def handle_message(update, context):
 
     if text == "📊 Аналіз усіх пар":
         threading.Thread(target=run_mass_analysis, args=[chat_id], daemon=True).start()
+    elif text == "🔔 Авто-сканер":
+        if chat_id in AUTO_SCAN_CHATS:
+            AUTO_SCAN_CHATS.remove(chat_id)
+            update.message.reply_text("🔴 Авто-сканер ВИМКНЕНО. Бот більше не надсилатиме фонові сигнали.")
+        else:
+            AUTO_SCAN_CHATS.add(chat_id)
+            update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО! Бот кожні 3 хвилини шукатиме сигнали у фоні.")
+
     elif text == "💵 Пари":
         buttons = []
         row = []
@@ -605,6 +647,7 @@ def handle_message(update, context):
         if row:
             buttons.append(row)
         update.message.reply_text("Оберіть пару для аналізу:", reply_markup=InlineKeyboardMarkup(buttons))
+
     elif text == "📈 Статистика":
         stats = database.get_stats()
         total = stats.get('total', 0)
@@ -615,13 +658,22 @@ def handle_message(update, context):
         finished = wins + losses
         winrate = (wins / finished * 100) if finished > 0 else 0.0
 
+        strat_lines = []
+        for s in stats.get('by_strategy', []):
+            st_total = s['wins'] + s['losses']
+            st_wr = (s['wins'] / st_total * 100) if st_total > 0 else 0
+            strat_lines.append(f"• <b>{s['strat']}</b>: {s['wins']}W / {s['losses']}L ({st_wr:.1f}%)")
+
+        strat_str = "\n".join(strat_lines) if strat_lines else "Немає закритих угод за стратегіями."
+
         msg = (
-            f"📊 <b>Загальна статистика:</b>\n\n"
+            f"📊 <b>Загальна статистика системи:</b>\n\n"
             f"Всього сигналів: {total}\n"
             f"✅ Перемог (WIN): {wins}\n"
             f"❌ Збитків (LOSS): {losses}\n"
             f"⏳ В очікуванні: {pending}\n\n"
-            f"🏆 <b>Поточний вінрейт: {winrate:.1f}%</b>"
+            f"🏆 <b>Загальний вінрейт: {winrate:.1f}%</b>\n\n"
+            f"📋 <b>Деталізація за 7 стратегіями:</b>\n{strat_str}"
         )
         
         keyboard = [
@@ -653,7 +705,7 @@ def handle_callback(update, context):
         pair_name = data.replace("analyze_", "")
         ticker = PAIRS_MAP.get(pair_name)
         if ticker:
-            query.edit_message_text(f"🔍 Аналізую {pair_name}...")
+            query.edit_message_text(f"🔍 Аналізую {pair_name} за 7 стратегіями...")
             threading.Thread(
                 target=analyze_single_pair,
                 args=[chat_id, pair_name, ticker],
@@ -710,7 +762,7 @@ def handle_callback(update, context):
         
     elif data == "retrain_ml":
         query.edit_message_text(
-            "🤖 Запускаю перенавчання ML-моделі... ⏳", 
+            "🤖 Запускаю перенавчання ML-моделі на останніх угодах... ⏳", 
             parse_mode="HTML"
         )
         
@@ -740,6 +792,6 @@ if __name__ == "__main__":
     dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dispatcher.add_handler(CallbackQueryHandler(handle_callback))
 
-    logger.info("🚀 Бот запущено в режимі Polling!")
+    logger.info("🚀 Бот запущено в режимі Polling із 7 стратегіями!")
     updater.start_polling()
     updater.idle()
