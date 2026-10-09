@@ -46,9 +46,22 @@ class AdaptiveTechnicalAnalysis:
         df['adx'] = dx.rolling(window=14).mean().fillna(20)
 
         # EMAs
+        df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema_10'] = df['close'].ewm(span=10, adjust=False).mean()
         df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+        df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
         df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
+
+        # MACD
+        exp1 = df['close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['close'].ewm(span=26, adjust=False).mean()
+        df['macd'] = exp1 - exp2
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        df['macd_hist'] = df['macd'] - df['macd_signal']
+
+        # Donchian Channels (20 periods)
+        df['donchian_upper'] = df['high'].rolling(window=20).max()
+        df['donchian_lower'] = df['low'].rolling(window=20).min()
 
         # Wick Ratio & EMA Distance
         candle_range = (df['high'] - df['low']).replace(0, 0.00001)
@@ -123,8 +136,9 @@ class AdaptiveTechnicalAnalysis:
 
         return min(distances) if distances else 0.001
 
+    # --- ІСНУЮЧІ 7 СТРАТЕГІЙ ---
+
     def _check_trend_following(self, df_5m, df_1m, global_trend, adx) -> dict:
-        """Стратегія 1: Вхід за трендом на відкотах (з фільтром розвороту свічки M1)"""
         if adx < 25 or global_trend == "NEUTRAL" or df_5m.empty or df_1m.empty:
             return {"signal": "NONE"}
         
@@ -141,24 +155,21 @@ class AdaptiveTechnicalAnalysis:
                     "signal": "CALL",
                     "strategy": "TREND_FOLLOWING",
                     "strategy_title": "1. Вхід за трендом (ADX > 25)",
-                    "suggested_exp": 5,
+                    "suggested_exp": 15,
                     "reason": f"Підтверджений відкат у бичачому тренді (ADX: {adx:.1f}, RSI 1m: {rsi_1m:.1f})"
                 }
-
         elif global_trend == 'BEARISH':
             if 35.0 <= rsi_1m <= 52.0 and (close_1m < open_1m or upper_wick_ratio >= 0.25):
                 return {
                     "signal": "PUT",
                     "strategy": "TREND_FOLLOWING",
                     "strategy_title": "1. Вхід за трендом (ADX > 25)",
-                    "suggested_exp": 5,
+                    "suggested_exp": 15,
                     "reason": f"Підтверджений відкат у ведмежому тренді (ADX: {adx:.1f}, RSI 1m: {rsi_1m:.1f})"
                 }
-
         return {"signal": "NONE"}
 
     def _check_mean_reversion(self, df_5m, df_1m, adx) -> dict:
-        """Стратегія 2: Скальпінг у флеті (ADX < 20)"""
         if adx >= 22 or df_1m.empty:
             return {"signal": "NONE"}
 
@@ -173,7 +184,7 @@ class AdaptiveTechnicalAnalysis:
                 "signal": "CALL",
                 "strategy": "MEAN_REVERSION",
                 "strategy_title": "2. Скальпінг у флеті (BB/RSI)",
-                "suggested_exp": 3,
+                "suggested_exp": 5,
                 "reason": f"Флет: відскок від нижньої смуги BB (RSI 1m: {rsi_1m:.1f})"
             }
         elif close_1m >= bb_upper_1m or rsi_1m > 65:
@@ -181,14 +192,12 @@ class AdaptiveTechnicalAnalysis:
                 "signal": "PUT",
                 "strategy": "MEAN_REVERSION",
                 "strategy_title": "2. Скальпінг у флеті (BB/RSI)",
-                "suggested_exp": 3,
+                "suggested_exp": 5,
                 "reason": f"Флет: відскок від верхньої смуги BB (RSI 1m: {rsi_1m:.1f})"
             }
-
         return {"signal": "NONE"}
 
     def _check_breakout(self, df_5m, bb_width, adx) -> dict:
-        """Стратегія 3: Пробій стиснення волатильності (BB Squeeze)"""
         if bb_width > 0.0020 or df_5m.empty or len(df_5m) < 3:
             return {"signal": "NONE"}
 
@@ -203,7 +212,7 @@ class AdaptiveTechnicalAnalysis:
                 "signal": "CALL",
                 "strategy": "BREAKOUT",
                 "strategy_title": "3. Пробій стиснення волатильності",
-                "suggested_exp": 4,
+                "suggested_exp": 15,
                 "reason": f"Імпульсний пробій флету вгору (BB Width: {bb_width:.5f})"
             }
         elif close_5m < bb_lower and float(last_5m['close']) < float(prev_5m['low']):
@@ -211,14 +220,12 @@ class AdaptiveTechnicalAnalysis:
                 "signal": "PUT",
                 "strategy": "BREAKOUT",
                 "strategy_title": "3. Пробій стиснення волатильності",
-                "suggested_exp": 4,
+                "suggested_exp": 15,
                 "reason": f"Імпульсний пробій флету вниз (BB Width: {bb_width:.5f})"
             }
-
         return {"signal": "NONE"}
 
     def _check_divergence(self, df_5m, div) -> dict:
-        """Стратегія 4: Розворот за дивергенцією RSI"""
         if div == "NONE" or df_5m.empty:
             return {"signal": "NONE"}
 
@@ -230,22 +237,20 @@ class AdaptiveTechnicalAnalysis:
                 "signal": "CALL",
                 "strategy": "DIVERGENCE",
                 "strategy_title": "4. Розворот за дивергенцією RSI",
-                "suggested_exp": 12,
-                "reason": f"Быча дивергенція на M5 (RSI: {rsi_5m:.1f})"
+                "suggested_exp": 30,
+                "reason": f"Бичача дивергенція на M5 (RSI: {rsi_5m:.1f})"
             }
         elif div == "BEARISH_DIV" and rsi_5m > 55:
             return {
                 "signal": "PUT",
                 "strategy": "DIVERGENCE",
                 "strategy_title": "4. Розворот за дивергенцією RSI",
-                "suggested_exp": 12,
+                "suggested_exp": 30,
                 "reason": f"Ведмежа дивергенція на M5 (RSI: {rsi_5m:.1f})"
             }
-
         return {"signal": "NONE"}
 
     def _check_pivot_bounce(self, df_5m, df_1m, pivots) -> dict:
-        """Стратегія 5: Відскок від Pivot та круглих рівнів"""
         if not pivots or df_5m.empty or df_1m.empty:
             return {"signal": "NONE"}
 
@@ -267,7 +272,7 @@ class AdaptiveTechnicalAnalysis:
                 "signal": "CALL",
                 "strategy": "PIVOT_BOUNCE",
                 "strategy_title": "5. Відскок від Pivot / Круглих рівнів",
-                "suggested_exp": 4,
+                "suggested_exp": 10,
                 "reason": f"Тест підтримки S1/S2 з RSI перепроданістю ({rsi_1m:.1f})"
             }
         elif near_r and rsi_1m > 62:
@@ -275,14 +280,12 @@ class AdaptiveTechnicalAnalysis:
                 "signal": "PUT",
                 "strategy": "PIVOT_BOUNCE",
                 "strategy_title": "5. Відскок від Pivot / Круглих рівнів",
-                "suggested_exp": 4,
+                "suggested_exp": 10,
                 "reason": f"Тест опору R1/R2 з RSI перекупленістю ({rsi_1m:.1f})"
             }
-
         return {"signal": "NONE"}
 
     def _check_m1_pinbar(self, df_1m, mid_trend) -> dict:
-        """Стратегія 6: M1 Скальпінг за Пінбарами"""
         if df_1m.empty or len(df_1m) < 3 or mid_trend == "NEUTRAL":
             return {"signal": "NONE"}
 
@@ -296,22 +299,20 @@ class AdaptiveTechnicalAnalysis:
                 "signal": "CALL",
                 "strategy": "M1_PINBAR",
                 "strategy_title": "6. M1 Скальпінг за Пінбарами",
-                "suggested_exp": 2,
-                "reason": f"Бычий пінбар на M1 біля EMA (Нижня тінь: {lower_wick_ratio*100:.0f}%)"
+                "suggested_exp": 5,
+                "reason": f"Бичачий пінбар на M1 біля EMA (Нижня тінь: {lower_wick_ratio*100:.0f}%)"
             }
         elif mid_trend == "BEARISH" and upper_wick_ratio >= 0.55 and rsi_1m > 50:
             return {
                 "signal": "PUT",
                 "strategy": "M1_PINBAR",
                 "strategy_title": "6. M1 Скальпінг за Пінбарами",
-                "suggested_exp": 2,
+                "suggested_exp": 5,
                 "reason": f"Ведмежий пінбар на M1 біля EMA (Верхня тінь: {upper_wick_ratio*100:.0f}%)"
             }
-
         return {"signal": "NONE"}
 
     def _check_hybrid_adaptive(self, df_1m, df_5m, df_3m, global_trend, mid_trend, pivots) -> dict:
-        """Стратегія 7: Адаптивний Гібрид"""
         if df_5m.empty or df_1m.empty:
             return {"signal": "NONE"}
 
@@ -337,7 +338,7 @@ class AdaptiveTechnicalAnalysis:
                     "signal": "CALL",
                     "strategy": "HYBRID_ADAPTIVE",
                     "strategy_title": "7. Адаптивний Гібрид",
-                    "suggested_exp": 5,
+                    "suggested_exp": 10,
                     "reason": f"Флет відскок знизу (RSI 1m: {rsi_1m:.1f})"
                 }
             elif close_1m >= bb_upper or rsi_1m > 54:
@@ -345,7 +346,7 @@ class AdaptiveTechnicalAnalysis:
                     "signal": "PUT",
                     "strategy": "HYBRID_ADAPTIVE",
                     "strategy_title": "7. Адаптивний Гібрид",
-                    "suggested_exp": 5,
+                    "suggested_exp": 10,
                     "reason": f"Флет відскок зверху (RSI 1m: {rsi_1m:.1f})"
                 }
         else:
@@ -355,7 +356,7 @@ class AdaptiveTechnicalAnalysis:
                         "signal": "CALL",
                         "strategy": "HYBRID_ADAPTIVE",
                         "strategy_title": "7. Адаптивний Гібрид",
-                        "suggested_exp": 5,
+                        "suggested_exp": 20,
                         "reason": f"Тренд вгору (ADX: {adx:.1f}, RSI: {rsi_5m:.1f})"
                     }
             elif effective_trend == 'BEARISH' and rsi_5m > 28:
@@ -364,7 +365,7 @@ class AdaptiveTechnicalAnalysis:
                         "signal": "PUT",
                         "strategy": "HYBRID_ADAPTIVE",
                         "strategy_title": "7. Адаптивний Гібрид",
-                        "suggested_exp": 5,
+                        "suggested_exp": 20,
                         "reason": f"Тренд вниз (ADX: {adx:.1f}, RSI: {rsi_5m:.1f})"
                     }
 
@@ -375,7 +376,7 @@ class AdaptiveTechnicalAnalysis:
                     "signal": "CALL",
                     "strategy": "HYBRID_ADAPTIVE",
                     "strategy_title": "7. Адаптивний Гібрид",
-                    "suggested_exp": 3,
+                    "suggested_exp": 10,
                     "reason": f"Скальпінг 3M: імпульс перепроданості (RSI 3m: {rsi_3m:.1f})"
                 }
             elif rsi_3m > 62:
@@ -383,21 +384,146 @@ class AdaptiveTechnicalAnalysis:
                     "signal": "PUT",
                     "strategy": "HYBRID_ADAPTIVE",
                     "strategy_title": "7. Адаптивний Гібрид",
-                    "suggested_exp": 3,
+                    "suggested_exp": 10,
                     "reason": f"Скальпінг 3M: імпульс перекупленості (RSI 3m: {rsi_3m:.1f})"
                 }
-
         return {"signal": "NONE"}
+
+    # --- 4 НОВІ СТРАТЕГІЇ ---
+
+    def _check_ema_crossover(self, df_5m) -> dict:
+        """Стратегія 8: Перетин швидких EMA (EMA 9 та EMA 21)"""
+        if df_5m is None or df_5m.empty or len(df_5m) < 3:
+            return {"signal": "NONE"}
+        
+        curr = df_5m.iloc[-1]
+        prev = df_5m.iloc[-2]
+        rsi = float(curr.get('rsi', 50))
+        
+        ema9_curr, ema21_curr = float(curr.get('ema_9', 0)), float(curr.get('ema_21', 0))
+        ema9_prev, ema21_prev = float(prev.get('ema_9', 0)), float(prev.get('ema_21', 0))
+
+        if ema9_prev <= ema21_prev and ema9_curr > ema21_curr and rsi > 50:
+            return {
+                "signal": "CALL",
+                "strategy": "EMA_CROSSOVER",
+                "strategy_title": "8. Перетин швидких EMA (9/21)",
+                "suggested_exp": 20,
+                "reason": f"Бичачий перетин EMA 9/21 на M5 (RSI: {rsi:.1f})"
+            }
+        elif ema9_prev >= ema21_prev and ema9_curr < ema21_curr and rsi < 50:
+            return {
+                "signal": "PUT",
+                "strategy": "EMA_CROSSOVER",
+                "strategy_title": "8. Перетин швидких EMA (9/21)",
+                "suggested_exp": 20,
+                "reason": f"Ведмежий перетин EMA 9/21 на M5 (RSI: {rsi:.1f})"
+            }
+        return {"signal": "NONE"}
+
+    def _check_macd_momentum(self, df_5m) -> dict:
+        """Стратегія 9: Імпульс гістограми MACD"""
+        if df_5m is None or df_5m.empty or len(df_5m) < 3:
+            return {"signal": "NONE"}
+        
+        c1 = df_5m.iloc[-1]
+        c2 = df_5m.iloc[-2]
+        c3 = df_5m.iloc[-3]
+        
+        h1, h2, h3 = float(c1.get('macd_hist', 0)), float(c2.get('macd_hist', 0)), float(c3.get('macd_hist', 0))
+        rsi = float(c1.get('rsi', 50))
+
+        if h3 < h2 < h1 and h1 > 0 and rsi > 45:
+            return {
+                "signal": "CALL",
+                "strategy": "MACD_MOMENTUM",
+                "strategy_title": "9. Імпульс гістограми MACD",
+                "suggested_exp": 25,
+                "reason": f"Зростання імпульсу MACD гістограми (RSI: {rsi:.1f})"
+            }
+        elif h3 > h2 > h1 and h1 < 0 and rsi < 55:
+            return {
+                "signal": "PUT",
+                "strategy": "MACD_MOMENTUM",
+                "strategy_title": "9. Імпульс гістограми MACD",
+                "suggested_exp": 25,
+                "reason": f"Спад імпульсу MACD гістограми (RSI: {rsi:.1f})"
+            }
+        return {"signal": "NONE"}
+
+    def _check_level_retest(self, df_5m, pivots) -> dict:
+        """Стратегія 10: Дзеркальний ретест рівня підтримки/опору"""
+        if not pivots or df_5m.empty or len(df_5m) < 2:
+            return {"signal": "NONE"}
+        
+        curr = df_5m.iloc[-1]
+        close = float(curr['close'])
+        rsi = float(curr.get('rsi', 50))
+        
+        r1 = pivots.get("R1", 0)
+        s1 = pivots.get("S1", 0)
+
+        # Ретест попереднього опору як підтримки (R1)
+        if r1 > 0 and abs(close - r1) / close < 0.0004 and rsi > 50:
+            return {
+                "signal": "CALL",
+                "strategy": "LEVEL_RETEST",
+                "strategy_title": "10. Дзеркальний ретест рівня",
+                "suggested_exp": 30,
+                "reason": f"Успішний ретест дзеркального рівня R1 ({r1:.5f})"
+            }
+        # Ретест попередньої підтримки як опору (S1)
+        elif s1 > 0 and abs(close - s1) / close < 0.0004 and rsi < 50:
+            return {
+                "signal": "PUT",
+                "strategy": "LEVEL_RETEST",
+                "strategy_title": "10. Дзеркальний ретест рівня",
+                "suggested_exp": 30,
+                "reason": f"Успішний ретест дзеркального рівня S1 ({s1:.5f})"
+            }
+        return {"signal": "NONE"}
+
+    def _check_channel_breakout(self, df_5m, adx) -> dict:
+        """Стратегія 11: Пробій каналу Дончіана (Donchian Channel Breakout)"""
+        if df_5m is None or df_5m.empty or len(df_5m) < 2 or adx < 24:
+            return {"signal": "NONE"}
+        
+        curr = df_5m.iloc[-1]
+        close = float(curr['close'])
+        upper_channel = float(curr.get('donchian_upper', 0))
+        lower_channel = float(curr.get('donchian_lower', 0))
+        rsi = float(curr.get('rsi', 50))
+
+        if close >= upper_channel * 0.9995 and rsi > 55:
+            return {
+                "signal": "CALL",
+                "strategy": "DONCHIAN_BREAKOUT",
+                "strategy_title": "11. Пробій каналу Дончіана",
+                "suggested_exp": 20,
+                "reason": f"Імпульсний пробій верхньої межі каналу (ADX: {adx:.1f})"
+            }
+        elif close <= lower_channel * 1.0005 and rsi < 45:
+            return {
+                "signal": "PUT",
+                "strategy": "DONCHIAN_BREAKOUT",
+                "strategy_title": "11. Пробій каналу Дончіана",
+                "suggested_exp": 20,
+                "reason": f"Імпульсний пробій нижньої межі каналу (ADX: {adx:.1f})"
+            }
+        return {"signal": "NONE"}
+
+    # --- ЗАГАЛЬНИЙ ГЕНЕРАТОР СИГНАЛІВ ---
 
     def generate_signal(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame, global_trend: str, mid_trend: str, df_macro: pd.DataFrame=None, df_3m: pd.DataFrame=None) -> dict:
         if df_5m is None or df_5m.empty or len(df_5m) < 15 or df_1m is None or df_1m.empty or len(df_1m) < 10:
-            return {'signal': 'NONE', 'reason': 'Мало даних', 'suggested_exp': 5, 'strategy': 'NONE'}
+            return {'signal': 'NONE', 'reason': 'Мало даних', 'suggested_exp': 15, 'strategy': 'NONE'}
 
         adx = float(df_5m['adx'].iloc[-1]) if 'adx' in df_5m.columns else 20
         bb_width = float(df_5m['bb_width'].iloc[-1]) if 'bb_width' in df_5m.columns else 0.001
         div = self.detect_divergence(df_5m)
         pivots = self.calculate_pivots(df_macro) if df_macro is not None and not df_macro.empty else {}
 
+        # Збираємо всі 11 стратегій в єдиний масив
         strategies = [
             self._check_divergence(df_5m, div),
             self._check_breakout(df_5m, bb_width, adx),
@@ -405,13 +531,17 @@ class AdaptiveTechnicalAnalysis:
             self._check_mean_reversion(df_5m, df_1m, adx),
             self._check_pivot_bounce(df_5m, df_1m, pivots),
             self._check_m1_pinbar(df_1m, mid_trend),
-            self._check_hybrid_adaptive(df_1m, df_5m, df_3m, global_trend, mid_trend, pivots)
+            self._check_hybrid_adaptive(df_1m, df_5m, df_3m, global_trend, mid_trend, pivots),
+            self._check_ema_crossover(df_5m),
+            self._check_macd_momentum(df_5m),
+            self._check_level_retest(df_5m, pivots),
+            self._check_channel_breakout(df_5m, adx)
         ]
 
         valid_signals = [s for s in strategies if s.get("signal") in ["CALL", "PUT"]]
 
         if not valid_signals:
-            return {'signal': 'NONE', 'reason': 'Жодна з 7 стратегій не знайшла точки входу', 'suggested_exp': 5, 'strategy': 'NONE'}
+            return {'signal': 'NONE', 'reason': 'Жодна з 11 стратегій не знайшла точки входу', 'suggested_exp': 15, 'strategy': 'NONE'}
 
         best_signal = valid_signals[0]
         best_signal['confluence_count'] = len(valid_signals)
@@ -462,7 +592,7 @@ class AdaptiveTechnicalAnalysis:
             "volatility_ratio": volatility_ratio,
             "atr_ratio": volatility_ratio,
             "divergence": sig_data.get("divergence", "NONE"),
-            "suggested_exp": sig_data.get("suggested_exp", 5),
+            "suggested_exp": sig_data.get("suggested_exp", 15),
             "global_trend": global_trend,
             "mid_trend": mid_trend,
             "pivots": pivots,
