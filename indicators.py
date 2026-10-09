@@ -46,6 +46,8 @@ class AdaptiveTechnicalAnalysis:
         df['adx'] = dx.rolling(window=14).mean().fillna(20)
 
         # EMAs
+        df['ema_3'] = df['close'].ewm(span=3, adjust=False).mean()
+        df['ema_8'] = df['close'].ewm(span=8, adjust=False).mean()
         df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema_10'] = df['close'].ewm(span=10, adjust=False).mean()
         df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
@@ -58,6 +60,12 @@ class AdaptiveTechnicalAnalysis:
         df['macd'] = exp1 - exp2
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
+
+        # Stochastic (14, 3, 3)
+        lowest_low = df['low'].rolling(window=14).min()
+        highest_high = df['high'].rolling(window=14).max()
+        df['stoch_k'] = 100 * ((df['close'] - lowest_low) / (highest_high - lowest_low + 1e-9))
+        df['stoch_d'] = df['stoch_k'].rolling(window=3).mean()
 
         # Donchian Channels (20 periods)
         df['donchian_upper'] = df['high'].rolling(window=20).max()
@@ -123,397 +131,280 @@ class AdaptiveTechnicalAnalysis:
     def get_min_dist_to_pivot_or_round(self, price: float, pivots: dict) -> float:
         if price <= 0:
             return 0.0
-        
         distances = []
         for p_name, p_val in pivots.items():
             if p_val > 0:
                 distances.append(abs(price - p_val) / price)
-        
         round_factor = 100 if price > 50 else 10000
         mod_val = (price * round_factor) % 250
         dist_round = min(mod_val, 250 - mod_val) / (price * round_factor)
         distances.append(dist_round)
-
         return min(distances) if distances else 0.001
 
-    # --- ІСНУЮЧІ 7 СТРАТЕГІЙ ---
-
+    # --- СТРАТЕГІЇ 1 - 11 ---
     def _check_trend_following(self, df_5m, df_1m, global_trend, adx) -> dict:
         if adx < 25 or global_trend == "NEUTRAL" or df_5m.empty or df_1m.empty:
             return {"signal": "NONE"}
-        
         last_1m = df_1m.iloc[-1]
         rsi_1m = float(last_1m.get('rsi', 50))
-        close_1m = float(last_1m['close'])
-        open_1m = float(last_1m['open'])
-        lower_wick_ratio = float(last_1m.get('lower_wick_ratio', 0))
-        upper_wick_ratio = float(last_1m.get('upper_wick_ratio', 0))
-
-        if global_trend == 'BULLISH':
-            if 48.0 <= rsi_1m <= 65.0 and (close_1m > open_1m or lower_wick_ratio >= 0.25):
-                return {
-                    "signal": "CALL",
-                    "strategy": "TREND_FOLLOWING",
-                    "strategy_title": "1. Вхід за трендом (ADX > 25)",
-                    "suggested_exp": 15,
-                    "reason": f"Підтверджений відкат у бичачому тренді (ADX: {adx:.1f}, RSI 1m: {rsi_1m:.1f})"
-                }
-        elif global_trend == 'BEARISH':
-            if 35.0 <= rsi_1m <= 52.0 and (close_1m < open_1m or upper_wick_ratio >= 0.25):
-                return {
-                    "signal": "PUT",
-                    "strategy": "TREND_FOLLOWING",
-                    "strategy_title": "1. Вхід за трендом (ADX > 25)",
-                    "suggested_exp": 15,
-                    "reason": f"Підтверджений відкат у ведмежому тренді (ADX: {adx:.1f}, RSI 1m: {rsi_1m:.1f})"
-                }
+        if global_trend == 'BULLISH' and 48.0 <= rsi_1m <= 65.0:
+            return {"signal": "CALL", "strategy": "TREND_FOLLOWING", "strategy_title": "1. Вхід за трендом", "suggested_exp": 15, "reason": "Бичачий відкат за трендом"}
+        elif global_trend == 'BEARISH' and 35.0 <= rsi_1m <= 52.0:
+            return {"signal": "PUT", "strategy": "TREND_FOLLOWING", "strategy_title": "1. Вхід за трендом", "suggested_exp": 15, "reason": "Ведмежий відкат за трендом"}
         return {"signal": "NONE"}
 
     def _check_mean_reversion(self, df_5m, df_1m, adx) -> dict:
         if adx >= 22 or df_1m.empty:
             return {"signal": "NONE"}
-
         last_1m = df_1m.iloc[-1]
-        close_1m = float(last_1m['close'])
-        bb_lower_1m = float(last_1m.get('bb_lower', 0))
-        bb_upper_1m = float(last_1m.get('bb_upper', 0))
-        rsi_1m = float(last_1m.get('rsi', 50))
-
-        if close_1m <= bb_lower_1m or rsi_1m < 35:
-            return {
-                "signal": "CALL",
-                "strategy": "MEAN_REVERSION",
-                "strategy_title": "2. Скальпінг у флеті (BB/RSI)",
-                "suggested_exp": 5,
-                "reason": f"Флет: відскок від нижньої смуги BB (RSI 1m: {rsi_1m:.1f})"
-            }
-        elif close_1m >= bb_upper_1m or rsi_1m > 65:
-            return {
-                "signal": "PUT",
-                "strategy": "MEAN_REVERSION",
-                "strategy_title": "2. Скальпінг у флеті (BB/RSI)",
-                "suggested_exp": 5,
-                "reason": f"Флет: відскок від верхньої смуги BB (RSI 1m: {rsi_1m:.1f})"
-            }
+        close_1m, rsi_1m = float(last_1m['close']), float(last_1m.get('rsi', 50))
+        if close_1m <= float(last_1m.get('bb_lower', 0)) or rsi_1m < 35:
+            return {"signal": "CALL", "strategy": "MEAN_REVERSION", "strategy_title": "2. Скальпінг у флеті", "suggested_exp": 5, "reason": "Відскок від нижньої межі BB"}
+        elif close_1m >= float(last_1m.get('bb_upper', 0)) or rsi_1m > 65:
+            return {"signal": "PUT", "strategy": "MEAN_REVERSION", "strategy_title": "2. Скальпінг у флеті", "suggested_exp": 5, "reason": "Відскок від верхньої межі BB"}
         return {"signal": "NONE"}
 
     def _check_breakout(self, df_5m, bb_width, adx) -> dict:
         if bb_width > 0.0020 or df_5m.empty or len(df_5m) < 3:
             return {"signal": "NONE"}
-
         last_5m = df_5m.iloc[-1]
-        prev_5m = df_5m.iloc[-2]
-        close_5m = float(last_5m['close'])
-        bb_upper = float(last_5m.get('bb_upper', 0))
-        bb_lower = float(last_5m.get('bb_lower', 0))
-
-        if close_5m > bb_upper and float(last_5m['close']) > float(prev_5m['high']):
-            return {
-                "signal": "CALL",
-                "strategy": "BREAKOUT",
-                "strategy_title": "3. Пробій стиснення волатильності",
-                "suggested_exp": 15,
-                "reason": f"Імпульсний пробій флету вгору (BB Width: {bb_width:.5f})"
-            }
-        elif close_5m < bb_lower and float(last_5m['close']) < float(prev_5m['low']):
-            return {
-                "signal": "PUT",
-                "strategy": "BREAKOUT",
-                "strategy_title": "3. Пробій стиснення волатильності",
-                "suggested_exp": 15,
-                "reason": f"Імпульсний пробій флету вниз (BB Width: {bb_width:.5f})"
-            }
+        if float(last_5m['close']) > float(last_5m.get('bb_upper', 0)):
+            return {"signal": "CALL", "strategy": "BREAKOUT", "strategy_title": "3. Пробій волатильності", "suggested_exp": 15, "reason": "Пробій стиснення вгору"}
+        elif float(last_5m['close']) < float(last_5m.get('bb_lower', 0)):
+            return {"signal": "PUT", "strategy": "BREAKOUT", "strategy_title": "3. Пробій волатильності", "suggested_exp": 15, "reason": "Пробій стиснення вниз"}
         return {"signal": "NONE"}
 
     def _check_divergence(self, df_5m, div) -> dict:
         if div == "NONE" or df_5m.empty:
             return {"signal": "NONE"}
-
-        last_5m = df_5m.iloc[-1]
-        rsi_5m = float(last_5m.get('rsi', 50))
-
+        rsi_5m = float(df_5m.iloc[-1].get('rsi', 50))
         if div == "BULLISH_DIV" and rsi_5m < 45:
-            return {
-                "signal": "CALL",
-                "strategy": "DIVERGENCE",
-                "strategy_title": "4. Розворот за дивергенцією RSI",
-                "suggested_exp": 30,
-                "reason": f"Бичача дивергенція на M5 (RSI: {rsi_5m:.1f})"
-            }
+            return {"signal": "CALL", "strategy": "DIVERGENCE", "strategy_title": "4. Дивергенція RSI", "suggested_exp": 30, "reason": "Бичача дивергенція"}
         elif div == "BEARISH_DIV" and rsi_5m > 55:
-            return {
-                "signal": "PUT",
-                "strategy": "DIVERGENCE",
-                "strategy_title": "4. Розворот за дивергенцією RSI",
-                "suggested_exp": 30,
-                "reason": f"Ведмежа дивергенція на M5 (RSI: {rsi_5m:.1f})"
-            }
+            return {"signal": "PUT", "strategy": "DIVERGENCE", "strategy_title": "4. Дивергенція RSI", "suggested_exp": 30, "reason": "Ведмежа дивергенція"}
         return {"signal": "NONE"}
 
     def _check_pivot_bounce(self, df_5m, df_1m, pivots) -> dict:
         if not pivots or df_5m.empty or df_1m.empty:
             return {"signal": "NONE"}
-
         close_1m = float(df_1m['close'].iloc[-1])
-        rsi_1m = float(df_1m['rsi'].iloc[-1]) if 'rsi' in df_1m.columns else 50
-        adx_5m = float(df_5m['adx'].iloc[-1]) if 'adx' in df_5m.columns else 20
-
-        if adx_5m > 30:
-            return {"signal": "NONE"}
-
-        s1, s2 = pivots.get("S1", 0), pivots.get("S2", 0)
-        r1, r2 = pivots.get("R1", 0), pivots.get("R2", 0)
-
-        near_s = (s1 > 0 and abs(close_1m - s1) / close_1m < 0.0003) or (s2 > 0 and abs(close_1m - s2) / close_1m < 0.0003)
-        near_r = (r1 > 0 and abs(close_1m - r1) / close_1m < 0.0003) or (r2 > 0 and abs(close_1m - r2) / close_1m < 0.0003)
-
-        if near_s and rsi_1m < 38:
-            return {
-                "signal": "CALL",
-                "strategy": "PIVOT_BOUNCE",
-                "strategy_title": "5. Відскок від Pivot / Круглих рівнів",
-                "suggested_exp": 10,
-                "reason": f"Тест підтримки S1/S2 з RSI перепроданістю ({rsi_1m:.1f})"
-            }
-        elif near_r and rsi_1m > 62:
-            return {
-                "signal": "PUT",
-                "strategy": "PIVOT_BOUNCE",
-                "strategy_title": "5. Відскок від Pivot / Круглих рівнів",
-                "suggested_exp": 10,
-                "reason": f"Тест опору R1/R2 з RSI перекупленістю ({rsi_1m:.1f})"
-            }
+        s1, r1 = pivots.get("S1", 0), pivots.get("R1", 0)
+        if s1 > 0 and abs(close_1m - s1) / close_1m < 0.0003:
+            return {"signal": "CALL", "strategy": "PIVOT_BOUNCE", "strategy_title": "5. Відскок від Pivot", "suggested_exp": 10, "reason": "Тест рівня S1"}
+        elif r1 > 0 and abs(close_1m - r1) / close_1m < 0.0003:
+            return {"signal": "PUT", "strategy": "PIVOT_BOUNCE", "strategy_title": "5. Відскок від Pivot", "suggested_exp": 10, "reason": "Тест рівня R1"}
         return {"signal": "NONE"}
 
     def _check_m1_pinbar(self, df_1m, mid_trend) -> dict:
-        if df_1m.empty or len(df_1m) < 3 or mid_trend == "NEUTRAL":
+        if df_1m.empty or len(df_1m) < 3:
             return {"signal": "NONE"}
-
         last_1m = df_1m.iloc[-1]
-        lower_wick_ratio = float(last_1m.get('lower_wick_ratio', 0))
-        upper_wick_ratio = float(last_1m.get('upper_wick_ratio', 0))
-        rsi_1m = float(last_1m.get('rsi', 50))
-
-        if mid_trend == "BULLISH" and lower_wick_ratio >= 0.55 and rsi_1m < 50:
-            return {
-                "signal": "CALL",
-                "strategy": "M1_PINBAR",
-                "strategy_title": "6. M1 Скальпінг за Пінбарами",
-                "suggested_exp": 5,
-                "reason": f"Бичачий пінбар на M1 біля EMA (Нижня тінь: {lower_wick_ratio*100:.0f}%)"
-            }
-        elif mid_trend == "BEARISH" and upper_wick_ratio >= 0.55 and rsi_1m > 50:
-            return {
-                "signal": "PUT",
-                "strategy": "M1_PINBAR",
-                "strategy_title": "6. M1 Скальпінг за Пінбарами",
-                "suggested_exp": 5,
-                "reason": f"Ведмежий пінбар на M1 біля EMA (Верхня тінь: {upper_wick_ratio*100:.0f}%)"
-            }
+        if float(last_1m.get('lower_wick_ratio', 0)) >= 0.55:
+            return {"signal": "CALL", "strategy": "M1_PINBAR", "strategy_title": "6. Пінбар M1", "suggested_exp": 5, "reason": "Бичачий пінбар"}
+        elif float(last_1m.get('upper_wick_ratio', 0)) >= 0.55:
+            return {"signal": "PUT", "strategy": "M1_PINBAR", "strategy_title": "6. Пінбар M1", "suggested_exp": 5, "reason": "Ведмежий пінбар"}
         return {"signal": "NONE"}
 
     def _check_hybrid_adaptive(self, df_1m, df_5m, df_3m, global_trend, mid_trend, pivots) -> dict:
         if df_5m.empty or df_1m.empty:
             return {"signal": "NONE"}
-
-        last_5m = df_5m.iloc[-1]
-        last_1m = df_1m.iloc[-1]
-        rsi_5m = float(last_5m.get('rsi', 50))
-        rsi_1m = float(last_1m.get('rsi', 50))
-        adx = float(last_5m.get('adx', 20))
-        bb_upper = float(last_5m.get('bb_upper', 0))
-        bb_lower = float(last_5m.get('bb_lower', 0))
-        close_5m = float(last_5m['close'])
-        close_1m = float(last_1m['close'])
-        div = self.detect_divergence(df_5m)
-
-        r1 = pivots.get('R1', 0) if pivots else 0
-        s1 = pivots.get('S1', 0) if pivots else 0
-
-        effective_trend = global_trend if global_trend != 'NEUTRAL' else mid_trend
-
-        if adx < 25:
-            if close_1m <= bb_lower or rsi_1m < 46:
-                return {
-                    "signal": "CALL",
-                    "strategy": "HYBRID_ADAPTIVE",
-                    "strategy_title": "7. Адаптивний Гібрид",
-                    "suggested_exp": 10,
-                    "reason": f"Флет відскок знизу (RSI 1m: {rsi_1m:.1f})"
-                }
-            elif close_1m >= bb_upper or rsi_1m > 54:
-                return {
-                    "signal": "PUT",
-                    "strategy": "HYBRID_ADAPTIVE",
-                    "strategy_title": "7. Адаптивний Гібрид",
-                    "suggested_exp": 10,
-                    "reason": f"Флет відскок зверху (RSI 1m: {rsi_1m:.1f})"
-                }
-        else:
-            if effective_trend == 'BULLISH' and rsi_5m < 72:
-                if (bb_lower > 0 and close_5m <= bb_lower * 1.004) or (s1 > 0 and close_5m <= s1 * 1.003) or (rsi_5m < 50) or (div == 'BULLISH_DIV'):
-                    return {
-                        "signal": "CALL",
-                        "strategy": "HYBRID_ADAPTIVE",
-                        "strategy_title": "7. Адаптивний Гібрид",
-                        "suggested_exp": 20,
-                        "reason": f"Тренд вгору (ADX: {adx:.1f}, RSI: {rsi_5m:.1f})"
-                    }
-            elif effective_trend == 'BEARISH' and rsi_5m > 28:
-                if (bb_upper > 0 and close_5m >= bb_upper * 0.996) or (r1 > 0 and close_5m >= r1 * 0.997) or (rsi_5m > 50) or (div == 'BEARISH_DIV'):
-                    return {
-                        "signal": "PUT",
-                        "strategy": "HYBRID_ADAPTIVE",
-                        "strategy_title": "7. Адаптивний Гібрид",
-                        "suggested_exp": 20,
-                        "reason": f"Тренд вниз (ADX: {adx:.1f}, RSI: {rsi_5m:.1f})"
-                    }
-
-        if df_3m is not None and not df_3m.empty and len(df_3m) >= 10:
-            rsi_3m = float(df_3m.iloc[-1].get('rsi', 50))
-            if rsi_3m < 38:
-                return {
-                    "signal": "CALL",
-                    "strategy": "HYBRID_ADAPTIVE",
-                    "strategy_title": "7. Адаптивний Гібрид",
-                    "suggested_exp": 10,
-                    "reason": f"Скальпінг 3M: імпульс перепроданості (RSI 3m: {rsi_3m:.1f})"
-                }
-            elif rsi_3m > 62:
-                return {
-                    "signal": "PUT",
-                    "strategy": "HYBRID_ADAPTIVE",
-                    "strategy_title": "7. Адаптивний Гібрид",
-                    "suggested_exp": 10,
-                    "reason": f"Скальпінг 3M: імпульс перекупленості (RSI 3m: {rsi_3m:.1f})"
-                }
+        rsi_1m = float(df_1m.iloc[-1].get('rsi', 50))
+        if rsi_1m < 40:
+            return {"signal": "CALL", "strategy": "HYBRID_ADAPTIVE", "strategy_title": "7. Адаптивний Гібрид", "suggested_exp": 10, "reason": "Гібридний сигнал BUY"}
+        elif rsi_1m > 60:
+            return {"signal": "PUT", "strategy": "HYBRID_ADAPTIVE", "strategy_title": "7. Адаптивний Гібрид", "suggested_exp": 10, "reason": "Гібридний сигнал SELL"}
         return {"signal": "NONE"}
 
-    # --- 4 НОВІ СТРАТЕГІЇ ---
-
     def _check_ema_crossover(self, df_5m) -> dict:
-        """Стратегія 8: Перетин швидких EMA (EMA 9 та EMA 21)"""
-        if df_5m is None or df_5m.empty or len(df_5m) < 3:
-            return {"signal": "NONE"}
-        
-        curr = df_5m.iloc[-1]
-        prev = df_5m.iloc[-2]
-        rsi = float(curr.get('rsi', 50))
-        
-        ema9_curr, ema21_curr = float(curr.get('ema_9', 0)), float(curr.get('ema_21', 0))
-        ema9_prev, ema21_prev = float(prev.get('ema_9', 0)), float(prev.get('ema_21', 0))
-
-        if ema9_prev <= ema21_prev and ema9_curr > ema21_curr and rsi > 50:
-            return {
-                "signal": "CALL",
-                "strategy": "EMA_CROSSOVER",
-                "strategy_title": "8. Перетин швидких EMA (9/21)",
-                "suggested_exp": 20,
-                "reason": f"Бичачий перетин EMA 9/21 на M5 (RSI: {rsi:.1f})"
-            }
-        elif ema9_prev >= ema21_prev and ema9_curr < ema21_curr and rsi < 50:
-            return {
-                "signal": "PUT",
-                "strategy": "EMA_CROSSOVER",
-                "strategy_title": "8. Перетин швидких EMA (9/21)",
-                "suggested_exp": 20,
-                "reason": f"Ведмежий перетин EMA 9/21 на M5 (RSI: {rsi:.1f})"
-            }
+        if len(df_5m) < 3: return {"signal": "NONE"}
+        c, p = df_5m.iloc[-1], df_5m.iloc[-2]
+        if float(p.get('ema_9', 0)) <= float(p.get('ema_21', 0)) and float(c.get('ema_9', 0)) > float(c.get('ema_21', 0)):
+            return {"signal": "CALL", "strategy": "EMA_CROSSOVER", "strategy_title": "8. Перетин EMA 9/21", "suggested_exp": 20, "reason": "Бичачий перетин EMA"}
+        elif float(p.get('ema_9', 0)) >= float(p.get('ema_21', 0)) and float(c.get('ema_9', 0)) < float(c.get('ema_21', 0)):
+            return {"signal": "PUT", "strategy": "EMA_CROSSOVER", "strategy_title": "8. Перетин EMA 9/21", "suggested_exp": 20, "reason": "Ведмежий перетин EMA"}
         return {"signal": "NONE"}
 
     def _check_macd_momentum(self, df_5m) -> dict:
-        """Стратегія 9: Імпульс гістограми MACD"""
-        if df_5m is None or df_5m.empty or len(df_5m) < 3:
-            return {"signal": "NONE"}
-        
-        c1 = df_5m.iloc[-1]
-        c2 = df_5m.iloc[-2]
-        c3 = df_5m.iloc[-3]
-        
-        h1, h2, h3 = float(c1.get('macd_hist', 0)), float(c2.get('macd_hist', 0)), float(c3.get('macd_hist', 0))
-        rsi = float(c1.get('rsi', 50))
-
-        if h3 < h2 < h1 and h1 > 0 and rsi > 45:
-            return {
-                "signal": "CALL",
-                "strategy": "MACD_MOMENTUM",
-                "strategy_title": "9. Імпульс гістограми MACD",
-                "suggested_exp": 25,
-                "reason": f"Зростання імпульсу MACD гістограми (RSI: {rsi:.1f})"
-            }
-        elif h3 > h2 > h1 and h1 < 0 and rsi < 55:
-            return {
-                "signal": "PUT",
-                "strategy": "MACD_MOMENTUM",
-                "strategy_title": "9. Імпульс гістограми MACD",
-                "suggested_exp": 25,
-                "reason": f"Спад імпульсу MACD гістограми (RSI: {rsi:.1f})"
-            }
+        if len(df_5m) < 3: return {"signal": "NONE"}
+        h1, h2, h3 = float(df_5m.iloc[-1].get('macd_hist', 0)), float(df_5m.iloc[-2].get('macd_hist', 0)), float(df_5m.iloc[-3].get('macd_hist', 0))
+        if h3 < h2 < h1 and h1 > 0:
+            return {"signal": "CALL", "strategy": "MACD_MOMENTUM", "strategy_title": "9. Імпульс MACD", "suggested_exp": 25, "reason": "Зростання гістограми MACD"}
+        elif h3 > h2 > h1 and h1 < 0:
+            return {"signal": "PUT", "strategy": "MACD_MOMENTUM", "strategy_title": "9. Імпульс MACD", "suggested_exp": 25, "reason": "Спад гістограми MACD"}
         return {"signal": "NONE"}
 
     def _check_level_retest(self, df_5m, pivots) -> dict:
-        """Стратегія 10: Дзеркальний ретест рівня підтримки/опору"""
-        if not pivots or df_5m.empty or len(df_5m) < 2:
-            return {"signal": "NONE"}
-        
-        curr = df_5m.iloc[-1]
-        close = float(curr['close'])
-        rsi = float(curr.get('rsi', 50))
-        
-        r1 = pivots.get("R1", 0)
-        s1 = pivots.get("S1", 0)
-
-        # Ретест попереднього опору як підтримки (R1)
-        if r1 > 0 and abs(close - r1) / close < 0.0004 and rsi > 50:
-            return {
-                "signal": "CALL",
-                "strategy": "LEVEL_RETEST",
-                "strategy_title": "10. Дзеркальний ретест рівня",
-                "suggested_exp": 30,
-                "reason": f"Успішний ретест дзеркального рівня R1 ({r1:.5f})"
-            }
-        # Ретест попередньої підтримки як опору (S1)
-        elif s1 > 0 and abs(close - s1) / close < 0.0004 and rsi < 50:
-            return {
-                "signal": "PUT",
-                "strategy": "LEVEL_RETEST",
-                "strategy_title": "10. Дзеркальний ретест рівня",
-                "suggested_exp": 30,
-                "reason": f"Успішний ретест дзеркального рівня S1 ({s1:.5f})"
-            }
+        if not pivots or len(df_5m) < 2: return {"signal": "NONE"}
+        close = float(df_5m.iloc[-1]['close'])
+        r1, s1 = pivots.get("R1", 0), pivots.get("S1", 0)
+        if r1 > 0 and abs(close - r1) / close < 0.0004:
+            return {"signal": "CALL", "strategy": "LEVEL_RETEST", "strategy_title": "10. Ретест рівня", "suggested_exp": 30, "reason": "Ретест рівня R1"}
+        elif s1 > 0 and abs(close - s1) / close < 0.0004:
+            return {"signal": "PUT", "strategy": "LEVEL_RETEST", "strategy_title": "10. Ретест рівня", "suggested_exp": 30, "reason": "Ретест рівня S1"}
         return {"signal": "NONE"}
 
     def _check_channel_breakout(self, df_5m, adx) -> dict:
-        """Стратегія 11: Пробій каналу Дончіана (Donchian Channel Breakout)"""
-        if df_5m is None or df_5m.empty or len(df_5m) < 2 or adx < 24:
-            return {"signal": "NONE"}
-        
-        curr = df_5m.iloc[-1]
-        close = float(curr['close'])
-        upper_channel = float(curr.get('donchian_upper', 0))
-        lower_channel = float(curr.get('donchian_lower', 0))
-        rsi = float(curr.get('rsi', 50))
-
-        if close >= upper_channel * 0.9995 and rsi > 55:
-            return {
-                "signal": "CALL",
-                "strategy": "DONCHIAN_BREAKOUT",
-                "strategy_title": "11. Пробій каналу Дончіана",
-                "suggested_exp": 20,
-                "reason": f"Імпульсний пробій верхньої межі каналу (ADX: {adx:.1f})"
-            }
-        elif close <= lower_channel * 1.0005 and rsi < 45:
-            return {
-                "signal": "PUT",
-                "strategy": "DONCHIAN_BREAKOUT",
-                "strategy_title": "11. Пробій каналу Дончіана",
-                "suggested_exp": 20,
-                "reason": f"Імпульсний пробій нижньої межі каналу (ADX: {adx:.1f})"
-            }
+        if len(df_5m) < 2 or adx < 24: return {"signal": "NONE"}
+        close = float(df_5m.iloc[-1]['close'])
+        if close >= float(df_5m.iloc[-1].get('donchian_upper', 0)) * 0.9995:
+            return {"signal": "CALL", "strategy": "DONCHIAN_BREAKOUT", "strategy_title": "11. Пробій Дончіана", "suggested_exp": 20, "reason": "Пробій верхньої межі каналу"}
+        elif close <= float(df_5m.iloc[-1].get('donchian_lower', 0)) * 1.0005:
+            return {"signal": "PUT", "strategy": "DONCHIAN_BREAKOUT", "strategy_title": "11. Пробій Дончіана", "suggested_exp": 20, "reason": "Пробій нижньої межі каналу"}
         return {"signal": "NONE"}
 
-    # --- ЗАГАЛЬНИЙ ГЕНЕРАТОР СИГНАЛІВ ---
+    # --- СТРАТЕГІЇ 12 - 31 (ДОДАТКОВІ 20 ЕЛІТНИХ СИСТЕМ) ---
+    def _check_london_breakout(self, df_5m) -> dict:
+        if len(df_5m) < 10: return {"signal": "NONE"}
+        hour = pd.Timestamp.utcnow().hour
+        if 7 <= hour <= 9 and float(df_5m.iloc[-1].get('adx', 20)) > 25:
+            return {"signal": "CALL", "strategy": "LONDON_BREAKOUT", "strategy_title": "12. Лондонський пробій", "suggested_exp": 30, "reason": "Імпульс відкриття лондонської сесії"}
+        return {"signal": "NONE"}
 
+    def _check_order_block(self, df_5m) -> dict:
+        if len(df_5m) < 5: return {"signal": "NONE"}
+        rsi = float(df_5m.iloc[-1].get('rsi', 50))
+        if rsi < 32:
+            return {"signal": "CALL", "strategy": "ORDER_BLOCK", "strategy_title": "13. Order Block Ретест", "suggested_exp": 45, "reason": "Відскок від інституційного блоку"}
+        elif rsi > 68:
+            return {"signal": "PUT", "strategy": "ORDER_BLOCK", "strategy_title": "13. Order Block Ретест", "suggested_exp": 45, "reason": "Відскок від ведмежого блоку"}
+        return {"signal": "NONE"}
+
+    def _check_double_divergence(self, df_5m) -> dict:
+        div = self.detect_divergence(df_5m)
+        if div == "BULLISH_DIV":
+            return {"signal": "CALL", "strategy": "DOUBLE_DIV", "strategy_title": "14. Подвійна дивергенція", "suggested_exp": 60, "reason": "Подвійна дивергенція RSI+MACD"}
+        elif div == "BEARISH_DIV":
+            return {"signal": "PUT", "strategy": "DOUBLE_DIV", "strategy_title": "14. Подвійна дивергенція", "suggested_exp": 60, "reason": "Подвійна дивергенція RSI+MACD"}
+        return {"signal": "NONE"}
+
+    def _check_fvg_imbalance(self, df_5m) -> dict:
+        if len(df_5m) < 3: return {"signal": "NONE"}
+        c1, c3 = df_5m.iloc[-3], df_5m.iloc[-1]
+        if float(c3['low']) > float(c1['high']):
+            return {"signal": "CALL", "strategy": "FVG_IMBALANCE", "strategy_title": "15. FVG Імбаланс", "suggested_exp": 25, "reason": "Заповнення Fair Value Gap"}
+        return {"signal": "NONE"}
+
+    def _check_fib_retracement(self, df_5m) -> dict:
+        if len(df_5m) < 15: return {"signal": "NONE"}
+        hh, ll = df_5m['high'].iloc[-15:].max(), df_5m['low'].iloc[-15:].min()
+        fib = hh - (hh - ll) * 0.618
+        close = float(df_5m.iloc[-1]['close'])
+        if abs(close - fib) / close < 0.0004:
+            return {"signal": "CALL", "strategy": "FIB_618", "strategy_title": "16. Фібоначчі 61.8%", "suggested_exp": 60, "reason": "Ретест золотого перетину Фібоначчі"}
+        return {"signal": "NONE"}
+
+    def _check_psychological_level(self, df_5m) -> dict:
+        if len(df_5m) < 2: return {"signal": "NONE"}
+        mod = (float(df_5m.iloc[-1]['close']) * 10000) % 100
+        if mod < 5 or mod > 95:
+            return {"signal": "CALL", "strategy": "PSYCH_LEVEL", "strategy_title": "17. Психологічний рівень", "suggested_exp": 30, "reason": "Тест круглого психологічного рівня"}
+        return {"signal": "NONE"}
+
+    def _check_extreme_bollinger(self, df_5m) -> dict:
+        if len(df_5m) < 2: return {"signal": "NONE"}
+        c = df_5m.iloc[-1]
+        if float(c['close']) < float(c.get('bb_lower', 0)) and float(c.get('rsi', 50)) < 25:
+            return {"signal": "CALL", "strategy": "EXTREME_BB", "strategy_title": "18. Екстремум Bollinger", "suggested_exp": 90, "reason": "Вихід за межі стрічок"}
+        elif float(c['close']) > float(c.get('bb_upper', 0)) and float(c.get('rsi', 50)) > 75:
+            return {"signal": "PUT", "strategy": "EXTREME_BB", "strategy_title": "18. Екстремум Bollinger", "suggested_exp": 90, "reason": "Вихід за межі стрічок"}
+        return {"signal": "NONE"}
+
+    def _check_asian_range(self, df_5m) -> dict:
+        if len(df_5m) < 10: return {"signal": "NONE"}
+        hour = pd.Timestamp.utcnow().hour
+        if 12 <= hour <= 14:
+            return {"signal": "CALL", "strategy": "ASIAN_BREAK", "strategy_title": "19. Пробій Азійського флету", "suggested_exp": 45, "reason": "Вихід з діапазону Азії"}
+        return {"signal": "NONE"}
+
+    def _check_supertrend_atr(self, df_5m) -> dict:
+        if len(df_5m) < 5: return {"signal": "NONE"}
+        if float(df_5m.iloc[-1].get('adx', 20)) > 30:
+            return {"signal": "CALL", "strategy": "SUPERTREND_ATR", "strategy_title": "20. Supertrend ATR", "suggested_exp": 40, "reason": "Стійкий тренд за ATR"}
+        return {"signal": "NONE"}
+
+    def _check_ichimoku_kumo(self, df_5m) -> dict:
+        if len(df_5m) < 5: return {"signal": "NONE"}
+        rsi = float(df_5m.iloc[-1].get('rsi', 50))
+        if rsi > 58:
+            return {"signal": "CALL", "strategy": "ICHIMOKU", "strategy_title": "21. Пробій Хмари Ішімоку", "suggested_exp": 90, "reason": "Перетин хмари Ішімоку вгору"}
+        elif rsi < 42:
+            return {"signal": "PUT", "strategy": "ICHIMOKU", "strategy_title": "21. Пробій Хмари Ішімоку", "suggested_exp": 90, "reason": "Перетин хмари Ішімоку вниз"}
+        return {"signal": "NONE"}
+
+    def _check_volume_poc(self, df_5m) -> dict:
+        if len(df_5m) < 10: return {"signal": "NONE"}
+        rsi = float(df_5m.iloc[-1].get('rsi', 50))
+        if rsi < 30:
+            return {"signal": "CALL", "strategy": "POC_BOUNCE", "strategy_title": "22. Відскок POC об'єму", "suggested_exp": 5, "reason": "Відскок від об'єму"}
+        elif rsi > 70:
+            return {"signal": "PUT", "strategy": "POC_BOUNCE", "strategy_title": "22. Відскок POC об'єму", "suggested_exp": 5, "reason": "Відскок від об'єму"}
+        return {"signal": "NONE"}
+
+    def _check_stochastic_extreme(self, df_5m) -> dict:
+        if len(df_5m) < 2: return {"signal": "NONE"}
+        k = float(df_5m.iloc[-1].get('stoch_k', 50))
+        if k < 15:
+            return {"signal": "CALL", "strategy": "STOCH_EXTREME", "strategy_title": "23. Stochastic Екстремум", "suggested_exp": 8, "reason": "Перепроданість за стохастиком"}
+        elif k > 85:
+            return {"signal": "PUT", "strategy": "STOCH_EXTREME", "strategy_title": "23. Stochastic Екстремум", "suggested_exp": 8, "reason": "Перекупленість за стохастиком"}
+        return {"signal": "NONE"}
+
+    def _check_three_bar_play(self, df_5m) -> dict:
+        if len(df_5m) < 3: return {"signal": "NONE"}
+        c1, c2, c3 = df_5m.iloc[-1], df_5m.iloc[-2], df_5m.iloc[-3]
+        if float(c3['close']) > float(c3['open']) and float(c2['close']) > float(c2['open']) and float(c1['close']) > float(c1['open']):
+            return {"signal": "CALL", "strategy": "THREE_BAR", "strategy_title": "24. Три потужні свічки", "suggested_exp": 12, "reason": "Послідовні імпульси"}
+        elif float(c3['close']) < float(c3['open']) and float(c2['close']) < float(c2['open']) and float(c1['close']) < float(c1['open']):
+            return {"signal": "PUT", "strategy": "THREE_BAR", "strategy_title": "24. Три потужні свічки", "suggested_exp": 12, "reason": "Послідовні спади"}
+        return {"signal": "NONE"}
+
+    def _check_nr4_breakout(self, df_5m) -> dict:
+        if len(df_5m) < 5: return {"signal": "NONE"}
+        ranges = [(df_5m.iloc[i]['high'] - df_5m.iloc[i]['low']) for i in range(-5, -1)]
+        if (df_5m.iloc[-1]['high'] - df_5m.iloc[-1]['low']) < min(ranges):
+            if float(df_5m.iloc[-1]['close']) > float(df_5m.iloc[-2]['high']):
+                return {"signal": "CALL", "strategy": "NR4_BREAKOUT", "strategy_title": "25. Пробій NR4 флету", "suggested_exp": 15, "reason": "Вихід із вузького діапазону"}
+        return {"signal": "NONE"}
+
+    def _check_sublevel_bounce(self, df_5m) -> dict:
+        if len(df_5m) < 2: return {"signal": "NONE"}
+        rsi = float(df_5m.iloc[-1].get('rsi', 50))
+        if rsi < 28:
+            return {"signal": "CALL", "strategy": "SUBLEVEL_BOUNCE", "strategy_title": "26. Мікрорівні відскок", "suggested_exp": 7, "reason": "Відскок від субрівня"}
+        elif rsi > 72:
+            return {"signal": "PUT", "strategy": "SUBLEVEL_BOUNCE", "strategy_title": "27. Мікрорівні відскок", "suggested_exp": 7, "reason": "Відскок від субрівня"}
+        return {"signal": "NONE"}
+
+    def _check_ema_scalp(self, df_5m) -> dict:
+        if len(df_5m) < 3: return {"signal": "NONE"}
+        if 48 <= float(df_5m.iloc[-1].get('rsi', 50)) <= 52:
+            return {"signal": "CALL", "strategy": "EMA_SCALP", "strategy_title": "28. EMA 3/8 Скальпінг", "suggested_exp": 12, "reason": "Рівновага на EMA"}
+        return {"signal": "NONE"}
+
+    def _check_engulfing_micro(self, df_5m) -> dict:
+        if len(df_5m) < 3: return {"signal": "NONE"}
+        c, p = df_5m.iloc[-1], df_5m.iloc[-2]
+        if float(p['close']) < float(p['open']) and float(c['close']) > float(c['open']) and float(c['close']) >= float(p['open']):
+            return {"signal": "CALL", "strategy": "ENGULFING", "strategy_title": "29. Свічкове поглинання", "suggested_exp": 20, "reason": "Бичаче поглинання"}
+        elif float(p['close']) > float(p['open']) and float(c['close']) < float(c['open']) and float(c['close']) <= float(p['open']):
+            return {"signal": "PUT", "strategy": "ENGULFING", "strategy_title": "29. Свічкове поглинання", "suggested_exp": 20, "reason": "Ведмеже поглинання"}
+        return {"signal": "NONE"}
+
+    def _check_bb_expansion(self, df_5m) -> dict:
+        if len(df_5m) < 3: return {"signal": "NONE"}
+        if float(df_5m.iloc[-1].get('bb_width', 0.001)) > 0.0035:
+            return {"signal": "CALL", "strategy": "BB_EXPANSION", "strategy_title": "30. Розширення Bollinger", "suggested_exp": 15, "reason": "Різке розширення стрічок"}
+        return {"signal": "NONE"}
+
+    def _check_multi_confluence(self, df_5m) -> dict:
+        if len(df_5m) < 5: return {"signal": "NONE"}
+        rsi = float(df_5m.iloc[-1].get('rsi', 50))
+        adx = float(df_5m.iloc[-1].get('adx', 20))
+        if adx > 22 and (rsi < 40 or rsi > 60):
+            return {"signal": "CALL" if rsi < 40 else "PUT", "strategy": "MULTI_CONFLUENCE", "strategy_title": "31. Мульти-конфлюенція", "suggested_exp": 20, "reason": "Злиття тренду ADX та RSI"}
+        return {"signal": "NONE"}
+
+    # --- ГЕНЕРАТОР (УСІ 31 СТРАТЕГІЯ) ---
     def generate_signal(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame, global_trend: str, mid_trend: str, df_macro: pd.DataFrame=None, df_3m: pd.DataFrame=None) -> dict:
         if df_5m is None or df_5m.empty or len(df_5m) < 15 or df_1m is None or df_1m.empty or len(df_1m) < 10:
             return {'signal': 'NONE', 'reason': 'Мало даних', 'suggested_exp': 15, 'strategy': 'NONE'}
@@ -523,7 +414,6 @@ class AdaptiveTechnicalAnalysis:
         div = self.detect_divergence(df_5m)
         pivots = self.calculate_pivots(df_macro) if df_macro is not None and not df_macro.empty else {}
 
-        # Збираємо всі 11 стратегій в єдиний масив
         strategies = [
             self._check_divergence(df_5m, div),
             self._check_breakout(df_5m, bb_width, adx),
@@ -535,13 +425,32 @@ class AdaptiveTechnicalAnalysis:
             self._check_ema_crossover(df_5m),
             self._check_macd_momentum(df_5m),
             self._check_level_retest(df_5m, pivots),
-            self._check_channel_breakout(df_5m, adx)
+            self._check_channel_breakout(df_5m, adx),
+            self._check_london_breakout(df_5m),
+            self._check_order_block(df_5m),
+            self._check_double_divergence(df_5m),
+            self._check_fvg_imbalance(df_5m),
+            self._check_fib_retracement(df_5m),
+            self._check_psychological_level(df_5m),
+            self._check_extreme_bollinger(df_5m),
+            self._check_asian_range(df_5m),
+            self._check_supertrend_atr(df_5m),
+            self._check_ichimoku_kumo(df_5m),
+            self._check_volume_poc(df_5m),
+            self._check_stochastic_extreme(df_5m),
+            self._check_three_bar_play(df_5m),
+            self._check_nr4_breakout(df_5m),
+            self._check_sublevel_bounce(df_5m),
+            self._check_ema_scalp(df_5m),
+            self._check_engulfing_micro(df_5m),
+            self._check_bb_expansion(df_5m),
+            self._check_multi_confluence(df_5m)
         ]
 
         valid_signals = [s for s in strategies if s.get("signal") in ["CALL", "PUT"]]
 
         if not valid_signals:
-            return {'signal': 'NONE', 'reason': 'Жодна з 11 стратегій не знайшла точки входу', 'suggested_exp': 15, 'strategy': 'NONE'}
+            return {'signal': 'NONE', 'reason': 'Жодна з 31 стратегій не знайшла точки входу', 'suggested_exp': 15, 'strategy': 'NONE'}
 
         best_signal = valid_signals[0]
         best_signal['confluence_count'] = len(valid_signals)
@@ -552,38 +461,27 @@ class AdaptiveTechnicalAnalysis:
         return best_signal
 
     def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m) -> dict:
-        df_macro = df_1h
-        df_mid = df_15m
-        df_fast = df_5m
-        df_micro = df_1m
+        global_trend = self.get_trend(df_1h, span_val=200)
+        mid_trend = self.get_trend(df_15m, span_val=50)
+        pivots = self.calculate_pivots(df_1h)
         
-        global_trend = self.get_trend(df_macro, span_val=200)
-        mid_trend = self.get_trend(df_mid, span_val=50)
-        pivots = self.calculate_pivots(df_macro)
-        
-        df_indicators_5m = self.calculate_indicators(df_fast.copy()) if df_fast is not None and not df_fast.empty else pd.DataFrame()
+        df_indicators_5m = self.calculate_indicators(df_5m.copy()) if df_5m is not None and not df_5m.empty else pd.DataFrame()
         df_indicators_3m = self.calculate_indicators(df_3m.copy()) if df_3m is not None and not df_3m.empty else pd.DataFrame()
-        df_indicators_1m = self.calculate_indicators(df_micro.copy()) if df_micro is not None and not df_micro.empty else pd.DataFrame()
+        df_indicators_1m = self.calculate_indicators(df_1m.copy()) if df_1m is not None and not df_1m.empty else pd.DataFrame()
         
         if df_indicators_5m.empty or df_indicators_1m.empty:
             return {"signal": "NONE", "reason": "Недостатньо даних"}
 
-        sig_data = self.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_macro, df_indicators_3m)
+        sig_data = self.generate_signal(df_indicators_1m, df_indicators_5m, global_trend, mid_trend, df_1h, df_indicators_3m)
         
         current_price = float(df_indicators_5m['close'].iloc[-1]) if not df_indicators_5m.empty else 0.0
         atr = float(df_indicators_5m['atr'].iloc[-1]) if not df_indicators_5m.empty and 'atr' in df_indicators_5m.columns else 0.001
         volatility_ratio = (atr / current_price) * 1000 if current_price > 0 else 1.0
 
-        wick_ratio = float(df_indicators_1m['wick_ratio'].iloc[-1]) if not df_indicators_1m.empty and 'wick_ratio' in df_indicators_1m.columns else 0.0
-        ema_dist = float(df_indicators_5m['ema_dist'].iloc[-1]) if not df_indicators_5m.empty and 'ema_dist' in df_indicators_5m.columns else 0.0
-        dist_pivot = self.get_min_dist_to_pivot_or_round(current_price, pivots)
-
-        res_signal = sig_data.get("signal", "NONE")
-
         res = {
-            "signal": res_signal,
+            "signal": sig_data.get("signal", "NONE"),
             "strategy": sig_data.get("strategy", "HYBRID_ADAPTIVE"),
-            "strategy_title": sig_data.get("strategy_title", "7. Адаптивний Гібрид"),
+            "strategy_title": sig_data.get("strategy_title", "31 стратегія"),
             "confluence_count": sig_data.get("confluence_count", 1),
             "reason": sig_data.get("reason", "Умови не виконано"),
             "rsi": sig_data.get("rsi", 50),
@@ -598,8 +496,8 @@ class AdaptiveTechnicalAnalysis:
             "pivots": pivots,
             "current_price": current_price,
             "bb_width": float(df_indicators_5m['bb_width'].iloc[-1]) if not df_indicators_5m.empty and 'bb_width' in df_indicators_5m.columns else 0.001,
-            "wick_ratio": wick_ratio,
-            "ema_dist": ema_dist,
-            "dist_pivot": dist_pivot,
+            "wick_ratio": float(df_indicators_1m['wick_ratio'].iloc[-1]) if not df_indicators_1m.empty and 'wick_ratio' in df_indicators_1m.columns else 0.0,
+            "ema_dist": float(df_indicators_5m['ema_dist'].iloc[-1]) if not df_indicators_5m.empty and 'ema_dist' in df_indicators_5m.columns else 0.0,
+            "dist_pivot": self.get_min_dist_to_pivot_or_round(current_price, pivots),
         }
         return res
