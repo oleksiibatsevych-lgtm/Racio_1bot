@@ -31,7 +31,7 @@ def init_db():
                 username VARCHAR(255),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-        """
+            """
         )
 
         cursor.execute(
@@ -62,11 +62,15 @@ def init_db():
                 volatility_ratio NUMERIC,
                 wick_ratio NUMERIC,
                 ema_dist NUMERIC,
+                strategy VARCHAR(50),
                 ai_review TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
-        """
+            """
         )
+
+        # Авто-міграція колонки strategy
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(50);")
 
         cursor.execute(
             """
@@ -76,7 +80,7 @@ def init_db():
                 log_text TEXT,
                 timestamp REAL
             );
-        """
+            """
         )
 
         cursor.execute(
@@ -85,13 +89,13 @@ def init_db():
                 prompt_key VARCHAR(100) PRIMARY KEY,
                 prompt_text TEXT
             );
-        """
+            """
         )
 
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info("✅ Базу даних PostgreSQL ініціалізовано.")
+        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано та оновлено.")
     except Exception as e:
         logger.error(f"⚠️ Помилка ініціалізації БД: {e}")
 
@@ -106,7 +110,7 @@ def register_user(user_id, username=None):
             VALUES (%s, %s)
             ON CONFLICT (user_id) DO UPDATE 
             SET username = EXCLUDED.username;
-        """,
+            """,
             (user_id, username),
         )
         conn.commit()
@@ -137,6 +141,7 @@ def save_signal(
     volatility_ratio=None,
     wick_ratio=None,
     ema_dist=None,
+    strategy="HYBRID_ADAPTIVE",
     **kwargs,
 ):
     try:
@@ -147,22 +152,22 @@ def save_signal(
             INSERT INTO signals (
                 chat_id, message_id, ticker, signal_type, entry_price, primary_tf, 
                 score, expiration_mins, timestamp_str, message_text, rsi, adx, bb_width,
-                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, status
+                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy, status
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING')
             RETURNING id;
-        """,
+            """,
             (
                 chat_id, message_id, ticker, signal_type, entry_price, primary_tf,
                 score, expiration_mins, timestamp_str, message_text, rsi, adx, bb_width,
-                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist,
+                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy
             ),
         )
         signal_id = cursor.fetchone()[0]
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(f"✅ Збережено сигнал #{signal_id} для {ticker} з усіма індикаторами.")
+        logger.info(f"✅ Збережено сигнал #{signal_id} [{strategy}] для {ticker}.")
         return signal_id
     except Exception as e:
         logger.error(f"⚠️ Помилка збереження сигналу в БД: {e}")
@@ -206,7 +211,7 @@ def update_signal_result(signal_id, result, exit_price, pips=0, status="CLOSED")
             UPDATE signals 
             SET status = %s, result = %s, exit_price = %s, pips = %s
             WHERE id = %s;
-        """,
+            """,
             (status, result, exit_price, pips, signal_id),
         )
         conn.commit()
@@ -230,13 +235,12 @@ def save_signal_ai_review(signal_id, review_text):
 
 
 def get_recent_trades_summary(limit=6) -> str:
-    """Формує вибірку останніх закритих WIN та LOSS угод для контекстного навчання ШІ."""
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT ticker, signal_type, result, pips, rsi, adx, divergence, expiration_mins
+            SELECT ticker, signal_type, result, pips, rsi, adx, divergence, expiration_mins, COALESCE(strategy, 'HYBRID') as strategy
             FROM signals 
             WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
             ORDER BY id DESC LIMIT %s;
@@ -254,7 +258,7 @@ def get_recent_trades_summary(limit=6) -> str:
         for r in rows:
             res_flag = "✅ WIN" if r["result"] == "WIN" else "❌ LOSS"
             summary_lines.append(
-                f"- {r['ticker']} | {r['signal_type']} | {res_flag} ({r['pips']} pips) | "
+                f"- [{r['strategy']}] {r['ticker']} | {r['signal_type']} | {res_flag} ({r['pips']} pips) | "
                 f"Експірація: {r['expiration_mins']}хв | RSI: {r['rsi']}, ADX: {r['adx']}, Дивергенція: {r['divergence']}"
             )
         return "\n".join(summary_lines)
@@ -287,7 +291,7 @@ def set_system_prompt(prompt_key, prompt_text):
             INSERT INTO system_prompts (prompt_key, prompt_text)
             VALUES (%s, %s)
             ON CONFLICT (prompt_key) DO UPDATE SET prompt_text = EXCLUDED.prompt_text;
-        """,
+            """,
             (prompt_key, prompt_text),
         )
         conn.commit()
@@ -311,15 +315,31 @@ def get_stats():
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses,
                 COUNT(*) FILTER (WHERE status = 'PENDING') as pending
             FROM signals;
-        """
+            """
         )
         stats = cursor.fetchone()
+        
+        cursor.execute(
+            """
+            SELECT 
+                COALESCE(strategy, 'HYBRID_ADAPTIVE') as strat,
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE result = 'WIN') as wins,
+                COUNT(*) FILTER (WHERE result = 'LOSS') as losses
+            FROM signals
+            WHERE result IN ('WIN', 'LOSS')
+            GROUP BY strat;
+            """
+        )
+        strat_rows = cursor.fetchall()
         cursor.close()
         conn.close()
+
+        stats['by_strategy'] = strat_rows
         return stats
     except Exception as e:
         logger.error(f"⚠️ Помилка отримання статистики: {e}")
-        return {"total": 0, "wins": 0, "losses": 0, "pending": 0}
+        return {"total": 0, "wins": 0, "losses": 0, "pending": 0, "by_strategy": []}
 
 
 def save_filtered_log(chat_id, log_text):
