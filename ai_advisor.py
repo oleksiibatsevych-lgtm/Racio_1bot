@@ -53,8 +53,8 @@ class AITradingAdvisor:
         if not self.api_key:
             logger.warning("⚠️ GEMINI_API_KEY відсутній. ШІ-аналіз пропущено.")
             return {
-                "decision": "NO",
-                "confidence": 0,
+                "decision": "YES",
+                "confidence": 7,
                 "suggested_expiration": suggested_exp,
                 "reason": "GEMINI_API_KEY не налаштовано",
             }
@@ -64,7 +64,7 @@ class AITradingAdvisor:
 
         default_prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
-        Цей сигнал пройшов попередній відбір технічними індикаторами та ML-моделлю.
+        Цей сигнал сформовано за стратегією: {payload.get('strategy_title', 'Адаптивний Гібрид')} (Підтверджень стратегій: {payload.get('confluence_count', 1)}).
 
         ІСТОРІЯ ОСТАННІХ УГОД СИСТЕМИ (Використовуй для порівняння паттернів WIN/LOSS):
         {recent_history}
@@ -78,12 +78,11 @@ class AITradingAdvisor:
         - Середній тренд (15m): {payload.get('mid_trend', 'Невідомо')}
         - Дивергенція: {payload.get('divergence', 'NONE')}
         - Технічна причина: {payload.get('reason')}
-        - ATR Ratio: {payload.get('atr_ratio')}
         - Початкова рекомендація експірації: {suggested_exp} хв
 
         Завдання:
         1. Оціни доцільність входу в угоду ("YES" або "NO").
-        2. Вкажи динамічний час експірації у хвилинах ВІД 1 ДО 60 ХВИЛИН (наприклад: 1, 3, 5, 12, 20, 45, 60), враховуючи силу тренду та волатильність.
+        2. Вкажи динамічний час експірації у хвилинах ВІД 1 ДО 60 ХВИЛИН (наприклад: 1, 2, 3, 5, 10, 15), враховуючи силу тренду та волатильність.
         3. Підтверджуй вхід ("YES" з оцінкою confidence >= 5), якщо немає критичного протиріччя з трендом.
 
         Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи обгорток markdown:
@@ -123,10 +122,10 @@ class AITradingAdvisor:
 
         if not response_text:
             return {
-                "decision": "NO",
-                "confidence": 0,
+                "decision": "YES",
+                "confidence": 6,
                 "suggested_expiration": suggested_exp,
-                "reason": "ШІ недоступний",
+                "reason": "ШІ тимчасово недоступний, авто-схвалення за ТА",
             }
 
         try:
@@ -152,14 +151,13 @@ class AITradingAdvisor:
         except Exception as e:
             logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}")
             return {
-                "decision": "NO",
-                "confidence": 0,
+                "decision": "YES",
+                "confidence": 6,
                 "suggested_expiration": suggested_exp,
-                "reason": "Помилка обробки відповіді ШІ",
+                "reason": "Помилка обробки відповіді ШІ, вхід за ТА",
             }
 
     def evaluate_closed_trade(self, sig_data: dict) -> str:
-        """Ретроспективний розбір завершеної угоди (WIN/LOSS)."""
         if not self.api_key:
             return "❌ GEMINI_API_KEY не налаштовано для ретроспективного аналізу."
 
@@ -168,6 +166,7 @@ class AITradingAdvisor:
         
         Параметри угоди:
         - Актив: {sig_data.get('ticker')}
+        - Стратегія: {sig_data.get('strategy', 'HYBRID_ADAPTIVE')}
         - Напрямок: {sig_data.get('signal_type')}
         - Ціна входу: {sig_data.get('entry_price')}
         - Ціна виходу (закриття): {sig_data.get('exit_price')}
@@ -176,7 +175,6 @@ class AITradingAdvisor:
         - RSI на момент входу: {sig_data.get('rsi')}
         - ADX: {sig_data.get('adx')}
         - Дивергенція: {sig_data.get('divergence')}
-        - Початкова причина входу: {sig_data.get('message_text')}
 
         Дай короткий, чіткий професійний аналіз українською мовою: чому угода закрилася з таким результатом та що варто врахувати в майбутньому. Зроби висновок у 3-4 реченнях.
         """
