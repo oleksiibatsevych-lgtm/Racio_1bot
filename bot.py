@@ -65,6 +65,7 @@ last_sent_signals = {}
 MACRO_CACHE = {}
 CACHE_TTL = 900
 AUTO_SCAN_CHATS = set()
+ML_FILTER_ENABLED = True  # Статус ML-фільтра (увімкнено за замовчуванням)
 
 database.init_db()
 start_finnhub_ws()
@@ -506,10 +507,14 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         }
         win_probability = ml_filter.predict_proba(ml_features)
 
-        min_ml_threshold = 58.0 if auto_mode else 45.0
-        if win_probability < min_ml_threshold:
-            report_no_signal(f"ML-модель оцінила ймовірність у {win_probability:.1f}% (потрібно > {min_ml_threshold:.0f}%)")
-            return False
+        # Перевірка порогу ML лише якщо фільтр увімкнений
+        if ML_FILTER_ENABLED:
+            min_ml_threshold = 58.0 if auto_mode else 45.0
+            if win_probability < min_ml_threshold:
+                report_no_signal(f"ML-модель оцінила ймовірність у {win_probability:.1f}% (потрібно > {min_ml_threshold:.0f}%)")
+                return False
+        else:
+            logger.info(f"ℹ️ ML-фільтр вимкнено. Пропускаємо поріг ймовірності для {pair_name}.")
 
         is_pivot_ok, pivot_reason = check_pivot_level_proximity(analysis)
         if not is_pivot_ok:
@@ -645,10 +650,11 @@ def start(update, context):
     user = update.effective_user
     database.register_user(user.id, user.username)
 
+    ml_status_text = "🟢 ML-фільтр: ВКЛ" if ML_FILTER_ENABLED else "🔴 ML-фільтр: ВИКЛ"
     keyboard = [
         [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("🔔 Авто-сканер")],
         [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
-        [KeyboardButton("📋 Логи фільтру")]
+        [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_status_text)]
     ]
     update.message.reply_text(
         "Бот Racio_1 із 7 стратегіями готовий! 🚀 Оберіть дію:",
@@ -669,6 +675,23 @@ def handle_message(update, context):
         else:
             AUTO_SCAN_CHATS.add(chat_id)
             update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО! Бот кожні 3 хвилини шукатиме сигнали у фоні.")
+
+    elif text in ["🟢 ML-фільтр: ВКЛ", "🔴 ML-фільтр: ВИКЛ"]:
+        global ML_FILTER_ENABLED
+        ML_FILTER_ENABLED = not ML_FILTER_ENABLED
+        status_str = "увімкнено 🟢" if ML_FILTER_ENABLED else "вимкнено 🔴"
+        ml_status_text = "🟢 ML-фільтр: ВКЛ" if ML_FILTER_ENABLED else "🔴 ML-фільтр: ВИКЛ"
+        
+        keyboard = [
+            [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("🔔 Авто-сканер")],
+            [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
+            [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_status_text)]
+        ]
+        update.message.reply_text(
+            f"⚙️ ML-фільтр тепер <b>{status_str}</b>.",
+            parse_mode="HTML",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
 
     elif text == "💵 Пари":
         buttons = []
