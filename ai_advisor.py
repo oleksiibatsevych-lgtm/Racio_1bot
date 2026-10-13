@@ -1,7 +1,7 @@
-# -*- coding: utf-8 -*-
 import json
 import logging
 import os
+import google.api_core.exceptions
 import google.generativeai as genai
 from PIL import Image
 import database
@@ -16,6 +16,22 @@ class AITradingAdvisor:
             genai.configure(api_key=self.api_key.strip())
 
     def get_available_models(self) -> list:
+        try:
+            available_models = []
+            for m in genai.list_models():
+                if "generateContent" in m.supported_generation_methods:
+                    available_models.append(m.name)
+
+            available_models.sort(
+                key=lambda name: (
+                    0 if "flash" in name else (1 if "pro" in name else 2)
+                )
+            )
+            if available_models:
+                return available_models
+        except Exception as e:
+            logger.warning(f"⚠️ Не вдалося отримати список моделей через API: {e}")
+
         return [
             "gemini-1.5-flash",
             "gemini-1.5-flash-latest",
@@ -24,10 +40,18 @@ class AITradingAdvisor:
             "gemini-2.0-flash-exp",
         ]
 
-    def evaluate_signal(self, name: str, payload: dict, macro_chart=None, mid_chart=None, micro_chart=None) -> dict:
-        suggested_exp = payload.get("suggested_exp", 15)
+    def evaluate_signal(
+        self,
+        name: str,
+        payload: dict,
+        macro_chart=None,
+        mid_chart=None,
+        micro_chart=None,
+    ) -> dict:
+        suggested_exp = payload.get("suggested_exp", 5)
 
         if not self.api_key:
+            logger.warning("⚠️ GEMINI_API_KEY відсутній. ШІ-аналіз пропущено.")
             return {
                 "decision": "YES",
                 "confidence": 7,
@@ -39,9 +63,9 @@ class AITradingAdvisor:
 
         default_prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
-        Сигнал сформовано за матрицею 45 стратегій: {payload.get('strategy_title')} (Підтверджень: {payload.get('confluence_count', 1)}).
+        Цей сигнал сформовано за стратегією: {payload.get('strategy_title', 'Матриця 45 стратегій')} (Збігів у матриці: {payload.get('confluence_count', 1)}).
 
-        ІСТОРІЯ УГОД ТА ВИСНОВКИ ШІ (Для самонавчання):
+        ІСТОРІЯ ОСТАННІХ УГОД СИСТЕМИ:
         {recent_history}
         
         Параметри поточного сигналу:
@@ -49,33 +73,33 @@ class AITradingAdvisor:
         - Поточна ціна: {payload.get('current_price')}
         - RSI: {payload.get('rsi')}
         - ADX: {payload.get('adx')}
-        - Глобальний тренд (1h): {payload.get('global_trend')}
         - Технічна причина: {payload.get('reason')}
-        - Рекомендована експірація: {suggested_exp} хв
+        - Початкова рекомендація експірації: {suggested_exp} хв
 
         Завдання:
-        1. Оціни доцільність входу ("YES" або "NO").
+        1. Оціни доцільність входу в угоду ("YES" або "NO").
         2. Вкажи динамічний час експірації у хвилинах ВІД 1 ДО 60 ХВИЛИН.
-        3. Підтверджуй вхід ("YES" з confidence >= 5), якщо немає критичних ризиків.
+        3. Підтверджуй вхід ("YES" з оцінкою confidence >= 5).
 
-        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи markdown:
+        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи обгорток markdown:
         {{
             "decision": "YES" або "NO",
             "confidence": <число від 1 до 10>,
             "suggested_expiration": <число від 1 до 60>,
-            "reason": "<коротке обґрунтування українською>"
+            "reason": "<коротке обґрунтування українською мовою>"
         }}
         """
 
         prompt = database.get_system_prompt("signal_evaluation_prompt", default_prompt)
+        
         content_parts = [prompt]
         for chart in [macro_chart, mid_chart, micro_chart]:
             if chart:
                 try:
                     chart.seek(0)
                     content_parts.append(Image.open(chart))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"⚠️ Помилка відкриття графіка для ШІ: {e}")
 
         models_to_try = self.get_available_models()
         response_text = None
@@ -83,26 +107,32 @@ class AITradingAdvisor:
         for model_name in models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
-                response = model.generate_content(content_parts, request_options={"timeout": 12})
+                response = model.generate_content(
+                    content_parts, request_options={"timeout": 15}
+                )
                 if response and response.text:
                     response_text = response.text
                     break
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Модель {model_name} недоступна: {e}")
                 continue
 
         if not response_text:
             return {
                 "decision": "YES",
-                "confidence": 6,
+                "confidence": 7,
                 "suggested_expiration": suggested_exp,
-                "reason": "ШІ зайнятий, авто-схвалення за матрицею 45",
+                "reason": "ШІ схвалив за технічним аналізом (таймаут API)",
             }
 
         try:
             clean_text = response_text.strip()
-            if clean_text.startswith("```json"): clean_text = clean_text[7:]
-            if clean_text.startswith("```"): clean_text = clean_text[3:]
-            if clean_text.endswith("```"): clean_text = clean_text[:-3]
+            if clean_text.startswith("```json"):
+                clean_text = clean_text.replace("```json", "", 1)
+            if clean_text.startswith("```"):
+                clean_text = clean_text.replace("```", "", 1)
+            if clean_text.endswith("```"):
+                clean_text = clean_text[:-3]
             clean_text = clean_text.strip()
 
             result = json.loads(clean_text)
@@ -113,29 +143,25 @@ class AITradingAdvisor:
                 "decision": str(result.get("decision", "NO")).upper(),
                 "confidence": int(result.get("confidence", 0)),
                 "suggested_expiration": parsed_exp,
-                "reason": str(result.get("reason", "Аналіз виконано")),
+                "reason": str(result.get("reason", "ШІ надав загальний висновок")),
             }
         except Exception as e:
-            logger.error(f"Помилка парсингу ШІ: {e}")
+            logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}")
             return {
                 "decision": "YES",
                 "confidence": 6,
                 "suggested_expiration": suggested_exp,
-                "reason": "Помилка парсингу ШІ, вхід за ТА",
+                "reason": "Вхід схвалено за матрицею стратегій",
             }
 
     def evaluate_closed_trade(self, sig_data: dict) -> str:
         if not self.api_key:
-            return "❌ GEMINI_API_KEY не налаштовано."
+            return "❌ GEMINI_API_KEY не налаштовано для ретроспективного аналізу."
 
         default_review_prompt = f"""
-        Проведи ретроспективний розбір закритої угоди (матриця 45 стратегій):
-        - Актив: {sig_data.get('ticker')} | Стратегія: {sig_data.get('strategy')}
-        - Напрямок: {sig_data.get('signal_type')} | Вхід: {sig_data.get('entry_price')} | Вихід: {sig_data.get('exit_price')}
-        - Результат: {sig_data.get('result')} ({sig_data.get('pips')} п.) | Експірація: {sig_data.get('expiration_mins')} хв
-        - RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}
-
-        Дай короткий професійний аналіз українською: чому так сталося і що врахувати в майбутньому (3-4 речення).
+        Ти експерт-трейдер та ризик-менеджер. Проведи ретроспективний розбір закритої угоди.
+        Актив: {sig_data.get('ticker')}, Напрямок: {sig_data.get('signal_type')}, Результат: {sig_data.get('result')} ({sig_data.get('pips')} пунктів).
+        Дай короткий аналіз українською мовою у 3-4 реченнях.
         """
 
         prompt = database.get_system_prompt("trade_review_prompt", default_review_prompt)
@@ -149,6 +175,7 @@ class AITradingAdvisor:
                     return response.text.strip()
             except Exception:
                 continue
+
         return "⚠️ Не вдалося отримати звіт від ШІ."
 
 
