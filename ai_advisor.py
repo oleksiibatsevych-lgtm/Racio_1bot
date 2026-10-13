@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import json
 import logging
 import os
@@ -48,7 +49,7 @@ class AITradingAdvisor:
         mid_chart=None,
         micro_chart=None,
     ) -> dict:
-        suggested_exp = payload.get("suggested_exp", 5)
+        suggested_exp = payload.get("suggested_exp", 15)
 
         if not self.api_key:
             logger.warning("⚠️ GEMINI_API_KEY відсутній. ШІ-аналіз пропущено.")
@@ -59,14 +60,14 @@ class AITradingAdvisor:
                 "reason": "GEMINI_API_KEY не налаштовано",
             }
 
-        # Отримання вибірки закритих WIN/LOSS угод для Few-Shot Prompting
+        # Отримання вибірки закритих угод разом із текстовими розборами для навчання ШІ
         recent_history = database.get_recent_trades_summary(limit=6)
 
         default_prompt = f"""
         Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
-        Цей сигнал сформовано за стратегією: {payload.get('strategy_title', 'Адаптивний Гібрид')} (Підтверджень стратегій: {payload.get('confluence_count', 1)}).
+        Цей сигнал сформовано за стратегією: {payload.get('strategy_title', 'Гібрид')} (Підтверджень: {payload.get('confluence_count', 1)}).
 
-        ІСТОРІЯ ОСТАННІХ УГОД СИСТЕМИ (Використовуй для порівняння паттернів WIN/LOSS):
+        ІСТОРІЯ ОСТАННІХ УГОД ТА ТЕКСТОВІ ВИСНОВКИ ШІ (Використовуй для самонавчання та уникнення попередніх помилок):
         {recent_history}
         
         Параметри поточного сигналу:
@@ -75,17 +76,16 @@ class AITradingAdvisor:
         - RSI: {payload.get('rsi')}
         - ADX: {payload.get('adx')}
         - Глобальний тренд (1h): {payload.get('global_trend', 'Невідомо')}
-        - Середній тренд (15m): {payload.get('mid_trend', 'Невідомо')}
         - Дивергенція: {payload.get('divergence', 'NONE')}
         - Технічна причина: {payload.get('reason')}
-        - Початкова рекомендація експірації: {suggested_exp} хв
+        - Рекомендована експірація: {suggested_exp} хв
 
         Завдання:
         1. Оціни доцільність входу в угоду ("YES" або "NO").
-        2. Вкажи динамічний час експірації у хвилинах ВІД 1 ДО 60 ХВИЛИН (наприклад: 1, 2, 3, 5, 10, 15), враховуючи силу тренду та волатильність.
-        3. Підтверджуй вхід ("YES" з оцінкою confidence >= 5), якщо немає критичного протиріччя з трендом.
+        2. Вкажи динамічний час експірації у хвилинах ВІД 1 ДО 60 ХВИЛИН, враховуючи силу тренду та таймфрейм стратегії.
+        3. Підтверджуй вхід ("YES" з confidence >= 5), якщо немає критичного протиріччя.
 
-        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи обгорток markdown:
+        Відповідь надай ВИКЛЮЧНО у форматі JSON без додаткових символів чи обгорток markdown:
         {{
             "decision": "YES" або "NO",
             "confidence": <число від 1 до 10>,
@@ -125,7 +125,7 @@ class AITradingAdvisor:
                 "decision": "YES",
                 "confidence": 6,
                 "suggested_expiration": suggested_exp,
-                "reason": "ШІ тимчасово недоступний, авто-схвалення за ТА",
+                "reason": "ШІ тимчасово недоступний, вхід за ТА",
             }
 
         try:
@@ -162,21 +162,20 @@ class AITradingAdvisor:
             return "❌ GEMINI_API_KEY не налаштовано для ретроспективного аналізу."
 
         default_review_prompt = f"""
-        Ти експерт-трейдер та ризик-менеджер. Проведи ретроспективний розбір закритих бінарних опціонів/угоди.
+        Ти експерт-трейдер та ризик-менеджер. Проведи ретроспективний розбір закритої угоди.
         
         Параметри угоди:
         - Актив: {sig_data.get('ticker')}
-        - Стратегія: {sig_data.get('strategy', 'HYBRID_ADAPTIVE')}
+        - Стратегія: {sig_data.get('strategy', 'HYBRID')}
         - Напрямок: {sig_data.get('signal_type')}
         - Ціна входу: {sig_data.get('entry_price')}
-        - Ціна виходу (закриття): {sig_data.get('exit_price')}
+        - Ціна виходу: {sig_data.get('exit_price')}
         - Результат: {sig_data.get('result')} ({sig_data.get('pips')} пунктів)
         - Тривалість експірації: {sig_data.get('expiration_mins')} хв
-        - RSI на момент входу: {sig_data.get('rsi')}
+        - RSI: {sig_data.get('rsi')}
         - ADX: {sig_data.get('adx')}
-        - Дивергенція: {sig_data.get('divergence')}
 
-        Дай короткий, чіткий професійний аналіз українською мовою: чому угода закрилася з таким результатом та що варто врахувати в майбутньому. Зроби висновок у 3-4 реченнях.
+        Дай короткий, чіткий професійний аналіз українською мовою: чому угода закрилася так і що обов'язково врахувати у майбутніх торгах (у 3-4 реченнях).
         """
 
         prompt = database.get_system_prompt("trade_review_prompt", default_review_prompt)
@@ -191,7 +190,7 @@ class AITradingAdvisor:
             except Exception:
                 continue
 
-        return "⚠️ Не вдалося отримати ретроспективний звіт від ШІ через зайнятість моделі."
+        return "⚠️ Не вдалося отримати ретроспективний звіт від ШІ."
 
 
 ai_advisor_instance = AITradingAdvisor()
