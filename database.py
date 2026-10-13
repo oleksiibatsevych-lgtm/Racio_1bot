@@ -96,7 +96,7 @@ def init_db():
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано та оновлено.")
+        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано.")
     except Exception as e:
         logger.error(f"⚠️ Помилка ініціалізації БД: {e}")
 
@@ -118,7 +118,7 @@ def register_user(user_id, username=None):
         cursor.close()
         conn.close()
     except Exception as e:
-        logger.error(f"⚠️ Помилка реєстрації користувача {user_id}: {e}")
+        logger.error(f"⚠️ Помилка реєстрації користувача: {e}")
 
 
 def save_signal(
@@ -142,7 +142,7 @@ def save_signal(
     volatility_ratio=None,
     wick_ratio=None,
     ema_dist=None,
-    strategy="HYBRID_ADAPTIVE",
+    strategy="MATRIX_45",
     **kwargs,
 ):
     try:
@@ -168,10 +168,9 @@ def save_signal(
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(f"✅ Збережено сигнал #{signal_id} [{strategy}] для {ticker}.")
         return signal_id
     except Exception as e:
-        logger.error(f"⚠️ Помилка збереження сигналу в БД: {e}")
+        logger.error(f"⚠️ Помилка збереження сигналу: {e}")
         return None
 
 
@@ -199,7 +198,7 @@ def get_pending_signals():
         conn.close()
         return signals
     except Exception as e:
-        logger.error(f"⚠️ Помилка отримання PENDING сигналів: {e}")
+        logger.error(f"⚠️ Помилка PENDING сигналів: {e}")
         return []
 
 
@@ -218,9 +217,8 @@ def update_signal_result(signal_id, result, exit_price, pips=0, status="CLOSED")
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(f"✅ Сигнал #{signal_id} закрито: {result} ({exit_price})")
     except Exception as e:
-        logger.error(f"⚠️ Помилка оновлення сигналу #{signal_id}: {e}")
+        logger.error(f"⚠️ Помилка оновлення результату: {e}")
 
 
 def save_signal_ai_review(signal_id, review_text):
@@ -232,18 +230,17 @@ def save_signal_ai_review(signal_id, review_text):
         cursor.close()
         conn.close()
     except Exception as e:
-        logger.error(f"⚠️ Помилка збереження AI-огляду угоди #{signal_id}: {e}")
+        logger.error(f"⚠️ Помилка збереження AI-огляду: {e}")
 
 
 def get_recent_trades_summary(limit=6) -> str:
-    """Витягує останні закриті угоди разом із текстовим оглядом (ai_review) для навчання ШІ."""
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT ticker, signal_type, result, pips, rsi, adx, divergence, expiration_mins, 
-                   COALESCE(strategy, 'HYBRID') as strategy, ai_review
+            SELECT ticker, signal_type, result, pips, rsi, adx, expiration_mins, 
+                   COALESCE(strategy, 'MATRIX') as strategy, ai_review
             FROM signals 
             WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
             ORDER BY id DESC LIMIT %s;
@@ -267,8 +264,8 @@ def get_recent_trades_summary(limit=6) -> str:
             )
         return "\n".join(summary_lines)
     except Exception as e:
-        logger.error(f"⚠️ Помилка вибірки історії угод: {e}")
-        return "Не вдалося завантажити історію угод."
+        logger.error(f"⚠️ Помилка вибірки історії: {e}")
+        return "Не вдалося завантажити історію."
 
 
 def get_system_prompt(prompt_key, default_text=""):
@@ -281,30 +278,9 @@ def get_system_prompt(prompt_key, default_text=""):
         conn.close()
         if row and row[0]:
             return row[0]
-    except Exception as e:
-        logger.error(f"⚠️ Помилка отримання системного промпту {prompt_key}: {e}")
+    except Exception:
+        pass
     return default_text
-
-
-def set_system_prompt(prompt_key, prompt_text):
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO system_prompts (prompt_key, prompt_text)
-            VALUES (%s, %s)
-            ON CONFLICT (prompt_key) DO UPDATE SET prompt_text = EXCLUDED.prompt_text;
-            """,
-            (prompt_key, prompt_text),
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"⚠️ Помилка збереження промпту {prompt_key}: {e}")
-        return False
 
 
 def get_stats():
@@ -322,43 +298,23 @@ def get_stats():
             """
         )
         stats = cursor.fetchone()
-        
-        cursor.execute(
-            """
-            SELECT 
-                COALESCE(strategy, 'HYBRID_ADAPTIVE') as strat,
-                COUNT(*) as total,
-                COUNT(*) FILTER (WHERE result = 'WIN') as wins,
-                COUNT(*) FILTER (WHERE result = 'LOSS') as losses
-            FROM signals
-            WHERE result IN ('WIN', 'LOSS')
-            GROUP BY strat;
-            """
-        )
-        strat_rows = cursor.fetchall()
         cursor.close()
         conn.close()
-
-        stats['by_strategy'] = strat_rows
         return stats
-    except Exception as e:
-        logger.error(f"⚠️ Помилка отримання статистики: {e}")
-        return {"total": 0, "wins": 0, "losses": 0, "pending": 0, "by_strategy": []}
+    except Exception:
+        return {"total": 0, "wins": 0, "losses": 0, "pending": 0}
 
 
 def save_filtered_log(chat_id, log_text):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO filtered_logs (chat_id, log_text, timestamp) VALUES (%s, %s, %s)",
-            (chat_id, log_text, time.time()),
-        )
+        cursor.execute("INSERT INTO filtered_logs (chat_id, log_text, timestamp) VALUES (%s, %s, %s)", (chat_id, log_text, time.time()))
         conn.commit()
         cursor.close()
         conn.close()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка збереження логу: {e}")
+    except Exception:
+        pass
 
 
 def get_system_logs(chat_id, minutes=120):
@@ -366,16 +322,12 @@ def get_system_logs(chat_id, minutes=120):
         conn = get_connection()
         cursor = conn.cursor()
         cutoff = time.time() - (minutes * 60)
-        cursor.execute(
-            "SELECT log_text FROM filtered_logs WHERE chat_id = %s AND timestamp > %s ORDER BY timestamp DESC LIMIT 20",
-            (chat_id, cutoff),
-        )
+        cursor.execute("SELECT log_text FROM filtered_logs WHERE chat_id = %s AND timestamp > %s ORDER BY timestamp DESC LIMIT 20", (chat_id, cutoff))
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
         return [row[0] for row in rows]
-    except Exception as e:
-        logger.error(f"⚠️ Помилка читання логів: {e}")
+    except Exception:
         return []
 
 
@@ -387,8 +339,8 @@ def clear_filtered_logs(chat_id):
         conn.commit()
         cursor.close()
         conn.close()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка очищення логів: {e}")
+    except Exception:
+        pass
 
 
 def clear_all_stats():
@@ -399,8 +351,6 @@ def clear_all_stats():
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info("🧹 Базу даних очищено.")
         return True
-    except Exception as e:
-        logger.error(f"⚠️ Помилка очищення бази: {e}")
+    except Exception:
         return False
