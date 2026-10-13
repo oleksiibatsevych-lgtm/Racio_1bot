@@ -5,7 +5,8 @@ import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN не знайдено!")
+    raise ValueError("❌ TELEGRAM_TOKEN не знайдено у змінних оточення!")
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
@@ -69,6 +71,10 @@ ML_FILTER_ENABLED = True
 
 database.init_db()
 start_finnhub_ws()
+
+
+def get_utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def make_progress_bar(val_pct):
@@ -89,14 +95,14 @@ def clean_ai_html(text_val: str) -> str:
 
 def parse_dt(dt_val):
     if isinstance(dt_val, datetime):
-        return dt_val
+        return dt_val.replace(tzinfo=None)
     if not dt_val:
-        return datetime.utcnow()
+        return get_utc_now()
     dt_str = str(dt_val).split(".")[0].replace("T", " ")
     try:
         return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
     except Exception:
-        return datetime.utcnow()
+        return get_utc_now()
 
 
 def normalize_yahoo_ticker(ticker, name=""):
@@ -203,7 +209,7 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
 
 
 def get_current_session_info():
-    now_utc = datetime.utcnow()
+    now_utc = get_utc_now()
     hour = now_utc.hour
     sessions = []
     session_code = 1
@@ -243,15 +249,16 @@ def get_exit_price(ticker, name=""):
 def process_signal_expiration(sig_id):
     try:
         sig_data = database.get_signal_by_id(sig_id)
-        if not sig_data or sig_data.get("status") == "CLOSED":
+        if not sig_data or sig_data.get("status") != "PENDING":
             return
+
         ticker = sig_data["ticker"]
         entry_price = float(sig_data["entry_price"])
         signal_type = sig_data["signal_type"]
         expiration_mins = int(sig_data.get("expiration_mins", 5))
 
         created_at = parse_dt(sig_data.get("timestamp_str"))
-        elapsed_seconds = (datetime.utcnow() - created_at).total_seconds()
+        elapsed_seconds = (get_utc_now() - created_at).total_seconds()
         target_seconds = expiration_mins * 60
 
         if 0 <= elapsed_seconds < (target_seconds - 10):
@@ -298,7 +305,7 @@ def process_signal_expiration(sig_id):
 def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
     try:
         signal_time = parse_dt(timestamp_val)
-        delay = max(1, (signal_time + timedelta(minutes=expiration_mins) - datetime.utcnow()).total_seconds())
+        delay = max(1, (signal_time + timedelta(minutes=expiration_mins) - get_utc_now()).total_seconds())
         timer = threading.Timer(delay, process_signal_expiration, args=[sig_id])
         timer.daemon = True
         timer.start()
@@ -311,7 +318,7 @@ def start_background_checker():
         while True:
             try:
                 for row in database.get_pending_signals():
-                    if datetime.utcnow() >= parse_dt(row["timestamp_str"]) + timedelta(minutes=row["expiration_mins"]):
+                    if get_utc_now() >= parse_dt(row["timestamp_str"]) + timedelta(minutes=row["expiration_mins"]):
                         process_signal_expiration(row["id"])
             except Exception as e:
                 logger.error(f"Помилка перевірки сигналів: {e}")
@@ -325,11 +332,16 @@ def start_auto_scanner_loop():
             try:
                 if AUTO_SCAN_CHATS:
                     for chat_id in list(AUTO_SCAN_CHATS):
-                        for pair_name, ticker in PAIRS_MAP.items():
-                            try:
-                                analyze_single_pair(chat_id, pair_name, ticker, auto_mode=True)
-                            except Exception as ex:
-                                logger.error(f"Авто-сканер помилка {pair_name}: {ex}")
+                        with ThreadPoolExecutor(max_workers=5) as executor:
+                            futures = [
+                                executor.submit(analyze_single_pair, chat_id, pair_name, ticker, auto_mode=True)
+                                for pair_name, ticker in PAIRS_MAP.items()
+                            ]
+                            for f in futures:
+                                try:
+                                    f.result(timeout=30)
+                                except Exception as ex:
+                                    logger.error(f"Помилка потоку авто-сканера: {ex}")
             except Exception as e:
                 logger.error(f"Помилка авто-сканера: {e}")
             time.sleep(180)
@@ -435,10 +447,10 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             chat_id=chat_id, message_id=sent_msg_id, ticker=ticker_finnhub,
             signal_type=payload["signal"], entry_price=payload["current_price"],
             expiration_mins=ai_exp, message_text=msg_text,
-            timestamp_str=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            timestamp_str=get_utc_now().strftime("%Y-%m-%d %H:%M:%S"),
             rsi=payload.get("rsi"), adx=payload.get("adx"), strategy=payload.get("strategy")
         )
-        schedule_signal_timer(sig_id, datetime.utcnow(), ai_exp)
+        schedule_signal_timer(sig_id, get_utc_now(), ai_exp)
         return True
     except Exception as e:
         logger.exception(f"Помилка аналізу {pair_name}: {e}")
@@ -446,9 +458,22 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
 
 
 def run_mass_analysis(chat_id):
-    bot.send_message(chat_id=chat_id, text="🔍 Запускаю масовий аналіз усіх 21 пар за 31 стратегією...")
+    bot.send_message(chat_id=chat_id, text="🔍 Запускаю паралельний масовий аналіз усіх 21 пар за 31 стратегією...")
     database.clear_filtered_logs(chat_id)
-    found = any(analyze_single_pair(chat_id, pair_name, ticker) for pair_name, ticker in PAIRS_MAP.items())
+    
+    found = False
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(analyze_single_pair, chat_id, pair_name, ticker): pair_name
+            for pair_name, ticker in PAIRS_MAP.items()
+        }
+        for f in futures:
+            try:
+                if f.result(timeout=45):
+                    found = True
+            except Exception as ex:
+                logger.error(f"Помилка в масовому аналізі: {ex}")
+
     bot.send_message(chat_id=chat_id, text="✅ Масовий аналіз завершено!" if found else "✅ Аналіз завершено. Сигналів не знайдено.")
 
 
