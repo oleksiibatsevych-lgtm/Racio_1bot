@@ -83,24 +83,34 @@ class TradingMLFilter:
         return float(p * 100.0 if p <= 1.0 else p)
 
     def train_model(self):
+        conn = None
         try:
-            with database.get_connection() as conn:
-                query = """
-                    SELECT rsi, adx, bb_width, 
-                           COALESCE(session_code, 1) as session_code, 
-                           COALESCE(hour, 12) as hour, 
-                           COALESCE(divergence, 'NONE') as divergence, 
-                           COALESCE(dist_pivot, 0.0) as dist_pivot,
-                           COALESCE(volatility_ratio, 1.0) as volatility_ratio,
-                           COALESCE(wick_ratio, 0.0) as wick_ratio,
-                           COALESCE(ema_dist, 0.0) as ema_dist,
-                           result 
-                    FROM signals 
-                    WHERE result IS NOT NULL AND result != 'NEUTRAL'
-                    ORDER BY id DESC LIMIT 200
-                """
-                df = pd.read_sql(query, conn)
+            conn = database.get_connection()
+            query = """
+                SELECT rsi, adx, bb_width, 
+                       COALESCE(session_code, 1) as session_code, 
+                       COALESCE(hour, 12) as hour, 
+                       COALESCE(divergence, 'NONE') as divergence, 
+                       COALESCE(dist_pivot, 0.0) as dist_pivot,
+                       COALESCE(volatility_ratio, 1.0) as volatility_ratio,
+                       COALESCE(wick_ratio, 0.0) as wick_ratio,
+                       COALESCE(ema_dist, 0.0) as ema_dist,
+                       result 
+                FROM signals 
+                WHERE result IS NOT NULL AND result != 'NEUTRAL'
+                ORDER BY id DESC LIMIT 200
+            """
+            df = pd.read_sql(query, conn)
+        except Exception as e:
+            return False, f"❌ Помилка завантаження даних з БД: {e}"
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
+        try:
             if len(df) < 10:
                 return False, "⚠️ Замало завершених угод для навчання ШІ (мінімум 10)."
 
@@ -121,7 +131,6 @@ class TradingMLFilter:
             ])
             y = df['target'].values
 
-            # Надаємо більшу вагу свіжим угодам
             weights = np.linspace(0.6, 1.4, len(df))
 
             self.model = RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42)
