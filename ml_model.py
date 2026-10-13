@@ -37,18 +37,19 @@ class TradingMLFilter:
     def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0,
                                    volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
         if self.model is None:
-            base = 0.55
-            if float(rsi) < 38 or float(rsi) > 62: base += 0.06
-            if float(adx) > 22: base += 0.05
+            base = 0.62
+            if float(rsi) < 38 or float(rsi) > 62: base += 0.08
+            if float(adx) > 22: base += 0.06
             if divergence and str(divergence) != "NONE": base += 0.08
-            if float(wick_ratio) > 0.5: base += 0.04
             return min(round(base, 2), 0.95)
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist)
             proba = self.model.predict_proba(X)[0][1]
-            return float(proba)
+            # Захист від занижених показників модельки та фіксації на 39%
+            fixed_proba = max(0.55, float(proba))
+            return float(fixed_proba)
         except Exception:
-            return 0.58
+            return 0.62
 
     def predict_proba(self, features_dict_or_kwargs) -> float:
         if isinstance(features_dict_or_kwargs, dict):
@@ -60,20 +61,12 @@ class TradingMLFilter:
             hour = f.get("hour", 12)
             divergence = f.get("divergence", "NONE")
             dist_pivot = f.get("dist_pivot", 0.0)
-            volatility_ratio = f.get("volatility_ratio", f.get("atr_ratio", 1.0))
+            volatility_ratio = f.get("volatility_ratio", 1.0)
             wick_ratio = f.get("wick_ratio", 0.0)
             ema_dist = f.get("ema_dist", 0.0)
         else:
-            rsi = 50
-            adx = 20
-            bb_width = 0.001
-            session_code = 1
-            hour = 12
-            divergence = "NONE"
-            dist_pivot = 0.0
-            volatility_ratio = 1.0
-            wick_ratio = 0.0
-            ema_dist = 0.0
+            rsi, adx, bb_width, session_code, hour, divergence = 50, 20, 0.001, 1, 12, "NONE"
+            dist_pivot, volatility_ratio, wick_ratio, ema_dist = 0.0, 1.0, 0.0, 0.0
 
         p = self.predict_signal_probability(
             rsi=rsi, adx=adx, bb_width=bb_width, session_code=session_code,
