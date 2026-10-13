@@ -5,8 +5,7 @@ logger = logging.getLogger(__name__)
 
 def calculate_dynamic_expiration(analysis_dict) -> int:
     """
-    Покращений динамічний розрахунок часу експірації (від 1 до 60 хвилин).
-    Захищає середньострокові стратегії (M3, M5, Pivot, Cross, Divergence) від зайвого стискання.
+    Динамічний розрахунок експірації з урахуванням типів стратегій та волатильності.
     """
     if not isinstance(analysis_dict, dict):
         return 15
@@ -15,53 +14,30 @@ def calculate_dynamic_expiration(analysis_dict) -> int:
     adx = float(analysis_dict.get("adx", 20.0))
     volatility_ratio = float(analysis_dict.get("volatility_ratio", 1.0))
     confluence = int(analysis_dict.get("confluence_count", 1))
-    strategy_name = str(analysis_dict.get("strategy", ""))
-    strategy_title = str(analysis_dict.get("strategy_title", ""))
 
-    # Якщо це середньострокова стратегія (M3, M5, Pivot, Cross, Divergence тощо), захищаємо час
-    is_medium_term = any(x in strategy_name.upper() or x in strategy_title.upper() for x in ["M3", "M5", "PIVOT", "CROSS", "DIVERGENCE", "ICHIMOKU", "FIB", "DONCHIAN"])
-
-    if is_medium_term:
-        # Не дозволяємо фільтрам знижувати базову експірацію нижче 10 хвилин для середньострокових
-        calculated_exp = max(10, base_exp)
-        if adx > 45:
-            calculated_exp = int(calculated_exp * 0.9)
-        return max(1, min(60, calculated_exp))
-
-    multiplier = 1.0
-
-    if volatility_ratio > 1.5:
-        multiplier *= 0.8
+    # Захист мінімального часу для середньострокових сигналів
+    calculated_exp = max(5, base_exp)
+    
+    if volatility_ratio > 1.4:
+        calculated_exp = int(calculated_exp * 0.85)
     elif volatility_ratio < 0.7:
-        multiplier *= 1.25
+        calculated_exp = int(calculated_exp * 1.15)
 
-    if adx > 30 and "TREND" in strategy_name.upper():
-        multiplier *= 1.2
-    elif adx < 20:
-        multiplier *= 0.85
+    if adx > 35:
+        calculated_exp = int(calculated_exp * 0.9)
 
-    if confluence >= 4:
-        multiplier *= 0.9
-
-    calculated_exp = int(round(base_exp * multiplier))
     return max(1, min(60, calculated_exp))
 
-def check_pivot_level_proximity(analysis_dict, threshold_pct=0.0005) -> tuple[bool, str]:
-    """
-    Перевіряє, чи не знаходиться ціна занадто близько до критичного рівня.
-    """
+def check_pivot_level_proximity(analysis_dict, threshold_pct=0.0004) -> tuple[bool, str]:
     if not isinstance(analysis_dict, dict):
         return True, "OK"
     
     dist_pivot = float(analysis_dict.get("dist_pivot", 0.01))
     if dist_pivot < threshold_pct:
-        return True, f"Ціна надто близько до ключового рівня ({dist_pivot*100:.3f}%), підвищений ризик шуму"
+        return True, f"Ціна близько до ключового рівня ({dist_pivot*100:.3f}%)"
     return True, "OK"
 
 def validate_signal_conditions(analysis_dict) -> tuple[bool, str]:
-    """
-    Перевіряє коректність сигналу перед подальшою обробкою.
-    """
     if isinstance(analysis_dict, dict):
         sig_val = str(analysis_dict.get("signal", "NONE"))
         if sig_val in ["NONE", "HOLD"]:
