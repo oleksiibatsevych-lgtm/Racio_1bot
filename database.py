@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import logging
 import time
@@ -69,8 +70,8 @@ def init_db():
             """
         )
 
-        # Авто-міграція колонки strategy
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(50);")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_review TEXT;")
 
         cursor.execute(
             """
@@ -235,12 +236,14 @@ def save_signal_ai_review(signal_id, review_text):
 
 
 def get_recent_trades_summary(limit=6) -> str:
+    """Витягує останні закриті угоди разом із текстовим оглядом (ai_review) для навчання ШІ."""
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT ticker, signal_type, result, pips, rsi, adx, divergence, expiration_mins, COALESCE(strategy, 'HYBRID') as strategy
+            SELECT ticker, signal_type, result, pips, rsi, adx, divergence, expiration_mins, 
+                   COALESCE(strategy, 'HYBRID') as strategy, ai_review
             FROM signals 
             WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
             ORDER BY id DESC LIMIT %s;
@@ -257,9 +260,10 @@ def get_recent_trades_summary(limit=6) -> str:
         summary_lines = []
         for r in rows:
             res_flag = "✅ WIN" if r["result"] == "WIN" else "❌ LOSS"
+            review_part = f" | 🧠 Висновок ШІ: {r['ai_review']}" if r.get('ai_review') else ""
             summary_lines.append(
                 f"- [{r['strategy']}] {r['ticker']} | {r['signal_type']} | {res_flag} ({r['pips']} pips) | "
-                f"Експірація: {r['expiration_mins']}хв | RSI: {r['rsi']}, ADX: {r['adx']}, Дивергенція: {r['divergence']}"
+                f"Експірація: {r['expiration_mins']}хв | RSI: {r['rsi']}, ADX: {r['adx']}{review_part}"
             )
         return "\n".join(summary_lines)
     except Exception as e:
