@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import html
 import io
 import logging
@@ -393,8 +394,8 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         exp_time = calculate_dynamic_expiration(analysis)
         payload = {
             "signal": analysis.get("signal"),
-            "strategy": analysis.get("strategy", "HYBRID_ADAPTIVE"),
-            "strategy_title": analysis.get("strategy_title", "31 стратегія"),
+            "strategy": analysis.get("strategy", "MATRIX_45"),
+            "strategy_title": analysis.get("strategy_title", "Матриця 45 стратегій"),
             "confluence_count": analysis.get("confluence_count", 1),
             "current_price": analysis.get("current_price"),
             "rsi": analysis.get("rsi"),
@@ -427,7 +428,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             f"📋 Стратегія: <b>{payload['strategy_title']}</b>\n"
             f"🧠 ML: <b>{make_progress_bar(win_probability)} {win_probability:.1f}%</b>\n"
             f"🤖 ШІ: <b>{make_progress_bar(ai_res.get('confidence', 6)*10)} {ai_res.get('confidence', 6)}/10</b>\n"
-            f"🔥 Підтверджень: <b>{payload['confluence_count']} із 31 стратегії</b>\n\n"
+            f"🔥 Збігів у матриці: <b>{payload['confluence_count']} стратегій</b>\n\n"
             f"💡 Причина: <i>{clean_ai_html(ai_res.get('reason', ''))}</i>\n"
             f"🌐 Сесія: {session_str}"
         )
@@ -458,7 +459,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
 
 
 def run_mass_analysis(chat_id):
-    bot.send_message(chat_id=chat_id, text="🔍 Запускаю паралельний масовий аналіз усіх 21 пар за 31 стратегією...")
+    bot.send_message(chat_id=chat_id, text="🔍 Запускаю паралельний масовий аналіз усіх 21 пар за матрицею з 45 стратегій...")
     database.clear_filtered_logs(chat_id)
     
     found = False
@@ -486,7 +487,7 @@ def start(update, context):
         [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
         [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
     ]
-    update.message.reply_text("🤖 Бот Racio_1 із 31 професійною стратегією готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("🤖 Бот Racio_1 з матрицею на 45 стратегій готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
 def handle_message(update, context):
@@ -517,7 +518,7 @@ def handle_message(update, context):
         stats = database.get_stats()
         finished = stats.get('wins', 0) + stats.get('losses', 0)
         winrate = (stats.get('wins', 0) / finished * 100) if finished > 0 else 0.0
-        msg = f"📊 <b>Статистика (31 стратегія):</b>\n\nВсього: {stats.get('total', 0)}\n✅ WIN: {stats.get('wins', 0)}\n❌ LOSS: {stats.get('losses', 0)}\n🏆 Вінрейт: {winrate:.1f}%"
+        msg = f"📊 <b>Статистика (матриця 45 стратегій):</b>\n\nВсього: {stats.get('total', 0)}\n✅ WIN: {stats.get('wins', 0)}\n❌ LOSS: {stats.get('losses', 0)}\n🏆 Вінрейт: {winrate:.1f}%"
         update.message.reply_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml")], [InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]]))
     elif text == "📋 Логи фільтру":
         logs = database.get_system_logs(chat_id)
@@ -531,7 +532,7 @@ def handle_callback(update, context):
     if data.startswith("analyze_"):
         pair = data.replace("analyze_", "")
         if PAIRS_MAP.get(pair):
-            msg = query.edit_message_text(f"🔍 Аналізую {pair} за 31 стратегією...")
+            msg = query.edit_message_text(f"🔍 Аналізую {pair} за матрицею 45 стратегій...")
             threading.Thread(target=analyze_single_pair, args=[chat_id, pair, PAIRS_MAP[pair], False, msg.message_id], daemon=True).start()
     elif data.startswith("review_"):
         sig_id = int(data.replace("review_", ""))
@@ -563,6 +564,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("start", start))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Бот запущено з 31 стратегією!")
+    logger.info("🚀 Бот запущено з матрицею на 45 стратегій!")
     updater.start_polling()
     updater.idle()
