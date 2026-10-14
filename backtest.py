@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
+import re
 import pandas as pd
 import yfinance as yf
 from indicators import AdaptiveTechnicalAnalysis
 from config import YAHOO_PAIRS_MAP
+
+def clean_strategy_name(title):
+    # Прибираємо службові номери на початку (наприклад, "36. ") та приставки підтверджень в кінці
+    clean = re.sub(r'^\d+\.\s*', '', str(title))
+    clean = re.sub(r'\s*\(\+\d+\s+підтверджень\)', '', clean, flags=re.IGNORECASE)
+    return clean.strip()
 
 def run_backtest(pair_name="EUR/USD", period="30d"):
     yahoo_ticker = YAHOO_PAIRS_MAP.get(pair_name, "EURUSD=X")
@@ -36,7 +43,8 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
         
         signal = analysis.get("signal")
         if signal in ["CALL", "PUT"]:
-            strat_title = analysis.get("strategy_title", "Стратегія")
+            raw_strat_title = analysis.get("strategy_title", "Стратегія")
+            strat_title = clean_strategy_name(raw_strat_title)
             
             entry_price = float(slice_df["close"].iloc[-1])
             exit_price = float(df["close"].iloc[i + 3])
@@ -69,7 +77,7 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
         f"• Всього сигналів: <b>{total_signals}</b>\n"
         f"• ✅ WIN: <b>{total_wins}</b> | ❌ LOSS: <b>{total_losses}</b>\n"
         f"• 🏆 Загальний вінрейт: <b>{overall_wr:.1f}%</b>\n\n"
-        f"📋 <b>ТОП стратегій (за вінрейтом):</b>\n"
+        f"📋 <b>ТОП стратегій (зведета статистика):</b>\n"
     )
 
     sorted_strategies = sorted(
@@ -78,13 +86,12 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
         reverse=True
     )
 
-    # Виводимо топ-20 найефективніших стратегій, щоб звіт не перевищував ліміт Telegram
     for strat, data in sorted_strategies[:20]:
         wr = (data["wins"] / data["total"] * 100) if data["total"] > 0 else 0.0
         icon = "🟢" if wr >= 53 else ("🟡" if wr >= 48 else "🔴")
         report += f"{icon} <b>{strat}</b>: {data['wins']}/{data['total']} ({wr:.1f}% WR)\n"
 
     if len(sorted_strategies) > 20:
-        report += f"\n<i>...та ще {len(sorted_strategies) - 20} стратегій з меншою активністю.</i>"
+        report += f"\n<i>...та ще {len(sorted_strategies) - 20} стратегій.</i>"
 
     return report
