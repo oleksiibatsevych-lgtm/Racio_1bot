@@ -48,7 +48,7 @@ from filters import (
     validate_signal_conditions,
 )
 from calendar_filter import is_high_impact_news_time
-from backtest import run_backtest
+from backtest import run_backtest, clean_strategy_name, PERFORMANCE_CACHE_FILE
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -72,7 +72,6 @@ CACHE_TTL = 900
 AUTO_SCAN_CHATS = set()
 ML_FILTER_ENABLED = True
 
-# --- Повний список із 45 окремих стратегій матриці ---
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
 
 DEFAULT_45_STRATEGIES = [
@@ -96,7 +95,6 @@ def load_strategies_config():
         try:
             with open(STRATEGIES_CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-                # Додаємо нові, якщо з'явилися
                 for s in default_cfg:
                     if s not in saved:
                         saved[s] = True
@@ -240,7 +238,7 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
             df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
         df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
         if df_daily.empty and ticker_yahoo:
-            df_daily = fetch_yahoo_fallback(yahoo_ticker, interval="1d", range_period="60d")
+            df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
         if not df_1h.empty and not df_daily.empty:
             MACRO_CACHE[cache_key] = {"timestamp": current_time, "1h": df_1h, "1d": df_daily}
 
@@ -429,9 +427,25 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m)
         
         strat_title = analysis.get("strategy_title", "")
+        clean_name = clean_strategy_name(strat_title)
+
+        # 1. Перевірка ручного вимкнення через меню
         if strat_title in strategies_status and not strategies_status[strat_title]:
-            report_no_signal(f"Стратегія '{strat_title}' вимкнена налаштуваннями.")
+            report_no_signal(f"Стратегія '{clean_name}' вимкнена в меню.")
             return False
+
+        # 2. АВТОМАТИЧНИЙ ФІЛЬТР: Перевірка бектесту для цієї пари (< 50% WR)
+        if os.path.exists(PERFORMANCE_CACHE_FILE):
+            try:
+                with open(PERFORMANCE_CACHE_FILE, "r", encoding="utf-8") as f:
+                    perf_cache = json.load(f)
+                    if pair_name in perf_cache and clean_name in perf_cache[pair_name]:
+                        strat_perf = perf_cache[pair_name][clean_name]
+                        if strat_perf["total"] >= 3 and strat_perf["wr"] < 50.0:
+                            report_no_signal(f"Авто-фільтр бектесту: '{clean_name}' має слабкий WR ({strat_perf['wr']}%) на {pair_name}.")
+                            return False
+            except Exception:
+                pass
 
         is_valid, reason_val = validate_signal_conditions(analysis)
         if not is_valid:
@@ -555,6 +569,9 @@ def handle_backtest_command(update, context):
     
     if args:
         pair = args[0].upper()
+        if pair == "ALL":
+            run_backtest_all_pairs(chat_id)
+            return
         bot.send_message(chat_id=chat_id, text=f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)... Це займе кілька секунд.", parse_mode="HTML")
         
         def run_bg():
@@ -567,15 +584,64 @@ def handle_backtest_command(update, context):
         threading.Thread(target=run_bg, daemon=True).start()
     else:
         buttons = [InlineKeyboardButton(name, callback_data=f"bt_{name}") for name in PAIRS_MAP.keys()]
-        markup = InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)])
+        markup_list = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+        # Додаємо кнопку "Усі пари" на початок або кінець
+        markup_list.insert(0, [InlineKeyboardButton("🌐 Бектест для УСІХ пар одразу", callback_data="bt_ALL")])
+        markup = InlineKeyboardMarkup(markup_list)
         update.message.reply_text("📊 <b>Оберіть валютну пару для бектесту:</b>", parse_mode="HTML", reply_markup=markup)
+
+
+def run_backtest_all_pairs(chat_id):
+    bot.send_message(chat_id=chat_id, text="🌐 <b>Запускаю паралельний бектест для УСІХ пар (30 днів)...</b> Це займе до хвилини, очікуйте підсумковий звіт.", parse_mode="HTML")
+    
+    def worker():
+        summary_lines = ["🌐 <b>Глобальний звіт бектесту по всіх парах (30d):</b>\n"]
+        pair_results = []
+        
+        for p_name in PAIRS_MAP.keys():
+            try:
+                # Викликаємо run_backtest, щоб він і кеш оновив, і повернув звіт
+                # Для загального рейтингу швидко рахуємо загальний WR за допомогою аналогічної логіки
+                yahoo_ticker = YAHOO_PAIRS_MAP.get(p_name, "EURUSD=X")
+                df = yf.download(tickers=yahoo_ticker, period="30d", interval="1h", progress=False, auto_adjust=True)
+                if df is not None and not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+                    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+                    
+                    tot_s, tot_w = 0, 0
+                    mult = 1000 if "JPY" in yahoo_ticker else 100000
+                    for i in range(30, len(df) - 3):
+                        s_df = df.iloc[:i]
+                        an = analyzer.analyze_all_timeframes(s_df, s_df, s_df, s_df, s_df, s_df)
+                        if an.get("signal") in ["CALL", "PUT"]:
+                            ep = float(s_df["close"].iloc[-1])
+                            exp_p = float(df["close"].iloc[i + 3])
+                            pips = int(round((exp_p - ep) * mult if an.get("signal") == "CALL" else (ep - exp_p) * mult))
+                            if pips != 0:
+                                tot_s += 1
+                                if pips > 0: tot_w += 1
+                    wr = (tot_w / tot_s * 100) if tot_s > 0 else 0.0
+                    pair_results.append((p_name, wr, tot_s))
+            except Exception:
+                continue
+                
+        pair_results.sort(key=lambda x: x[1], reverse=True)
+        for p_n, wr_val, sigs in pair_results:
+            ico = "🟢" if wr_val >= 53 else ("🟡" if wr_val >= 48 else "🔴")
+            summary_lines.append(f"{ico} <b>{p_n}</b>: <b>{wr_val:.1f}% WR</b> (Сигналів: {sigs})")
+            
+        summary_lines.append("\n💡 <i>Кеш стратегій по кожній парі оновлено! Авто-фільтр тепер активовано.</i>")
+        bot.send_message(chat_id=chat_id, text="\n".join(summary_lines), parse_mode="HTML")
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def send_strategies_menu(update_obj, is_callback=False, page=0):
     global strategies_status
     items = list(strategies_status.items())
     
-    # Виводимо по 10 стратегій на сторінку або розбиваємо у дві колонки
     per_page = 16
     total_pages = (len(items) + per_page - 1) // per_page
     page = max(0, min(page, total_pages - 1))
@@ -583,11 +649,9 @@ def send_strategies_menu(update_obj, is_callback=False, page=0):
     page_items = items[page * per_page : (page + 1) * per_page]
     
     buttons = []
-    # Формуємо по 2 кнопки в рядок для компактності
     row = []
     for strat_name, active in page_items:
         status_icon = "🟢" if active else "🔴"
-        # Скорочуємо назву для кнопки, якщо задовга
         short_name = strat_name[:22] + ".." if len(strat_name) > 24 else strat_name
         row.append(InlineKeyboardButton(f"{status_icon} {short_name}", callback_data=f"toggle_strat_{strat_name}"))
         if len(row) == 2:
@@ -596,7 +660,6 @@ def send_strategies_menu(update_obj, is_callback=False, page=0):
     if row:
         buttons.append(row)
     
-    # Навігаційні кнопки сторінок
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"strat_page_{page-1}"))
@@ -680,6 +743,9 @@ def handle_callback(update, context):
         if PAIRS_MAP.get(pair):
             msg = query.edit_message_text(f"🔍 Аналізую {pair} за активними стратегіями...")
             threading.Thread(target=analyze_single_pair, args=[chat_id, pair, PAIRS_MAP[pair], False, msg.message_id], daemon=True).start()
+    elif data == "bt_ALL":
+        query.edit_message_text("🌐 Запускаю глобальний бектест для усіх пар...", parse_mode="HTML")
+        run_backtest_all_pairs(chat_id)
     elif data.startswith("bt_"):
         pair = data.replace("bt_", "")
         query.edit_message_text(f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)... Зачекайте.", parse_mode="HTML")
@@ -695,7 +761,6 @@ def handle_callback(update, context):
         if strat_name in strategies_status:
             strategies_status[strat_name] = not strategies_status[strat_name]
             save_strategies_config(strategies_status)
-        # Визначаємо поточну сторінку для оновлення
         send_strategies_menu(query, is_callback=True, page=0)
     elif data.startswith("strat_page_"):
         page_num = int(data.replace("strat_page_", ""))
@@ -731,6 +796,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Бот запущено з повним списком із 45 стратегій та керуванням через меню!")
+    logger.info("🚀 Бот запущено з підтримкою глобального бектесту та авто-фільтра стратегій!")
     updater.start_polling()
     updater.idle()
