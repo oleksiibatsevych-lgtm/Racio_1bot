@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
-
 load_dotenv()
 
 import matplotlib
@@ -47,6 +46,7 @@ from filters import (
     check_pivot_level_proximity,
     validate_signal_conditions,
 )
+from calendar_filter import is_high_impact_news_time
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -196,7 +196,7 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
             df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
         df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
         if df_daily.empty and ticker_yahoo:
-            df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
+            df_daily = fetch_yahoo_fallback(yahoo_ticker, interval="1d", range_period="60d")
         if not df_1h.empty and not df_daily.empty:
             MACRO_CACHE[cache_key] = {"timestamp": current_time, "1h": df_1h, "1d": df_daily}
 
@@ -355,6 +355,12 @@ start_auto_scanner_loop()
 
 def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, status_msg_id=None):
     try:
+        news_is_bad, news_reason = is_high_impact_news_time()
+        if news_is_bad:
+            if not auto_mode:
+                database.save_filtered_log(chat_id, f"❌ {pair_name}: Пауза через новини ({news_reason})")
+            return False
+
         yahoo_ticker = normalize_yahoo_ticker(ticker_finnhub, pair_name)
         df_daily, df_1h, df_15m, df_5m, df_3m, df_1m = fetch_all_timeframes(ticker_finnhub, yahoo_ticker)
 
