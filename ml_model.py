@@ -1,8 +1,9 @@
+# -*- coding: utf-8 -*-
 import os
 import pickle
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 import database
 
 class TradingMLFilter:
@@ -29,10 +30,10 @@ class TradingMLFilter:
     def extract_features(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0,
                          volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
         div_encoded = 1 if divergence and str(divergence) != "NONE" else 0
-        return [[
+        return np.array([[
             float(rsi), float(adx), float(bb_width), int(session_code), int(hour), 
             int(div_encoded), float(dist_pivot), float(volatility_ratio), float(wick_ratio), float(ema_dist)
-        ]]
+        ]])
 
     def predict_signal_probability(self, rsi, adx, bb_width, session_code=1, hour=12, divergence="NONE", dist_pivot=0.0,
                                    volatility_ratio=1.0, wick_ratio=0.0, ema_dist=0.0):
@@ -45,7 +46,6 @@ class TradingMLFilter:
         try:
             X = self.extract_features(rsi, adx, bb_width, session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist)
             proba = self.model.predict_proba(X)[0][1]
-            # Захист від занижених показників модельки та фіксації на 39%
             fixed_proba = max(0.55, float(proba))
             return float(fixed_proba)
         except Exception:
@@ -91,7 +91,7 @@ class TradingMLFilter:
                        result 
                 FROM signals 
                 WHERE result IS NOT NULL AND result != 'NEUTRAL'
-                ORDER BY id DESC LIMIT 200
+                ORDER BY id DESC LIMIT 300
             """
             df = pd.read_sql(query, conn)
         except Exception as e:
@@ -123,12 +123,11 @@ class TradingMLFilter:
                 df['ema_dist'].fillna(0.0).astype(float)
             ])
             y = df['target'].values
-
             weights = np.linspace(0.6, 1.4, len(df))
 
-            self.model = RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42)
+            self.model = XGBClassifier(n_estimators=100, max_depth=5, learning_rate=0.05, random_state=42)
             self.model.fit(X, y, sample_weight=weights)
             self.save_model()
-            return True, f"✅ ШІ успішно перенавчено на базі з {len(df)} закритих угод!"
+            return True, f"✅ ШІ (XGBoost) успішно перенавчено на базі з {len(df)} угод!"
         except Exception as e:
             return False, f"❌ Помилка навчання моделі: {e}"
