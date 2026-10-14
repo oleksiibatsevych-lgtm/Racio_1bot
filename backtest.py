@@ -69,7 +69,7 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
         f"• Всього сигналів: <b>{total_signals}</b>\n"
         f"• ✅ WIN: <b>{total_wins}</b> | ❌ LOSS: <b>{total_losses}</b>\n"
         f"• 🏆 Загальний вінрейт: <b>{overall_wr:.1f}%</b>\n\n"
-        f"📋 <b>Деталізація по стратегіях:</b>\n"
+        f"📋 <b>ТОП стратегій (за вінрейтом):</b>\n"
     )
 
     sorted_strategies = sorted(
@@ -78,9 +78,13 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
         reverse=True
     )
 
-    for strat, data in sorted_strategies:
+    # Виводимо топ-20 найефективніших стратегій, щоб звіт не перевищував ліміт Telegram
+    for strat, data in sorted_strategies[:20]:
         wr = (data["wins"] / data["total"] * 100) if data["total"] > 0 else 0.0
         icon = "🟢" if wr >= 53 else ("🟡" if wr >= 48 else "🔴")
         report += f"{icon} <b>{strat}</b>: {data['wins']}/{data['total']} ({wr:.1f}% WR)\n"
+
+    if len(sorted_strategies) > 20:
+        report += f"\n<i>...та ще {len(sorted_strategies) - 20} стратегій з меншою активністю.</i>"
 
     return report
