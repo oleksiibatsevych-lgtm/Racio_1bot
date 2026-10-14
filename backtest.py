@@ -4,14 +4,12 @@ import yfinance as yf
 from indicators import AdaptiveTechnicalAnalysis
 from config import YAHOO_PAIRS_MAP
 
-def run_backtest(pair_name="EUR/USD", period="30d"):
+def run_backtest(pair_name="EUR/USD", period="30d") -> str:
     ticker = YAHOO_PAIRS_MAP.get(pair_name, "EURUSD=X")
-    print(f"Завантаження історичних даних для {pair_name} ({ticker})...")
     
     df = yf.download(ticker, period=period, interval="1h", progress=False, auto_adjust=True)
     if df.empty:
-        print("Не вдалося завантажити дані для бектестину.")
-        return
+        return f"❌ Не вдалося завантажити історичні дані для {pair_name}."
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -20,7 +18,6 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
     analyzer = AdaptiveTechnicalAnalysis()
     wins, losses = 0, 0
 
-    print("Запуск симуляції 45 стратегій на історії...")
     for i in range(50, len(df) - 3):
         df_slice = df.iloc[:i]
         df_1m = df_slice.resample("1min").ffill().tail(100)
@@ -45,8 +42,16 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
 
     total = wins + losses
     winrate = (wins / total * 100) if total > 0 else 0
-    print(f"\nРезультати бектесту для {pair_name}:")
-    print(f"Всього: {total} | WIN: {wins} | LOSS: {losses} | Вінрейт: {winrate:.1f}%")
+    
+    report = (
+        f"📊 <b>Результати бектесту матриці ({pair_name}):</b>\n\n"
+        f"• Період: <b>{period} (1H дані)</b>\n"
+        f"• Всього сигналів: <b>{total}</b>\n"
+        f"• ✅ WIN: <b>{wins}</b>\n"
+        f"• ❌ LOSS: <b>{losses}</b>\n"
+        f"• 🏆 Вінрейт: <b>{winrate:.1f}%</b>"
+    )
+    return report
 
 if __name__ == "__main__":
-    run_backtest("EUR/USD", "30d")
+    print(run_backtest("EUR/USD", "30d"))
