@@ -360,6 +360,11 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         if news_is_bad:
             if not auto_mode:
                 database.save_filtered_log(chat_id, f"❌ {pair_name}: Пауза через новини ({news_reason})")
+            if status_msg_id:
+                try:
+                    bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id, text=f"⏸ <b><code>{pair_name}</code>: Пауза через новини</b>\n\n💡 <i>{news_reason}</i>", parse_mode="HTML")
+                except Exception:
+                    pass
             return False
 
         yahoo_ticker = normalize_yahoo_ticker(ticker_finnhub, pair_name)
@@ -462,6 +467,16 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         return True
     except Exception as e:
         logger.exception(f"Помилка аналізу {pair_name}: {e}")
+        if status_msg_id:
+            try:
+                bot.edit_message_text(
+                    chat_id=chat_id, 
+                    message_id=status_msg_id, 
+                    text=f"❌ <b>Помилка аналізу <code>{pair_name}</code></b>\n\n💡 <i>Деталі: {str(e)}</i>", 
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
         return False
 
 
@@ -504,9 +519,10 @@ def start(update, context):
     database.register_user(user.id, user.username)
     ml_txt = "🟢 ML-фільтр: ВКЛ" if ML_FILTER_ENABLED else "🔴 ML-фільтр: ВИКЛ"
     keyboard = [
-        [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("🔔 Авто-сканер")],
-        [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
-        [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
+        [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("📊 Бектест")],
+        [KeyboardButton("🔔 Авто-сканер"), KeyboardButton("💵 Пари")],
+        [KeyboardButton("📈 Статистика"), KeyboardButton("📋 Логи фільтру")],
+        [KeyboardButton(ml_txt)]
     ]
     update.message.reply_text("🤖 Бот Racio_1 з матрицею на 45 стратегій готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
@@ -515,6 +531,8 @@ def handle_message(update, context):
     text, chat_id = update.message.text, update.effective_chat.id
     if text == "📊 Аналіз усіх пар":
         threading.Thread(target=run_mass_analysis, args=[chat_id], daemon=True).start()
+    elif text == "📊 Бектест":
+        handle_backtest_command(update, context)
     elif text == "🔔 Авто-сканер":
         if chat_id in AUTO_SCAN_CHATS:
             AUTO_SCAN_CHATS.remove(chat_id)
@@ -527,9 +545,10 @@ def handle_message(update, context):
         ML_FILTER_ENABLED = not ML_FILTER_ENABLED
         ml_txt = "🟢 ML-фільтр: ВКЛ" if ML_FILTER_ENABLED else "🔴 ML-фільтр: ВИКЛ"
         keyboard = [
-            [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("🔔 Авто-сканер")],
-            [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
-            [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
+            [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("📊 Бектест")],
+            [KeyboardButton("🔔 Авто-сканер"), KeyboardButton("💵 Пари")],
+            [KeyboardButton("📈 Статистика"), KeyboardButton("📋 Логи фільтру")],
+            [KeyboardButton(ml_txt)]
         ]
         update.message.reply_text(f"⚙️ ML-фільтр {'увімкнено' if ML_FILTER_ENABLED else 'вимкнено'}.", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
     elif text == "💵 Пари":
