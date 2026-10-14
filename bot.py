@@ -47,6 +47,7 @@ from filters import (
     validate_signal_conditions,
 )
 from calendar_filter import is_high_impact_news_time
+from backtest import run_backtest
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -484,6 +485,20 @@ def run_mass_analysis(chat_id):
     bot.send_message(chat_id=chat_id, text="✅ Масовий аналіз завершено!" if found else "✅ Аналіз завершено. Сигналів не знайдено.")
 
 
+def handle_backtest_command(update, context):
+    chat_id = update.effective_chat.id
+    bot.send_message(chat_id=chat_id, text="⏳ Запускаю симуляцію 45 стратегій на історії (EUR/USD, 30 днів)... Зачекайте кілька секунд.")
+    
+    def run_bg():
+        try:
+            report = run_backtest("EUR/USD", "30d")
+            bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
+        except Exception as e:
+            bot.send_message(chat_id=chat_id, text=f"❌ Помилка виконання бектесту: {e}")
+
+    threading.Thread(target=run_bg, daemon=True).start()
+
+
 def start(update, context):
     user = update.effective_user
     database.register_user(user.id, user.username)
@@ -568,6 +583,7 @@ if __name__ == "__main__":
     bot.delete_webhook(drop_pending_updates=True)
     updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
     updater.dispatcher.add_handler(CommandHandler("start", start))
+    updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
     logger.info("🚀 Бот запущено з матрицею на 45 стратегій!")
