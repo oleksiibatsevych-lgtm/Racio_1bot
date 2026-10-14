@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
+import json
+import os
 import re
 import pandas as pd
 import yfinance as yf
 from indicators import AdaptiveTechnicalAnalysis
 from config import YAHOO_PAIRS_MAP
 
+PERFORMANCE_CACHE_FILE = "pair_strategy_performance.json"
+
 def clean_strategy_name(title):
-    # Прибираємо службові номери на початку (наприклад, "36. ") та приставки підтверджень в кінці
     clean = re.sub(r'^\d+\.\s*', '', str(title))
     clean = re.sub(r'\s*\(\+\d+\s+підтверджень\)', '', clean, flags=re.IGNORECASE)
     return clean.strip()
@@ -69,6 +72,26 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
                 else:
                     strategy_stats[strat_title]["losses"] += 1
 
+    # Зберігаємо результати у кеш для автоматичного відсіювання в боті
+    try:
+        cache = {}
+        if os.path.exists(PERFORMANCE_CACHE_FILE):
+            with open(PERFORMANCE_CACHE_FILE, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+        
+        pair_data = {}
+        for strat, data in strategy_stats.items():
+            t = data["total"]
+            w = data["wins"]
+            wr = (w / t * 100) if t > 0 else 0.0
+            pair_data[strat] = {"wins": w, "total": t, "wr": round(wr, 1)}
+            
+        cache[pair_name] = pair_data
+        with open(PERFORMANCE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Помилка збереження кешу продуктивності: {e}")
+
     overall_wr = (total_wins / total_signals * 100) if total_signals > 0 else 0.0
 
     report = (
@@ -77,7 +100,7 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
         f"• Всього сигналів: <b>{total_signals}</b>\n"
         f"• ✅ WIN: <b>{total_wins}</b> | ❌ LOSS: <b>{total_losses}</b>\n"
         f"• 🏆 Загальний вінрейт: <b>{overall_wr:.1f}%</b>\n\n"
-        f"📋 <b>ТОП стратегій (зведета статистика):</b>\n"
+        f"📋 <b>ТОП стратегій (зведена статистика):</b>\n"
     )
 
     sorted_strategies = sorted(
