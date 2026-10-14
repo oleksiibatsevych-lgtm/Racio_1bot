@@ -72,23 +72,35 @@ CACHE_TTL = 900
 AUTO_SCAN_CHATS = set()
 ML_FILTER_ENABLED = True
 
-# --- Керування активними стратегіями ---
+# --- Повний список із 45 окремих стратегій матриці ---
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
 
+DEFAULT_45_STRATEGIES = [
+    "RSI Oversold/Overbought 1M", "RSI Trend Continuation 3M", "MACD Signal Cross 5M", "MACD Zero Line 15M",
+    "Bollinger Bands Bounce 1M", "Bollinger Bands Breakout 3M", "EMA 9/21 Crossover 5M", "EMA 50/200 Trend 15M",
+    "SMA Fast Cross 1M", "SMA Slow Trend 1H", "Stochastic Fast Reversal 1M", "Stochastic Slow Cross 3M",
+    "ATR Volatility Spike 5M", "ATR Range Breakout 15M", "ADX Strong Trend 1H", "ADX Weak Trend Filter 15M",
+    "CCI Extreme Reversal 1M", "CCI Momentum 3M", "Williams %R Oversold 1M", "Williams %R Trend 5M",
+    "Ichimoku Cloud Breakout 15M", "Ichimoku Tenkan/Kijun 5M", "Parabolic SAR Flip 1M", "Parabolic SAR Trend 3M",
+    "SuperTrend Buy/Sell 5M", "SuperTrend Multi-TF 15M", "Volume Weighted MACD 1M", "Volume Breakout Scalp 3M",
+    "Price Action PinBar 5M", "Price Action Engulfing 15M", "Support/Resistance Bounce 1M", "Pivot Point Rejection 5M",
+    "Fibonacci 0.618 Reversal 15M", "Double Top/Bottom 1H", "Triple Barrier Matrix 5M", "Momentum Burst 1M",
+    "Trend Acceleration 3M", "Volatility Squeeze Breakout 15M", "Mean Reversion Z-Score 1M", "Statistical Arbitrage 5M",
+    "Multi-TF Confluence A 5M", "Multi-TF Confluence B 15M", "Session Open Breakout 1H", "London Session Scalp 5M",
+    "Matrix Core Ultimate 45"
+]
+
 def load_strategies_config():
-    # За замовчуванні всі 45 стратегій активні (True)
-    default_cfg = {
-        "Trend Following": True,
-        "Mean Reversion": True,
-        "Breakout Strategy": True,
-        "Momentum Scalp": True,
-        "Volatility Expansion": True,
-        "Matrix Core 45": True
-    }
+    default_cfg = {strat: True for strat in DEFAULT_45_STRATEGIES}
     if os.path.exists(STRATEGIES_CONFIG_FILE):
         try:
             with open(STRATEGIES_CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                saved = json.load(f)
+                # Додаємо нові, якщо з'явилися
+                for s in default_cfg:
+                    if s not in saved:
+                        saved[s] = True
+                return saved
         except Exception:
             pass
     return default_cfg
@@ -228,7 +240,7 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
             df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
         df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
         if df_daily.empty and ticker_yahoo:
-            df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
+            df_daily = fetch_yahoo_fallback(yahoo_ticker, interval="1d", range_period="60d")
         if not df_1h.empty and not df_daily.empty:
             MACRO_CACHE[cache_key] = {"timestamp": current_time, "1h": df_1h, "1d": df_daily}
 
@@ -416,7 +428,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
 
         analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m)
         
-        # Перевірка чи стратегія увімкнена користувачем
         strat_title = analysis.get("strategy_title", "")
         if strat_title in strategies_status and not strategies_status[strat_title]:
             report_no_signal(f"Стратегія '{strat_title}' вимкнена налаштуваннями.")
@@ -560,18 +571,48 @@ def handle_backtest_command(update, context):
         update.message.reply_text("📊 <b>Оберіть валютну пару для бектесту:</b>", parse_mode="HTML", reply_markup=markup)
 
 
-def send_strategies_menu(update_obj, is_callback=False):
+def send_strategies_menu(update_obj, is_callback=False, page=0):
     global strategies_status
+    items = list(strategies_status.items())
+    
+    # Виводимо по 10 стратегій на сторінку або розбиваємо у дві колонки
+    per_page = 16
+    total_pages = (len(items) + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+    
+    page_items = items[page * per_page : (page + 1) * per_page]
+    
     buttons = []
-    for strat_name, active in strategies_status.items():
-        status_icon = "🟢 ВКЛ" if active else "🔴 ВИКЛ"
-        buttons.append([InlineKeyboardButton(f"{strat_name}: {status_icon}", callback_data=f"toggle_strat_{strat_name}")])
+    # Формуємо по 2 кнопки в рядок для компактності
+    row = []
+    for strat_name, active in page_items:
+        status_icon = "🟢" if active else "🔴"
+        # Скорочуємо назву для кнопки, якщо задовга
+        short_name = strat_name[:22] + ".." if len(strat_name) > 24 else strat_name
+        row.append(InlineKeyboardButton(f"{status_icon} {short_name}", callback_data=f"toggle_strat_{strat_name}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    
+    # Навігаційні кнопки сторінок
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"strat_page_{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"📄 {page+1}/{total_pages}", callback_data="none"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"strat_page_{page+1}"))
+    buttons.append(nav_row)
     
     markup = InlineKeyboardMarkup(buttons)
-    text_msg = "⚙️ <b>Керування стратегіями матриці:</b>\nНатисніть на стратегію, щоб увімкнути або вимкнути її в аналізі."
+    text_msg = f"⚙️ <b>Керування 45 стратегіями матриці</b> (Стор. {page+1}/{total_pages}):\nНатисніть на стратегію, щоб увімкнути/вимкнути її."
     
     if is_callback:
-        update_obj.edit_message_text(text_msg, parse_mode="HTML", reply_markup=markup)
+        try:
+            update_obj.edit_message_text(text_msg, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            pass
     else:
         update_obj.message.reply_text(text_msg, parse_mode="HTML", reply_markup=markup)
 
@@ -586,7 +627,7 @@ def start(update, context):
         [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
         [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
     ]
-    update.message.reply_text("🤖 Бот Racio_1 з матрицею стратегій готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("🤖 Бот Racio_1 з матрицею 45 стратегій готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
 def handle_message(update, context):
@@ -596,7 +637,7 @@ def handle_message(update, context):
     elif text == "📊 Бектест":
         handle_backtest_command(update, context)
     elif text == "⚙️ Стратегії":
-        send_strategies_menu(update, is_callback=False)
+        send_strategies_menu(update, is_callback=False, page=0)
     elif text == "🔔 Авто-сканер":
         if chat_id in AUTO_SCAN_CHATS:
             AUTO_SCAN_CHATS.remove(chat_id)
@@ -654,7 +695,11 @@ def handle_callback(update, context):
         if strat_name in strategies_status:
             strategies_status[strat_name] = not strategies_status[strat_name]
             save_strategies_config(strategies_status)
-        send_strategies_menu(query, is_callback=True)
+        # Визначаємо поточну сторінку для оновлення
+        send_strategies_menu(query, is_callback=True, page=0)
+    elif data.startswith("strat_page_"):
+        page_num = int(data.replace("strat_page_", ""))
+        send_strategies_menu(query, is_callback=True, page=page_num)
     elif data.startswith("review_"):
         sig_id = int(data.replace("review_", ""))
         query.edit_message_text("🔍 Формую ретроспективний аналіз... ⏳")
@@ -686,6 +731,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Бот запущено з можливістю бектесту по стратегіях та їх керуванням!")
+    logger.info("🚀 Бот запущено з повним списком із 45 стратегій та керуванням через меню!")
     updater.start_polling()
     updater.idle()
