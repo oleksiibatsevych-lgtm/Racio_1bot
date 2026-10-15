@@ -74,23 +74,43 @@ ML_FILTER_ENABLED = True
 
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
 
-DEFAULT_45_STRATEGIES = [
-    "RSI Oversold/Overbought 1M", "RSI Trend Continuation 3M", "MACD Signal Cross 5M", "MACD Zero Line 15M",
-    "Bollinger Bands Bounce 1M", "Bollinger Bands Breakout 3M", "EMA 9/21 Crossover 5M", "EMA 50/200 Trend 15M",
-    "SMA Fast Cross 1M", "SMA Slow Trend 1H", "Stochastic Fast Reversal 1M", "Stochastic Slow Cross 3M",
-    "ATR Volatility Spike 5M", "ATR Range Breakout 15M", "ADX Strong Trend 1H", "ADX Weak Trend Filter 15M",
-    "CCI Extreme Reversal 1M", "CCI Momentum 3M", "Williams %R Oversold 1M", "Williams %R Trend 5M",
-    "Ichimoku Cloud Breakout 15M", "Ichimoku Tenkan/Kijun 5M", "Parabolic SAR Flip 1M", "Parabolic SAR Trend 3M",
-    "SuperTrend Buy/Sell 5M", "SuperTrend Multi-TF 15M", "Volume Weighted MACD 1M", "Volume Breakout Scalp 3M",
-    "Price Action PinBar 5M", "Price Action Engulfing 15M", "Support/Resistance Bounce 1M", "Pivot Point Rejection 5M",
-    "Fibonacci 0.618 Reversal 15M", "Double Top/Bottom 1H", "Triple Barrier Matrix 5M", "Momentum Burst 1M",
-    "Trend Acceleration 3M", "Volatility Squeeze Breakout 15M", "Mean Reversion Z-Score 1M", "Statistical Arbitrage 5M",
-    "Multi-TF Confluence A 5M", "Multi-TF Confluence B 15M", "Session Open Breakout 1H", "London Session Scalp 5M",
-    "Matrix Core Ultimate 45"
+# --- Повний масив із 100 стратегій матриці ---
+DEFAULT_100_STRATEGIES = [
+    # RSI Strategies (1-10)
+    "RSI Oversold 1M", "RSI Overbought 1M", "RSI Trend 3M", "RSI Reversal 5M", "RSI Midline Cross 15M",
+    "RSI Extreme 1H", "RSI Divergence M1", "RSI Divergence M5", "RSI Dual TF Conf", "RSI Momentum Spike",
+    # MACD Strategies (11-20)
+    "MACD Signal Cross 1M", "MACD Signal Cross 5M", "MACD Zero Line 15M", "MACD Histogram Reversal", "MACD Trend 1H",
+    "MACD Dual TF Cross", "MACD Momentum Burst", "MACD Zero Bounce", "MACD Divergence M5", "MACD Fast Scalp",
+    # Bollinger Bands (21-30)
+    "Bollinger Bounce 1M", "Bollinger Bounce 5M", "Bollinger Breakout 3M", "Bollinger Squeeze 15M", "Bollinger Band Walk",
+    "Bollinger Mean Rev", "Bollinger Width Spike", "Bollinger Dual TF", "Bollinger Reversal M5", "Bollinger Trend 1H",
+    # Moving Averages (EMA / SMA) (31-45)
+    "EMA 9/21 Crossover 1M", "EMA 9/21 Crossover 5M", "EMA 50/200 Trend 15M", "EMA Ribbon Trend 5M", "SMA Fast Cross 1M",
+    "SMA Slow Trend 1H", "EMA Pullback Entry", "SMA Golden Cross 1H", "EMA Dynamic Support", "Triple EMA Matrix 5M",
+    "EMA Cloud Breakout", "SMA Volume Weighted", "EMA Slope Momentum", "EMA Reversal M3", "EMA Multi-TF Trend",
+    # Stochastic Oscillator (46-55)
+    "Stochastic Fast Rev 1M", "Stochastic Slow Cross 3M", "Stochastic Extreme M5", "Stochastic Trend 15M", "Stochastic Dual TF",
+    "Stochastic Midline Cross", "Stochastic Divergence", "Stochastic Reversal 1H", "Stochastic Bounce M1", "Stochastic Scalp M5",
+    # ATR & Volatility (56-65)
+    "ATR Volatility Spike 1M", "ATR Volatility Spike 5M", "ATR Range Breakout 15M", "ATR Trend Filter 1H", "ATR Channel Squeeze",
+    "ATR Breakout M3", "ATR Momentum Scalp", "ATR Dynamic Stop", "ATR Reversal Setup", "ATR Volatility Band",
+    # ADX & Trend Strength (66-75)
+    "ADX Strong Trend 1H", "ADX Weak Trend Filter", "ADX Reversal M15", "ADX Power Trend 5M", "ADX Momentum Cross",
+    "ADX Breakout Confirm", "ADX Trend Scalp", "ADX Dual TF Trend", "ADX Exhaustion Setup", "ADX Zero Lag Trend",
+    # CCI & Williams %R (76-85)
+    "CCI Extreme Reversal 1M", "CCI Momentum 3M", "CCI Trend Confirm 15M", "CCI Zero Cross", "CCI Divergence M5",
+    "Williams %R Oversold 1M", "Williams %R Trend 5M", "Williams %R Reversal", "Williams %R Extreme", "Williams %R Scalp",
+    # Ichimoku & Parabolic SAR & SuperTrend (86-93)
+    "Ichimoku Cloud Breakout", "Ichimoku Tenkan/Kijun", "Parabolic SAR Flip 1M", "Parabolic SAR Trend 3M", "SuperTrend Buy/Sell 5M",
+    "SuperTrend Multi-TF 15M", "SuperTrend Reversal 1H", "Ichimoku Kumo Twist",
+    # Price Action & Support/Resistance & Fibonacci (94-100)
+    "Price Action PinBar 5M", "Price Action Engulfing 15M", "Support/Resistance Bounce", "Pivot Point Rejection 5M",
+    "Fibonacci 0.618 Reversal", "Order Block M5 Entry", "Matrix Core Ultimate 100"
 ]
 
 def load_strategies_config():
-    default_cfg = {strat: True for strat in DEFAULT_45_STRATEGIES}
+    default_cfg = {strat: True for strat in DEFAULT_100_STRATEGIES}
     if os.path.exists(STRATEGIES_CONFIG_FILE):
         try:
             with open(STRATEGIES_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -469,7 +489,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         exp_time = calculate_dynamic_expiration(analysis)
         payload = {
             "signal": analysis.get("signal"),
-            "strategy": analysis.get("strategy", "MATRIX_45"),
+            "strategy": analysis.get("strategy", "MATRIX_100"),
             "strategy_title": strat_title,
             "confluence_count": analysis.get("confluence_count", 1),
             "current_price": analysis.get("current_price"),
@@ -585,7 +605,6 @@ def handle_backtest_command(update, context):
     else:
         buttons = [InlineKeyboardButton(name, callback_data=f"bt_{name}") for name in PAIRS_MAP.keys()]
         markup_list = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
-        # Додаємо кнопку "Усі пари" на початок або кінець
         markup_list.insert(0, [InlineKeyboardButton("🌐 Бектест для УСІХ пар одразу", callback_data="bt_ALL")])
         markup = InlineKeyboardMarkup(markup_list)
         update.message.reply_text("📊 <b>Оберіть валютну пару для бектесту:</b>", parse_mode="HTML", reply_markup=markup)
@@ -600,8 +619,6 @@ def run_backtest_all_pairs(chat_id):
         
         for p_name in PAIRS_MAP.keys():
             try:
-                # Викликаємо run_backtest, щоб він і кеш оновив, і повернув звіт
-                # Для загального рейтингу швидко рахуємо загальний WR за допомогою аналогічної логіки
                 yahoo_ticker = YAHOO_PAIRS_MAP.get(p_name, "EURUSD=X")
                 df = yf.download(tickers=yahoo_ticker, period="30d", interval="1h", progress=False, auto_adjust=True)
                 if df is not None and not df.empty:
@@ -632,7 +649,7 @@ def run_backtest_all_pairs(chat_id):
             ico = "🟢" if wr_val >= 53 else ("🟡" if wr_val >= 48 else "🔴")
             summary_lines.append(f"{ico} <b>{p_n}</b>: <b>{wr_val:.1f}% WR</b> (Сигналів: {sigs})")
             
-        summary_lines.append("\n💡 <i>Кеш стратегій по кожній парі оновлено! Авто-фільтр тепер активовано.</i>")
+        summary_lines.append("\n💡 <i>Кеш стратегій по кожній парі оновлено! Авто-фільтр активовано.</i>")
         bot.send_message(chat_id=chat_id, text="\n".join(summary_lines), parse_mode="HTML")
 
     threading.Thread(target=worker, daemon=True).start()
@@ -669,7 +686,7 @@ def send_strategies_menu(update_obj, is_callback=False, page=0):
     buttons.append(nav_row)
     
     markup = InlineKeyboardMarkup(buttons)
-    text_msg = f"⚙️ <b>Керування 45 стратегіями матриці</b> (Стор. {page+1}/{total_pages}):\nНатисніть на стратегію, щоб увімкнути/вимкнути її."
+    text_msg = f"⚙️ <b>Керування 100 стратегіями матриці</b> (Стор. {page+1}/{total_pages}):\nНатисніть на стратегію, щоб увімкнути/вимкнути її."
     
     if is_callback:
         try:
@@ -690,7 +707,7 @@ def start(update, context):
         [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
         [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
     ]
-    update.message.reply_text("🤖 Бот Racio_1 з матрицею 45 стратегій готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("🤖 Бот Racio_1 із матрицею 100 стратегій готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
 def handle_message(update, context):
@@ -796,6 +813,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Бот запущено з підтримкою глобального бектесту та авто-фільтра стратегій!")
+    logger.info("🚀 Бот запущено з підтримкою 100 стратегій та авто-фільтрації!")
     updater.start_polling()
     updater.idle()
