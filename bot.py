@@ -74,42 +74,26 @@ ML_FILTER_ENABLED = True
 
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
 
-# --- Оновлений масив стратегій (включає нові стратегії Двоядерного рушія) ---
-DEFAULT_100_STRATEGIES = [
-    "Flat Matrix Bounce CALL", "Flat Matrix Bounce PUT",
-    "Multi-TF Trend Matrix CALL", "Multi-TF Trend Matrix PUT",
-    "RSI Oversold 1M", "RSI Overbought 1M", "RSI Trend 3M", "RSI Reversal 5M", "RSI Midline Cross 15M",
-    "RSI Extreme 1H", "RSI Divergence M1", "RSI Divergence M5", "RSI Dual TF Conf", "RSI Momentum Spike",
-    "MACD Signal Cross 1M", "MACD Signal Cross 5M", "MACD Zero Line 15M", "MACD Histogram Reversal", "MACD Trend 1H",
-    "MACD Dual TF Cross", "MACD Momentum Burst", "MACD Zero Bounce", "MACD Divergence M5", "MACD Fast Scalp",
-    "Bollinger Bounce 1M", "Bollinger Bounce 5M", "Bollinger Breakout 3M", "Bollinger Squeeze 15M", "Bollinger Band Walk",
-    "Bollinger Mean Rev", "Bollinger Width Spike", "Bollinger Dual TF", "Bollinger Reversal M5", "Bollinger Trend 1H",
-    "EMA 9/21 Crossover 1M", "EMA 9/21 Crossover 5M", "EMA 50/200 Trend 15M", "EMA Ribbon Trend 5M", "SMA Fast Cross 1M",
-    "SMA Slow Trend 1H", "EMA Pullback Entry", "SMA Golden Cross 1H", "EMA Dynamic Support", "Triple EMA Matrix 5M",
-    "EMA Cloud Breakout", "SMA Volume Weighted", "EMA Slope Momentum", "EMA Reversal M3", "EMA Multi-TF Trend",
-    "Stochastic Fast Rev 1M", "Stochastic Slow Cross 3M", "Stochastic Extreme M5", "Stochastic Trend 15M", "Stochastic Dual TF",
-    "Stochastic Midline Cross", "Stochastic Divergence", "Stochastic Reversal 1H", "Stochastic Bounce M1", "Stochastic Scalp M5",
-    "ATR Volatility Spike 1M", "ATR Volatility Spike 5M", "ATR Range Breakout 15M", "ATR Trend Filter 1H", "ATR Channel Squeeze",
-    "ATR Breakout M3", "ATR Momentum Scalp", "ATR Dynamic Stop", "ATR Reversal Setup", "ATR Volatility Band",
-    "ADX Strong Trend 1H", "ADX Weak Trend Filter", "ADX Reversal M15", "ADX Power Trend 5M", "ADX Momentum Cross",
-    "ADX Breakout Confirm", "ADX Trend Scalp", "ADX Dual TF Trend", "ADX Exhaustion Setup", "ADX Zero Lag Trend",
-    "CCI Extreme Reversal 1M", "CCI Momentum 3M", "CCI Trend Confirm 15M", "CCI Zero Cross", "CCI Divergence M5",
-    "Williams %R Oversold 1M", "Williams %R Trend 5M", "Williams %R Reversal", "Williams %R Extreme", "Williams %R Scalp",
-    "Ichimoku Cloud Breakout", "Ichimoku Tenkan/Kijun", "Parabolic SAR Flip 1M", "Parabolic SAR Trend 3M", "SuperTrend Buy/Sell 5M",
-    "SuperTrend Multi-TF 15M", "SuperTrend Reversal 1H", "Ichimoku Kumo Twist",
-    "Price Action PinBar 5M", "Price Action Engulfing 15M", "Support/Resistance Bounce", "Pivot Point Rejection 5M",
-    "Fibonacci 0.618 Reversal", "Order Block M5 Entry", "Dual Engine Core Matrix"
-]
+# --- 7 Головних логічних груп стратегій для керування через меню ---
+GROUPED_STRATEGIES = {
+    "trend_multi": "📊 Мульти-Трендові Системи (1H/15M/3M)",
+    "flat_corridor": "📉 Флетові Коридори та Відбої (BB)",
+    "oscillators": "⚡ Осцилятори Екстремумів (RSI/Stoch)",
+    "moving_averages": "📈 Ковзні Середні та Імпульси (EMA/MACD)",
+    "market_levels": "📐 Рівні та Геометрія Ринку (Pivot)",
+    "price_action": "🕯️ Price Action та Патерни",
+    "volume_volatility": "💥 Об'єми та Волатильність (ATR/Vol)"
+}
 
 def load_strategies_config():
-    default_cfg = {strat: True for strat in DEFAULT_100_STRATEGIES}
+    default_cfg = {key: True for key in GROUPED_STRATEGIES.keys()}
     if os.path.exists(STRATEGIES_CONFIG_FILE):
         try:
             with open(STRATEGIES_CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-                for s in default_cfg:
-                    if s not in saved:
-                        saved[s] = True
+                for k in default_cfg:
+                    if k not in saved:
+                        saved[k] = True
                 return saved
         except Exception:
             pass
@@ -441,8 +425,10 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         strat_title = analysis.get("strategy_title", "")
         clean_name = clean_strategy_name(strat_title)
 
-        if strat_title in strategies_status and not strategies_status[strat_title]:
-            report_no_signal(f"Стратегія '{clean_name}' вимкнена в меню.")
+        # Перевірка вимкнення відповідної групи в меню
+        signal_type_engine = analysis.get("signal_type_engine", "trend_multi")
+        if signal_type_engine in strategies_status and not strategies_status[signal_type_engine]:
+            report_no_signal(f"Група стратегій вимкнена в меню.")
             return False
 
         if os.path.exists(PERFORMANCE_CACHE_FILE):
@@ -452,7 +438,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
                     if pair_name in perf_cache and clean_name in perf_cache[pair_name]:
                         strat_perf = perf_cache[pair_name][clean_name]
                         if strat_perf["total"] >= 3 and strat_perf["wr"] < 50.0:
-                            report_no_signal(f"Авто-фільтр бектесту: '{clean_name}' має слабкий WR ({strat_perf['wr']}%) на {pair_name}.")
+                            report_no_signal(f"Авто-фільтр бектесту: слабкий WR ({strat_perf['wr']}%) на {pair_name}.")
                             return False
             except Exception:
                 pass
@@ -554,7 +540,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
 
 
 def run_mass_analysis(chat_id):
-    bot.send_message(chat_id=chat_id, text="🔍 Запускаю паралельний масовий аналіз усіх пар за мультитаймфреймовим рушієм...")
+    bot.send_message(chat_id=chat_id, text="🔍 Запускаю паралельний масовий аналіз усіх пар...")
     database.clear_filtered_logs(chat_id)
     
     found = False
@@ -582,7 +568,7 @@ def handle_backtest_command(update, context):
         if pair == "ALL":
             run_backtest_all_pairs(chat_id)
             return
-        bot.send_message(chat_id=chat_id, text=f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)... Це займе кілька секунд.", parse_mode="HTML")
+        bot.send_message(chat_id=chat_id, text=f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)...", parse_mode="HTML")
         
         def run_bg():
             try:
@@ -601,7 +587,7 @@ def handle_backtest_command(update, context):
 
 
 def run_backtest_all_pairs(chat_id):
-    bot.send_message(chat_id=chat_id, text="🌐 <b>Запускаю паралельний бектест для УСІХ пар (30 днів)...</b> Це займе до хвилини, очікуйте підсумковий звіт.", parse_mode="HTML")
+    bot.send_message(chat_id=chat_id, text="🌐 <b>Запускаю паралельний бектест для УСІХ пар (30 днів)...</b>", parse_mode="HTML")
     
     def worker():
         summary_lines = ["🌐 <b>Глобальний звіт бектесту по всіх парах (30d):</b>\n"]
@@ -639,44 +625,22 @@ def run_backtest_all_pairs(chat_id):
             ico = "🟢" if wr_val >= 53 else ("🟡" if wr_val >= 48 else "🔴")
             summary_lines.append(f"{ico} <b>{p_n}</b>: <b>{wr_val:.1f}% WR</b> (Сигналів: {sigs})")
             
-        summary_lines.append("\n💡 <i>Кеш стратегій по кожній парі оновлено! Авто-фільтр активовано.</i>")
+        summary_lines.append("\n💡 <i>Кеш стратегій оновлено! Авто-фільтр активовано.</i>")
         bot.send_message(chat_id=chat_id, text="\n".join(summary_lines), parse_mode="HTML")
 
     threading.Thread(target=worker, daemon=True).start()
 
 
-def send_strategies_menu(update_obj, is_callback=False, page=0):
+def send_strategies_menu(update_obj, is_callback=False):
     global strategies_status
-    items = list(strategies_status.items())
-    
-    per_page = 16
-    total_pages = (len(items) + per_page - 1) // per_page
-    page = max(0, min(page, total_pages - 1))
-    
-    page_items = items[page * per_page : (page + 1) * per_page]
-    
     buttons = []
-    row = []
-    for strat_name, active in page_items:
+    for key, title in GROUPED_STRATEGIES.items():
+        active = strategies_status.get(key, True)
         status_icon = "🟢" if active else "🔴"
-        short_name = strat_name[:22] + ".." if len(strat_name) > 24 else strat_name
-        row.append(InlineKeyboardButton(f"{status_icon} {short_name}", callback_data=f"toggle_strat_{strat_name}"))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"strat_page_{page-1}"))
-    nav_row.append(InlineKeyboardButton(f"📄 {page+1}/{total_pages}", callback_data="none"))
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Вперед ➡️", callback_data=f"strat_page_{page+1}"))
-    buttons.append(nav_row)
+        buttons.append([InlineKeyboardButton(f"{status_icon} {title}", callback_data=f"toggle_group_{key}")])
     
     markup = InlineKeyboardMarkup(buttons)
-    text_msg = f"⚙️ <b>Керування стратегіями матриці</b> (Стор. {page+1}/{total_pages}):\nНатисніть на стратегію, щоб увімкнути/вимкнути її."
+    text_msg = "⚙️ <b>Керування групами стратегій</b>:\nНатисніть на групу, щоб увімкнути/вимкнути її."
     
     if is_callback:
         try:
@@ -697,7 +661,7 @@ def start(update, context):
         [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
         [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
     ]
-    update.message.reply_text("🤖 Бот із Двоядерною Мультитаймфреймовою матрицею готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("🤖 Бот із Двоядерною матрицею та груповим керуванням готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
 def handle_message(update, context):
@@ -707,7 +671,7 @@ def handle_message(update, context):
     elif text == "📊 Бектест":
         handle_backtest_command(update, context)
     elif text == "⚙️ Стратегії":
-        send_strategies_menu(update, is_callback=False, page=0)
+        send_strategies_menu(update, is_callback=False)
     elif text == "🔔 Авто-сканер":
         if chat_id in AUTO_SCAN_CHATS:
             AUTO_SCAN_CHATS.remove(chat_id)
@@ -748,14 +712,14 @@ def handle_callback(update, context):
     if data.startswith("analyze_"):
         pair = data.replace("analyze_", "")
         if PAIRS_MAP.get(pair):
-            msg = query.edit_message_text(f"🔍 Аналізую {pair} за мультитаймфреймовим рушієм...")
+            msg = query.edit_message_text(f"🔍 Аналізую {pair}...")
             threading.Thread(target=analyze_single_pair, args=[chat_id, pair, PAIRS_MAP[pair], False, msg.message_id], daemon=True).start()
     elif data == "bt_ALL":
         query.edit_message_text("🌐 Запускаю глобальний бектест для усіх пар...", parse_mode="HTML")
         run_backtest_all_pairs(chat_id)
     elif data.startswith("bt_"):
         pair = data.replace("bt_", "")
-        query.edit_message_text(f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)... Зачекайте.", parse_mode="HTML")
+        query.edit_message_text(f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)...", parse_mode="HTML")
         def run_bt():
             try:
                 report = run_backtest(pair, "30d")
@@ -763,15 +727,12 @@ def handle_callback(update, context):
             except Exception as e:
                 bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
         threading.Thread(target=run_bt, daemon=True).start()
-    elif data.startswith("toggle_strat_"):
-        strat_name = data.replace("toggle_strat_", "")
-        if strat_name in strategies_status:
-            strategies_status[strat_name] = not strategies_status[strat_name]
+    elif data.startswith("toggle_group_"):
+        group_key = data.replace("toggle_group_", "")
+        if group_key in strategies_status:
+            strategies_status[group_key] = not strategies_status[group_key]
             save_strategies_config(strategies_status)
-        send_strategies_menu(query, is_callback=True, page=0)
-    elif data.startswith("strat_page_"):
-        page_num = int(data.replace("strat_page_", ""))
-        send_strategies_menu(query, is_callback=True, page=page_num)
+        send_strategies_menu(query, is_callback=True)
     elif data.startswith("review_"):
         sig_id = int(data.replace("review_", ""))
         query.edit_message_text("🔍 Формую ретроспективний аналіз... ⏳")
@@ -803,6 +764,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Бот запущено з Двоядерною Мультитаймфреймовою матрицею!")
+    logger.info("🚀 Бот запущено з груповим керуванням стратегіями!")
     updater.start_polling()
     updater.idle()
