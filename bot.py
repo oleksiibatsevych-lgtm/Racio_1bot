@@ -425,7 +425,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         strat_title = analysis.get("strategy_title", "")
         clean_name = clean_strategy_name(strat_title)
 
-        # Перевірка вимкнення відповідної групи в меню
         signal_type_engine = analysis.get("signal_type_engine", "trend_multi")
         if signal_type_engine in strategies_status and not strategies_status[signal_type_engine]:
             report_no_signal(f"Група стратегій вимкнена в меню.")
@@ -698,7 +697,15 @@ def handle_message(update, context):
         finished = stats.get('wins', 0) + stats.get('losses', 0)
         winrate = (stats.get('wins', 0) / finished * 100) if finished > 0 else 0.0
         msg = f"📊 <b>Статистика матриці:</b>\n\nВсього: {stats.get('total', 0)}\n✅ WIN: {stats.get('wins', 0)}\n❌ LOSS: {stats.get('losses', 0)}\n🏆 Вінрейт: {winrate:.1f}%"
-        update.message.reply_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml")], [InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]]))
+        update.message.reply_text(
+            msg, 
+            parse_mode="HTML", 
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Аналіз по годинах/днях", callback_data="strategy_time_stats")],
+                [InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml")], 
+                [InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
+            ])
+        )
     elif text == "📋 Логи фільтру":
         logs = database.get_system_logs(chat_id)
         update.message.reply_text("📋 <b>Останні логи:</b>\n\n" + "\n".join([clean_ai_html(l) for l in logs]) if logs else "📋 Логи порожні.", parse_mode="HTML")
@@ -727,6 +734,82 @@ def handle_callback(update, context):
             except Exception as e:
                 bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
         threading.Thread(target=run_bt, daemon=True).start()
+    elif data == "strategy_time_stats":
+        query.edit_message_text("⏳ Формую детальний аналіз вінрейту за годинами та днями... ⏳")
+        try:
+            time_stats = database.get_strategy_time_stats()
+            hours_data = time_stats.get("hours", [])
+            dow_data = time_stats.get("dow", [])
+
+            if not hours_data and not dow_data:
+                query.edit_message_text(
+                    "⚠️ Недостатньо закритих угод у базі даних для формування часового аналізу.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
+                return
+
+            dow_names = {0: "Неділя", 1: "Понеділок", 2: "Вівторок", 3: "Середа", 4: "Четвер", 5: "П'ятниця", 6: "Субота"}
+            
+            report_lines = ["📈 <b>Аналіз ефективності за часом та днями:</b>\n"]
+
+            if hours_data:
+                report_lines.append("🕒 <b>По годинах (UTC):</b>")
+                hour_grouped = {}
+                for row in hours_data:
+                    h = int(row['trade_hour'])
+                    if h not in hour_grouped:
+                        hour_grouped[h] = {"wins": 0, "total": 0}
+                    hour_grouped[h]["wins"] += int(row['wins'])
+                    hour_grouped[h]["total"] += int(row['total'])
+
+                sorted_hours = sorted(hour_grouped.items(), key=lambda x: (x[1]["wins"]/x[1]["total"] if x[1]["total"]>0 else 0), reverse=True)
+                for h, d in sorted_hours[:10]:
+                    tot = d["total"]
+                    wins = d["wins"]
+                    wr = (wins / tot * 100) if tot > 0 else 0
+                    ico = "🟢" if wr >= 53 else ("🟡" if wr >= 48 else "🔴")
+                    report_lines.append(f"{ico} <b>{h:02d}:00 - {h+1:02d}:00</b>: {wins}/{tot} ({wr:.1f}% WR)")
+
+            if dow_data:
+                report_lines.append("\n📅 <b>По днях тижня:</b>")
+                dow_grouped = {}
+                for row in dow_data:
+                    dw = int(row['trade_dow'])
+                    if dw not in dow_grouped:
+                        dow_grouped[dw] = {"wins": 0, "total": 0}
+                    dow_grouped[dw]["wins"] += int(row['wins'])
+                    dow_grouped[dw]["total"] += int(row['total'])
+
+                for dw in range(7):
+                    if dw in dow_grouped:
+                        d = dow_grouped[dw]
+                        tot = d["total"]
+                        wins = d["wins"]
+                        wr = (wins / tot * 100) if tot > 0 else 0
+                        ico = "🟢" if wr >= 53 else ("🟡" if wr >= 48 else "🔴")
+                        d_name = dow_names.get(dw, "День")
+                        report_lines.append(f"{ico} <b>{d_name}</b>: {wins}/{tot} ({wr:.1f}% WR)")
+
+            full_report = "\n".join(report_lines)
+            if len(full_report) > 4000:
+                full_report = full_report[:3950] + "\n<i>...звіт скорочено через ліміт довжини.</i>"
+
+            query.edit_message_text(full_report, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до статистики", callback_data="back_to_stats")]]))
+        except Exception as e:
+            query.edit_message_text(f"❌ Помилка генерації аналітики: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
+    elif data == "back_to_stats":
+        stats = database.get_stats()
+        finished = stats.get('wins', 0) + stats.get('losses', 0)
+        winrate = (stats.get('wins', 0) / finished * 100) if finished > 0 else 0.0
+        msg = f"📊 <b>Статистика матриці:</b>\n\nВсього: {stats.get('total', 0)}\n✅ WIN: {stats.get('wins', 0)}\n❌ LOSS: {stats.get('losses', 0)}\n🏆 Вінрейт: {winrate:.1f}%"
+        query.edit_message_text(
+            msg, 
+            parse_mode="HTML", 
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Аналіз по годинах/днях", callback_data="strategy_time_stats")],
+                [InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml")], 
+                [InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
+            ])
+        )
     elif data.startswith("toggle_group_"):
         group_key = data.replace("toggle_group_", "")
         if group_key in strategies_status:
