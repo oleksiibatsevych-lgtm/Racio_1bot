@@ -113,32 +113,34 @@ class AdaptiveTechnicalAnalysis:
 
     def generate_master_confluence_signal(self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots) -> dict:
         if df_1m is None or df_1m.empty or len(df_1m) < 15 or df_3m is None or df_3m.empty:
-            return {'signal': 'NONE', 'reason': 'Мало даних для багатотаймфреймового аналізу', 'suggested_exp': 10, 'strategy': 'NONE'}
+            return {'signal': 'NONE', 'reason': 'Мало даних для багатотаймфреймового аналізу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi'}
 
         buffer_pct = 0.0015
 
-        # === СТРАТЕГІЯ 1: Z-Score Mean Reversion ===
+        # === СТРАТЕГІЯ 1: Z-Score Mean Reversion (Група: oscillators) ===
         z_score_1m = float(df_1m['z_score'].iloc[-1]) if 'z_score' in df_1m.columns else 0.0
         if z_score_1m <= -2.1:
             return {
                 'signal': 'CALL',
                 'strategy': 'Z-Score Mean Reversion',
                 'strategy_title': 'Reversal Z-Score CALL',
+                'signal_type_engine': 'oscillators',
                 'confluence_count': 3,
                 'suggested_exp': 5,
-                'reason': f"Z-Score Mean Reversion: ціна критично нижче середнього ({z_score_1m:.2f})"
+                'reason': f"Z-Score Mean Reversion: ціна нижче середнього ({z_score_1m:.2f})"
             }
         elif z_score_1m >= 2.1:
             return {
                 'signal': 'PUT',
                 'strategy': 'Z-Score Mean Reversion',
                 'strategy_title': 'Reversal Z-Score PUT',
+                'signal_type_engine': 'oscillators',
                 'confluence_count': 3,
                 'suggested_exp': 5,
-                'reason': f"Z-Score Mean Reversion: ціна критично вище середнього ({z_score_1m:.2f})"
+                'reason': f"Z-Score Mean Reversion: ціна вище середнього ({z_score_1m:.2f})"
             }
 
-        # === СТРАТЕГІЯ 2: Flat Matrix Bounce (Потужно оптимізовано за фільтрами) ===
+        # === СТРАТЕГІЯ 2: Flat Matrix Bounce (Група: flat_corridor) ===
         timeframes_to_check = {
             '1M': df_1m,
             '3M': df_3m,
@@ -162,7 +164,6 @@ class AdaptiveTechnicalAnalysis:
             lower_buffer = bb_lower * (1 + buffer_pct)
             upper_buffer = bb_upper * (1 - buffer_pct)
 
-            # Суворіші фільтри для шумного 1M таймфрейму
             max_adx = 22 if tf_name == '1M' else 25
             rsi_call = 28 if tf_name == '1M' else 35
             rsi_put = 72 if tf_name == '1M' else 65
@@ -174,6 +175,7 @@ class AdaptiveTechnicalAnalysis:
                         'signal': 'CALL',
                         'strategy': 'Flat Matrix Bounce',
                         'strategy_title': f'Flat Matrix Bounce CALL [{tf_name}]',
+                        'signal_type_engine': 'flat_corridor',
                         'confluence_count': 2,
                         'suggested_exp': exp_time,
                         'reason': f"Флет [{tf_name}]: Відбиття від BB, RSI: {rsi:.1f}, Stoch: {stoch_k:.1f}"
@@ -184,12 +186,13 @@ class AdaptiveTechnicalAnalysis:
                         'signal': 'PUT',
                         'strategy': 'Flat Matrix Bounce',
                         'strategy_title': f'Flat Matrix Bounce PUT [{tf_name}]',
+                        'signal_type_engine': 'flat_corridor',
                         'confluence_count': 2,
                         'suggested_exp': exp_time,
                         'reason': f"Флет [{tf_name}]: Відбиття від BB, RSI: {rsi:.1f}, Stoch: {stoch_k:.1f}"
                     }
 
-        # === СТРАТЕГІЯ 3: Multi-Timeframe Scalp ===
+        # === СТРАТЕГІЯ 3: Multi-Timeframe Scalp (Група: price_action) ===
         rsi_1m = float(df_1m['rsi'].iloc[-1]) if 'rsi' in df_1m.columns else 50
         rsi_3m = float(df_3m['rsi'].iloc[-1]) if 'rsi' in df_3m.columns else 50
         if rsi_1m < 28 and rsi_3m < 32:
@@ -197,6 +200,7 @@ class AdaptiveTechnicalAnalysis:
                 'signal': 'CALL',
                 'strategy': 'Multi-Timeframe Scalp',
                 'strategy_title': 'Multi-Timeframe Scalp CALL',
+                'signal_type_engine': 'price_action',
                 'confluence_count': 3,
                 'suggested_exp': 4,
                 'reason': f"Multi-TF Scalp: перепроданість 1M ({rsi_1m:.1f}) та 3M"
@@ -206,12 +210,13 @@ class AdaptiveTechnicalAnalysis:
                 'signal': 'PUT',
                 'strategy': 'Multi-Timeframe Scalp',
                 'strategy_title': 'Multi-Timeframe Scalp PUT',
+                'signal_type_engine': 'price_action',
                 'confluence_count': 3,
                 'suggested_exp': 4,
                 'reason': f"Multi-TF Scalp: перекупленість 1M ({rsi_1m:.1f}) та 3M"
             }
 
-        # === СТРАТЕГІЯ 4: Trend Matrix Breakout ===
+        # === СТРАТЕГІЯ 4: Trend Matrix Breakout (Група: trend_multi) ===
         trend_1h = self.get_trend(df_1h, 50) if df_1h is not None and not df_1h.empty else global_trend
         trend_15m = self.get_trend(df_15m, 20) if df_15m is not None and not df_15m.empty else "NEUTRAL"
         adx_3m = float(df_3m['adx'].iloc[-1]) if 'adx' in df_3m.columns else 20
@@ -221,6 +226,7 @@ class AdaptiveTechnicalAnalysis:
                 'signal': 'CALL',
                 'strategy': 'Trend Breakout',
                 'strategy_title': 'Trend Matrix Breakout CALL',
+                'signal_type_engine': 'trend_multi',
                 'confluence_count': 3,
                 'suggested_exp': 12,
                 'reason': "ТРЕНД (1H-1M синхрон): Імпульс за висхідним трендом"
@@ -230,12 +236,13 @@ class AdaptiveTechnicalAnalysis:
                 'signal': 'PUT',
                 'strategy': 'Trend Breakout',
                 'strategy_title': 'Trend Matrix Breakout PUT',
+                'signal_type_engine': 'trend_multi',
                 'confluence_count': 3,
                 'suggested_exp': 12,
                 'reason': "ТРЕНД (1H-1M синхрон): Імпульс за низхідним трендом"
             }
 
-        return {'signal': 'NONE', 'reason': 'Мультитаймфреймовий баланс нейтральний', 'suggested_exp': 10, 'strategy': 'NONE'}
+        return {'signal': 'NONE', 'reason': 'Мультитаймфреймовий баланс нейтральний', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi'}
 
     def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m) -> dict:
         global_trend = self.get_trend(df_1h, span_val=200)
@@ -259,6 +266,7 @@ class AdaptiveTechnicalAnalysis:
             "signal": sig_data.get("signal", "NONE"),
             "strategy": sig_data.get("strategy", "MULTI_TF_DUAL_ENGINE"),
             "strategy_title": sig_data.get("strategy_title", "Multi-TF Dual Engine"),
+            "signal_type_engine": sig_data.get("signal_type_engine", "trend_multi"),
             "confluence_count": sig_data.get("confluence_count", 1),
             "reason": sig_data.get("reason", "Умови не виконано"),
             "rsi": float(df_ind_1m['rsi'].iloc[-1]) if 'rsi' in df_ind_1m.columns else 50,
