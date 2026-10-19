@@ -21,7 +21,6 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
 
-        # Z-Score для статистичного повернення до середнього
         rolling_mean = df['close'].rolling(window=20).mean()
         rolling_std = df['close'].rolling(window=20).std()
         df['z_score'] = (df['close'] - rolling_mean) / (rolling_std + 1e-10)
@@ -65,6 +64,7 @@ class AdaptiveTechnicalAnalysis:
         lowest_low = df['low'].rolling(window=14).min()
         highest_high = df['high'].rolling(window=14).max()
         df['stoch_k'] = 100 * ((df['close'] - lowest_low) / (highest_high - lowest_low + 1e-9))
+        df['stoch_k'] = df['stoch_k'].fillna(50)
 
         df['donchian_upper'] = df['high'].rolling(window=20).max()
         df['donchian_lower'] = df['low'].rolling(window=20).min()
@@ -111,14 +111,13 @@ class AdaptiveTechnicalAnalysis:
         distances.append(min(mod_val, 250 - mod_val) / (price * round_factor))
         return min(distances) if distances else 0.001
 
-    # --- МУЛЬТИ ТАЙМФРЕЙМОВИЙ РУШІЙ З 4 СТРАТЕГІЯМИ ---
     def generate_master_confluence_signal(self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots) -> dict:
         if df_1m is None or df_1m.empty or len(df_1m) < 15 or df_3m is None or df_3m.empty:
             return {'signal': 'NONE', 'reason': 'Мало даних для багатотаймфреймового аналізу', 'suggested_exp': 10, 'strategy': 'NONE'}
 
-        buffer_pct = 0.0015  # Буферна зона допуску для Боллінджера
+        buffer_pct = 0.0015
 
-        # === СТРАТЕГІЯ 1: Z-Score Mean Reversion (Статистичне повернення до середнього) ===
+        # === СТРАТЕГІЯ 1: Z-Score Mean Reversion ===
         z_score_1m = float(df_1m['z_score'].iloc[-1]) if 'z_score' in df_1m.columns else 0.0
         if z_score_1m <= -2.1:
             return {
@@ -139,7 +138,7 @@ class AdaptiveTechnicalAnalysis:
                 'reason': f"Z-Score Mean Reversion: ціна критично вище середнього ({z_score_1m:.2f})"
             }
 
-        # === СТРАТЕГІЯ 2: Flat Matrix Bounce (Розширені межі BB на 1M, 3M, 5M, 15M) ===
+        # === СТРАТЕГІЯ 2: Flat Matrix Bounce (Потужно оптимізовано за фільтрами) ===
         timeframes_to_check = {
             '1M': df_1m,
             '3M': df_3m,
@@ -158,12 +157,18 @@ class AdaptiveTechnicalAnalysis:
             bb_upper = float(last_row['bb_upper'])
             rsi = float(last_row['rsi'])
             adx = float(last_row.get('adx', 20))
+            stoch_k = float(last_row.get('stoch_k', 50))
 
             lower_buffer = bb_lower * (1 + buffer_pct)
             upper_buffer = bb_upper * (1 - buffer_pct)
 
-            if adx <= 26 and adx_15m < 30:
-                if (tf_price <= lower_buffer or last_row['low'] <= bb_lower) and rsi < 36:
+            # Суворіші фільтри для шумного 1M таймфрейму
+            max_adx = 22 if tf_name == '1M' else 25
+            rsi_call = 28 if tf_name == '1M' else 35
+            rsi_put = 72 if tf_name == '1M' else 65
+
+            if adx <= max_adx and adx_15m < 28:
+                if (tf_price <= lower_buffer or last_row['low'] <= bb_lower) and rsi < rsi_call and stoch_k < 25:
                     exp_time = 3 if tf_name == '1M' else (6 if tf_name == '3M' else 10)
                     return {
                         'signal': 'CALL',
@@ -171,9 +176,9 @@ class AdaptiveTechnicalAnalysis:
                         'strategy_title': f'Flat Matrix Bounce CALL [{tf_name}]',
                         'confluence_count': 2,
                         'suggested_exp': exp_time,
-                        'reason': f"Флет [{tf_name}]: Відбиття від нижньої межі BB (з буфером), RSI: {rsi:.1f}"
+                        'reason': f"Флет [{tf_name}]: Відбиття від BB, RSI: {rsi:.1f}, Stoch: {stoch_k:.1f}"
                     }
-                elif (tf_price >= upper_buffer or last_row['high'] >= bb_upper) and rsi > 64:
+                elif (tf_price >= upper_buffer or last_row['high'] >= bb_upper) and rsi > rsi_put and stoch_k > 75:
                     exp_time = 3 if tf_name == '1M' else (6 if tf_name == '3M' else 10)
                     return {
                         'signal': 'PUT',
@@ -181,10 +186,10 @@ class AdaptiveTechnicalAnalysis:
                         'strategy_title': f'Flat Matrix Bounce PUT [{tf_name}]',
                         'confluence_count': 2,
                         'suggested_exp': exp_time,
-                        'reason': f"Флет [{tf_name}]: Відбиття від верхньої межі BB (з буфером), RSI: {rsi:.1f}"
+                        'reason': f"Флет [{tf_name}]: Відбиття від BB, RSI: {rsi:.1f}, Stoch: {stoch_k:.1f}"
                     }
 
-        # === СТРАТЕГІЯ 3: Multi-Timeframe Scalp / Price Action ===
+        # === СТРАТЕГІЯ 3: Multi-Timeframe Scalp ===
         rsi_1m = float(df_1m['rsi'].iloc[-1]) if 'rsi' in df_1m.columns else 50
         rsi_3m = float(df_3m['rsi'].iloc[-1]) if 'rsi' in df_3m.columns else 50
         if rsi_1m < 28 and rsi_3m < 32:
@@ -194,7 +199,7 @@ class AdaptiveTechnicalAnalysis:
                 'strategy_title': 'Multi-Timeframe Scalp CALL',
                 'confluence_count': 3,
                 'suggested_exp': 4,
-                'reason': f"Multi-TF Scalp: синхронна перепроданість на 1M ({rsi_1m:.1f}) та 3M ({rsi_3m:.1f})"
+                'reason': f"Multi-TF Scalp: перепроданість 1M ({rsi_1m:.1f}) та 3M"
             }
         elif rsi_1m > 72 and rsi_3m > 68:
             return {
@@ -203,10 +208,10 @@ class AdaptiveTechnicalAnalysis:
                 'strategy_title': 'Multi-Timeframe Scalp PUT',
                 'confluence_count': 3,
                 'suggested_exp': 4,
-                'reason': f"Multi-TF Scalp: синхронна перекупленість на 1M ({rsi_1m:.1f}) та 3M ({rsi_3m:.1f})"
+                'reason': f"Multi-TF Scalp: перекупленість 1M ({rsi_1m:.1f}) та 3M"
             }
 
-        # === СТРАТЕГІЯ 4: Trend Matrix Breakout / Continuation ===
+        # === СТРАТЕГІЯ 4: Trend Matrix Breakout ===
         trend_1h = self.get_trend(df_1h, 50) if df_1h is not None and not df_1h.empty else global_trend
         trend_15m = self.get_trend(df_15m, 20) if df_15m is not None and not df_15m.empty else "NEUTRAL"
         adx_3m = float(df_3m['adx'].iloc[-1]) if 'adx' in df_3m.columns else 20
