@@ -43,10 +43,10 @@ from indicators import AdaptiveTechnicalAnalysis
 from ml_model import TradingMLFilter
 from ai_advisor import ai_advisor_instance
 from filters import (
-    calculate_dynamic_expiration,
     check_pivot_level_proximity,
     validate_signal_conditions,
 )
+from adaptive_optimizer import calculate_smart_expiration
 from calendar_filter import is_high_impact_news_time
 from backtest import run_backtest, clean_strategy_name, PERFORMANCE_CACHE_FILE
 
@@ -74,7 +74,6 @@ ML_FILTER_ENABLED = True
 
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
 
-# --- 7 Головних логічних груп стратегій для керування через меню ---
 GROUPED_STRATEGIES = {
     "trend_multi": "📊 Мульти-Трендові Системи (1H/15M/3M)",
     "flat_corridor": "📉 Флетові Коридори та Відбої (BB)",
@@ -420,7 +419,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             report_no_signal("Недостатньо даних котирувань.")
             return False
 
-        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m)
+        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name=pair_name)
         
         strat_title = analysis.get("strategy_title", "")
         clean_name = clean_strategy_name(strat_title)
@@ -451,7 +450,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         win_probability = ml_filter.predict_proba(analysis)
 
         if ML_FILTER_ENABLED:
-            min_ml = 58.0 if auto_mode else 45.0
+            min_ml = 58.0 if auto_mode else 48.0
             if win_probability < min_ml:
                 report_no_signal(f"ML-модель оцінила ймовірність у {win_probability:.1f}%")
                 return False
@@ -461,10 +460,14 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             report_no_signal(f"Невдале розташування відносно рівнів: {pivot_reason}")
             return False
 
-        exp_time = calculate_dynamic_expiration(analysis)
+        base_exp = analysis.get("suggested_exp", 10)
+        regime = analysis.get("regime", "RANGE_BOUND")
+        vol_ratio = analysis.get("volatility_ratio", 1.0)
+        exp_time = calculate_smart_expiration(base_exp, regime, vol_ratio)
+
         payload = {
             "signal": analysis.get("signal"),
-            "strategy": analysis.get("strategy", "MULTI_TF_DUAL_ENGINE"),
+            "strategy": analysis.get("strategy", "QUANTUM_MATRIX"),
             "strategy_title": strat_title,
             "confluence_count": analysis.get("confluence_count", 1),
             "current_price": analysis.get("current_price"),
@@ -498,7 +501,8 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             f"📋 Стратегія: <b>{payload['strategy_title']}</b>\n"
             f"🧠 ML: <b>{make_progress_bar(win_probability)} {win_probability:.1f}%</b>\n"
             f"🤖 ШІ: <b>{make_progress_bar(ai_res.get('confidence', 6)*10)} {ai_res.get('confidence', 6)}/10</b>\n"
-            f"🔥 Збігів: <b>{payload['confluence_count']} балів</b>\n\n"
+            f"🔥 Збігів: <b>{payload['confluence_count']} балів</b>\n"
+            f"🌐 Режим: <b>{regime}</b>\n\n"
             f"💡 Причина: <i>{clean_ai_html(ai_res.get('reason', ''))}</i>\n"
             f"🌐 Сесія: {session_str}"
         )
@@ -539,7 +543,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
 
 
 def run_mass_analysis(chat_id):
-    bot.send_message(chat_id=chat_id, text="🔍 Запускаю паралельний масовий аналіз усіх пар...")
+    bot.send_message(chat_id=chat_id, text="🔍 Запускаю квантовий масовий аналіз усіх пар...")
     database.clear_filtered_logs(chat_id)
     
     found = False
@@ -567,7 +571,7 @@ def handle_backtest_command(update, context):
         if pair == "ALL":
             run_backtest_all_pairs(chat_id)
             return
-        bot.send_message(chat_id=chat_id, text=f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)...", parse_mode="HTML")
+        bot.send_message(chat_id=chat_id, text=f"⏳ Запускаю бектест для <code>{pair}</code> (30 днів)...", parse_mode="HTML")
         
         def run_bg():
             try:
@@ -606,7 +610,7 @@ def run_backtest_all_pairs(chat_id):
                     mult = 1000 if "JPY" in yahoo_ticker else 100000
                     for i in range(30, len(df) - 3):
                         s_df = df.iloc[:i]
-                        an = analyzer.analyze_all_timeframes(s_df, s_df, s_df, s_df, s_df, s_df)
+                        an = analyzer.analyze_all_timeframes(s_df, s_df, s_df, s_df, s_df, s_df, pair_name=p_name)
                         if an.get("signal") in ["CALL", "PUT"]:
                             ep = float(s_df["close"].iloc[-1])
                             exp_p = float(df["close"].iloc[i + 3])
@@ -660,7 +664,7 @@ def start(update, context):
         [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
         [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
     ]
-    update.message.reply_text("🤖 Бот із Двоядерною матрицею та груповим керуванням готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text("🤖 Квантовий бот із режимами ринку та адаптивним оптимізатором готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
 
 
 def handle_message(update, context):
@@ -735,7 +739,7 @@ def handle_callback(update, context):
                 bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
         threading.Thread(target=run_bt, daemon=True).start()
     elif data == "strategy_time_stats":
-        query.edit_message_text("⏳ Формую детальний аналіз вінрейту за годинами та днями... ⏳")
+        query.edit_message_text("⏳ Формую аналіз за годинами та днями... ⏳")
         try:
             time_stats = database.get_strategy_time_stats()
             hours_data = time_stats.get("hours", [])
@@ -743,13 +747,12 @@ def handle_callback(update, context):
 
             if not hours_data and not dow_data:
                 query.edit_message_text(
-                    "⚠️ Недостатньо закритих угод у базі даних для формування часового аналізу.",
+                    "⚠️ Недостатньо закритих угод для часового аналізу.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
                 return
 
             dow_names = {0: "Неділя", 1: "Понеділок", 2: "Вівторок", 3: "Середа", 4: "Четвер", 5: "П'ятниця", 6: "Субота"}
-            
-            report_lines = ["📈 <b>Аналіз ефективності за часом та днями:</b>\n"]
+            report_lines = ["📈 <b>Аналіз ефективності за часом:</b>\n"]
 
             if hours_data:
                 report_lines.append("🕒 <b>По годинах (UTC):</b>")
@@ -790,12 +793,9 @@ def handle_callback(update, context):
                         report_lines.append(f"{ico} <b>{d_name}</b>: {wins}/{tot} ({wr:.1f}% WR)")
 
             full_report = "\n".join(report_lines)
-            if len(full_report) > 4000:
-                full_report = full_report[:3950] + "\n<i>...звіт скорочено через ліміт довжини.</i>"
-
-            query.edit_message_text(full_report, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до статистики", callback_data="back_to_stats")]]))
+            query.edit_message_text(full_report, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
         except Exception as e:
-            query.edit_message_text(f"❌ Помилка генерації аналітики: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
+            query.edit_message_text(f"❌ Помилка: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
     elif data == "back_to_stats":
         stats = database.get_stats()
         finished = stats.get('wins', 0) + stats.get('losses', 0)
@@ -847,6 +847,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Бот запущено з груповим керуванням стратегіями!")
+    logger.info("🚀 Квантовий бот із новими модулями запущено!")
     updater.start_polling()
     updater.idle()
