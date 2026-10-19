@@ -21,6 +21,12 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
 
+        # Z-Score для статистичного повернення до середнього
+        rolling_mean = df['close'].rolling(window=20).mean()
+        rolling_std = df['close'].rolling(window=20).std()
+        df['z_score'] = (df['close'] - rolling_mean) / (rolling_std + 1e-10)
+        df['z_score'] = df['z_score'].fillna(0.0)
+
         high = df['high']
         low = df['low']
         close = df['close']
@@ -105,117 +111,123 @@ class AdaptiveTechnicalAnalysis:
         distances.append(min(mod_val, 250 - mod_val) / (price * round_factor))
         return min(distances) if distances else 0.001
 
-    # --- МУЛЬТИ ТАЙМФРЕЙМОВИЙ ДВОЯДЕРНИЙ РУШІЙ (1M, 3M, 5M, 15M, 1H) ---
+    # --- МУЛЬТИ ТАЙМФРЕЙМОВИЙ РУШІЙ З 4 СТРАТЕГІЯМИ ---
     def generate_master_confluence_signal(self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots) -> dict:
         if df_1m is None or df_1m.empty or len(df_1m) < 15 or df_3m is None or df_3m.empty:
             return {'signal': 'NONE', 'reason': 'Мало даних для багатотаймфреймового аналізу', 'suggested_exp': 10, 'strategy': 'NONE'}
 
-        c_price = float(df_1m['close'].iloc[-1])
-        rsi_1m = float(df_1m['rsi'].iloc[-1]) if 'rsi' in df_1m.columns else 50
-        rsi_5m = float(df_5m['rsi'].iloc[-1]) if df_5m is not None and not df_5m.empty and 'rsi' in df_5m.columns else rsi_1m
-        
-        adx_3m = float(df_3m['adx'].iloc[-1]) if 'adx' in df_3m.columns else 20
-        adx_15m = float(df_15m['adx'].iloc[-1]) if df_15m is not None and not df_15m.empty and 'adx' in df_15m.columns else adx_3m
+        buffer_pct = 0.0015  # Буферна зона допуску для Боллінджера
 
-        bb_lower = float(df_1m['bb_lower'].iloc[-1]) if 'bb_lower' in df_1m.columns else 0
-        bb_upper = float(df_1m['bb_upper'].iloc[-1]) if 'bb_upper' in df_1m.columns else 0
-        stoch_k = float(df_1m['stoch_k'].iloc[-1]) if 'stoch_k' in df_1m.columns else 50
-
-        # === 1. РЕЖИМ ФЛЕТУ (Flat / Range-Bound Engine) ===
-        if adx_3m <= 23 and adx_15m < 25:
-            flat_call_score = 0
-            flat_put_score = 0
-            reasons = []
-
-            if bb_lower > 0 and c_price <= bb_lower * 1.002:
-                flat_call_score += 1.5
-                reasons.append("Відбій від нижньої межі BB (1M)")
-            if rsi_1m < 32 and rsi_5m < 40:
-                flat_call_score += 1.2
-                reasons.append(f"RSI перепроданий на 1M ({rsi_1m:.1f}) та 5M")
-            if stoch_k < 15:
-                flat_call_score += 1.0
-                reasons.append("Стохастик у зоні дна коридору")
-
-            if bb_upper > 0 and c_price >= bb_upper * 0.998:
-                flat_put_score += 1.5
-                reasons.append("Відбій від верхньої межі BB (1M)")
-            if rsi_1m > 68 and rsi_5m > 60:
-                flat_put_score += 1.2
-                reasons.append(f"RSI перекуплений на 1M ({rsi_1m:.1f}) та 5M")
-            if stoch_k > 85:
-                flat_put_score += 1.0
-                reasons.append("Стохастик у зоні піку коридору")
-
-            threshold_flat = 2.0
-            if flat_call_score >= threshold_flat and flat_call_score >= flat_put_score:
-                return {
-                    'signal': 'CALL',
-                    'strategy': 'Flat Matrix Bounce CALL',
-                    'strategy_title': 'Flat Matrix Bounce CALL',
-                    'confluence_count': int(flat_call_score),
-                    'suggested_exp': 7,
-                    'reason': "ФЛЕТ (1M-15M боковик): " + " | ".join(reasons)
-                }
-            elif flat_put_score >= threshold_flat and flat_put_score > flat_call_score:
-                return {
-                    'signal': 'PUT',
-                    'strategy': 'Flat Matrix Bounce PUT',
-                    'strategy_title': 'Flat Matrix Bounce PUT',
-                    'confluence_count': int(flat_put_score),
-                    'suggested_exp': 7,
-                    'reason': "ФЛЕТ (1M-15M боковик): " + " | ".join(reasons)
-                }
-
-        # === 2. РЕЖИМ ТРЕНДУ (Trend Engine) ===
-        trend_call_score = 0
-        trend_put_score = 0
-        trend_reasons = []
-
-        trend_1h = self.get_trend(df_1h, 50) if df_1h is not None and not df_1h.empty else global_trend
-        trend_15m = self.get_trend(df_15m, 20) if df_15m is not None and not df_15m.empty else "NEUTRAL"
-
-        if global_trend == "BULLISH" and (trend_1h == "BULLISH" or trend_15m == "BULLISH") and adx_3m > 22:
-            trend_call_score += 2.0
-            trend_reasons.append("Висхідний тренд синхронізовано (1H/15M/3M)")
-        elif global_trend == "BEARISH" and (trend_1h == "BEARISH" or trend_15m == "BEARISH") and adx_3m > 22:
-            trend_put_score += 2.0
-            trend_reasons.append("Низхідний тренд синхронізовано (1H/15M/3M)")
-
-        if rsi_1m < 48 and global_trend == "BULLISH":
-            trend_call_score += 1.0
-            trend_reasons.append(f"Корекція за трендом на RSI 1M ({rsi_1m:.1f})")
-        elif rsi_1m > 52 and global_trend == "BEARISH":
-            trend_put_score += 1.0
-            trend_reasons.append(f"Корекція за трендом на RSI 1M ({rsi_1m:.1f})")
-
-        s1 = pivots.get("S1", 0)
-        r1 = pivots.get("R1", 0)
-        if global_trend == "BULLISH" and s1 > 0 and abs(c_price - s1) / c_price < 0.001:
-            trend_call_score += 1.0
-            trend_reasons.append("Тест рівня підтримки Pivot S1")
-        elif global_trend == "BEARISH" and r1 > 0 and abs(c_price - r1) / c_price < 0.001:
-            trend_put_score += 1.0
-            trend_reasons.append("Тест рівня опору Pivot R1")
-
-        threshold_trend = 2.2
-        if trend_call_score >= threshold_trend and trend_call_score >= trend_put_score:
+        # === СТРАТЕГІЯ 1: Z-Score Mean Reversion (Статистичне повернення до середнього) ===
+        z_score_1m = float(df_1m['z_score'].iloc[-1]) if 'z_score' in df_1m.columns else 0.0
+        if z_score_1m <= -2.1:
             return {
                 'signal': 'CALL',
-                'strategy': 'Multi-TF Trend Matrix CALL',
-                'strategy_title': 'Multi-TF Trend Matrix CALL',
-                'confluence_count': int(trend_call_score),
-                'suggested_exp': 12,
-                'reason': "ТРЕНД (1H-1M синхрон): " + " | ".join(trend_reasons)
+                'strategy': 'Z-Score Mean Reversion',
+                'strategy_title': 'Reversal Z-Score CALL',
+                'confluence_count': 3,
+                'suggested_exp': 5,
+                'reason': f"Z-Score Mean Reversion: ціна критично нижче середнього ({z_score_1m:.2f})"
             }
-        elif trend_put_score >= threshold_trend and trend_put_score > trend_call_score:
+        elif z_score_1m >= 2.1:
             return {
                 'signal': 'PUT',
-                'strategy': 'Multi-TF Trend Matrix PUT',
-                'strategy_title': 'Multi-TF Trend Matrix PUT',
-                'confluence_count': int(trend_put_score),
+                'strategy': 'Z-Score Mean Reversion',
+                'strategy_title': 'Reversal Z-Score PUT',
+                'confluence_count': 3,
+                'suggested_exp': 5,
+                'reason': f"Z-Score Mean Reversion: ціна критично вище середнього ({z_score_1m:.2f})"
+            }
+
+        # === СТРАТЕГІЯ 2: Flat Matrix Bounce (Розширені межі BB на 1M, 3M, 5M, 15M) ===
+        timeframes_to_check = {
+            '1M': df_1m,
+            '3M': df_3m,
+            '5M': df_5m,
+            '15M': df_15m
+        }
+        adx_15m = float(df_15m['adx'].iloc[-1]) if df_15m is not None and not df_15m.empty and 'adx' in df_15m.columns else 20
+
+        for tf_name, df_tf in timeframes_to_check.items():
+            if df_tf is None or df_tf.empty or 'bb_lower' not in df_tf.columns or 'rsi' not in df_tf.columns:
+                continue
+
+            last_row = df_tf.iloc[-1]
+            tf_price = float(last_row['close'])
+            bb_lower = float(last_row['bb_lower'])
+            bb_upper = float(last_row['bb_upper'])
+            rsi = float(last_row['rsi'])
+            adx = float(last_row.get('adx', 20))
+
+            lower_buffer = bb_lower * (1 + buffer_pct)
+            upper_buffer = bb_upper * (1 - buffer_pct)
+
+            if adx <= 26 and adx_15m < 30:
+                if (tf_price <= lower_buffer or last_row['low'] <= bb_lower) and rsi < 36:
+                    exp_time = 3 if tf_name == '1M' else (6 if tf_name == '3M' else 10)
+                    return {
+                        'signal': 'CALL',
+                        'strategy': 'Flat Matrix Bounce',
+                        'strategy_title': f'Flat Matrix Bounce CALL [{tf_name}]',
+                        'confluence_count': 2,
+                        'suggested_exp': exp_time,
+                        'reason': f"Флет [{tf_name}]: Відбиття від нижньої межі BB (з буфером), RSI: {rsi:.1f}"
+                    }
+                elif (tf_price >= upper_buffer or last_row['high'] >= bb_upper) and rsi > 64:
+                    exp_time = 3 if tf_name == '1M' else (6 if tf_name == '3M' else 10)
+                    return {
+                        'signal': 'PUT',
+                        'strategy': 'Flat Matrix Bounce',
+                        'strategy_title': f'Flat Matrix Bounce PUT [{tf_name}]',
+                        'confluence_count': 2,
+                        'suggested_exp': exp_time,
+                        'reason': f"Флет [{tf_name}]: Відбиття від верхньої межі BB (з буфером), RSI: {rsi:.1f}"
+                    }
+
+        # === СТРАТЕГІЯ 3: Multi-Timeframe Scalp / Price Action ===
+        rsi_1m = float(df_1m['rsi'].iloc[-1]) if 'rsi' in df_1m.columns else 50
+        rsi_3m = float(df_3m['rsi'].iloc[-1]) if 'rsi' in df_3m.columns else 50
+        if rsi_1m < 28 and rsi_3m < 32:
+            return {
+                'signal': 'CALL',
+                'strategy': 'Multi-Timeframe Scalp',
+                'strategy_title': 'Multi-Timeframe Scalp CALL',
+                'confluence_count': 3,
+                'suggested_exp': 4,
+                'reason': f"Multi-TF Scalp: синхронна перепроданість на 1M ({rsi_1m:.1f}) та 3M ({rsi_3m:.1f})"
+            }
+        elif rsi_1m > 72 and rsi_3m > 68:
+            return {
+                'signal': 'PUT',
+                'strategy': 'Multi-Timeframe Scalp',
+                'strategy_title': 'Multi-Timeframe Scalp PUT',
+                'confluence_count': 3,
+                'suggested_exp': 4,
+                'reason': f"Multi-TF Scalp: синхронна перекупленість на 1M ({rsi_1m:.1f}) та 3M ({rsi_3m:.1f})"
+            }
+
+        # === СТРАТЕГІЯ 4: Trend Matrix Breakout / Continuation ===
+        trend_1h = self.get_trend(df_1h, 50) if df_1h is not None and not df_1h.empty else global_trend
+        trend_15m = self.get_trend(df_15m, 20) if df_15m is not None and not df_15m.empty else "NEUTRAL"
+        adx_3m = float(df_3m['adx'].iloc[-1]) if 'adx' in df_3m.columns else 20
+
+        if global_trend == "BULLISH" and (trend_1h == "BULLISH" or trend_15m == "BULLISH") and adx_3m > 22 and rsi_1m < 48:
+            return {
+                'signal': 'CALL',
+                'strategy': 'Trend Breakout',
+                'strategy_title': 'Trend Matrix Breakout CALL',
+                'confluence_count': 3,
                 'suggested_exp': 12,
-                'reason': "ТРЕНД (1H-1M синхрон): " + " | ".join(trend_reasons)
+                'reason': "ТРЕНД (1H-1M синхрон): Імпульс за висхідним трендом"
+            }
+        elif global_trend == "BEARISH" and (trend_1h == "BEARISH" or trend_15m == "BEARISH") and adx_3m > 22 and rsi_1m > 52:
+            return {
+                'signal': 'PUT',
+                'strategy': 'Trend Breakout',
+                'strategy_title': 'Trend Matrix Breakout PUT',
+                'confluence_count': 3,
+                'suggested_exp': 12,
+                'reason': "ТРЕНД (1H-1M синхрон): Імпульс за низхідним трендом"
             }
 
         return {'signal': 'NONE', 'reason': 'Мультитаймфреймовий баланс нейтральний', 'suggested_exp': 10, 'strategy': 'NONE'}
