@@ -14,43 +14,66 @@ def clean_strategy_name(title):
     clean = re.sub(r'\s*\(\+\d+\s+підтверджень\)', '', clean, flags=re.IGNORECASE)
     return clean.strip()
 
-def run_backtest(pair_name="EUR/USD", period="30d"):
+def resample_candles(df_1m, rule):
+    if df_1m.empty:
+        return pd.DataFrame()
+    return df_1m.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+
+def run_backtest(pair_name="EUR/USD", period="7d"):
     yahoo_ticker = YAHOO_PAIRS_MAP.get(pair_name, "EURUSD=X")
     
     try:
-        df = yf.download(tickers=yahoo_ticker, period=period, interval="1h", progress=False, auto_adjust=True)
-        if df is None or df.empty:
-            return f"❌ Не вдалося завантажити історичні дані для бектесту {pair_name}"
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
-        df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+        # Завантажуємо 1-хвилинні дані (Yahoo надає макс 7 днів 1m даних)
+        df_1m = yf.download(tickers=yahoo_ticker, period="7d", interval="1m", progress=False, auto_adjust=True)
+        if df_1m is None or df_1m.empty:
+            return f"❌ Не вдалося завантажити 1M дані для бектесту {pair_name}"
+        if isinstance(df_1m.columns, pd.MultiIndex):
+            df_1m.columns = df_1m.columns.get_level_values(0)
+        df_1m = df_1m.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+        df_1m.dropna(subset=["open", "high", "low", "close"], inplace=True)
+        if df_1m.index.tz is not None:
+            df_1m.index = df_1m.index.tz_localize(None)
     except Exception as e:
         return f"❌ Помилка завантаження історії: {e}"
 
-    if len(df) < 50:
-        return f"❌ Замало історичних даних для {pair_name}"
+    if len(df_1m) < 200:
+        return f"❌ Замало 1M даних для {pair_name}"
 
     analyzer = AdaptiveTechnicalAnalysis()
     
     total_signals = 0
     total_wins = 0
     total_losses = 0
-    
     strategy_stats = {}
     multiplier = 1000 if "JPY" in yahoo_ticker else 100000
 
-    for i in range(30, len(df) - 3):
-        slice_df = df.iloc[:i]
-        analysis = analyzer.analyze_all_timeframes(slice_df, slice_df, slice_df, slice_df, slice_df, slice_df)
+    start_idx = 100
+    step = 3  # Симуляція кожні 3 хвилини для точності й швидкості
+
+    for i in range(start_idx, len(df_1m) - 15, step):
+        slice_1m = df_1m.iloc[:i]
+        
+        # Ресемплимо точні 3M, 5M, 15M, 1H таймфрейми
+        df_3m = resample_candles(slice_1m, "3min")
+        df_5m = resample_candles(slice_1m, "5min")
+        df_15m = resample_candles(slice_1m, "15min")
+        df_1h = resample_candles(slice_1m, "60min")
+        df_daily = resample_candles(slice_1m, "24h")
+
+        if len(df_3m) < 20 or len(df_5m) < 15:
+            continue
+
+        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, slice_1m)
         
         signal = analysis.get("signal")
         if signal in ["CALL", "PUT"]:
             raw_strat_title = analysis.get("strategy_title", "Стратегія")
             strat_title = clean_strategy_name(raw_strat_title)
+            exp_mins = int(analysis.get("suggested_exp", 5))
             
-            entry_price = float(slice_df["close"].iloc[-1])
-            exit_price = float(df["close"].iloc[i + 3])
+            entry_price = float(slice_1m["close"].iloc[-1])
+            future_idx = min(i + exp_mins, len(df_1m) - 1)
+            exit_price = float(df_1m["close"].iloc[future_idx])
             
             raw_pips = (exit_price - entry_price) * multiplier if signal == "CALL" else (entry_price - exit_price) * multiplier
             pips = int(round(raw_pips))
@@ -72,7 +95,6 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
                 else:
                     strategy_stats[strat_title]["losses"] += 1
 
-    # Зберігаємо результати у кеш для автоматичного відсіювання в боті
     try:
         cache = {}
         if os.path.exists(PERFORMANCE_CACHE_FILE):
@@ -96,7 +118,7 @@ def run_backtest(pair_name="EUR/USD", period="30d"):
 
     report = (
         f"📊 <b>Результати бектесту матриці ({pair_name}):</b>\n\n"
-        f"• Період: <b>{period} (1H дані)</b>\n"
+        f"• Період: <b>7d (Точні 1M / 3M / 5M / 15M дані)</b>\n"
         f"• Всього сигналів: <b>{total_signals}</b>\n"
         f"• ✅ WIN: <b>{total_wins}</b> | ❌ LOSS: <b>{total_losses}</b>\n"
         f"• 🏆 Загальний вінрейт: <b>{overall_wr:.1f}%</b>\n\n"
