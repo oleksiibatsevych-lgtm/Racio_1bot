@@ -19,11 +19,11 @@ def resample_candles(df_1m, rule):
         return pd.DataFrame()
     return df_1m.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
 
-def run_backtest(pair_name="EUR/USD", period="7d"):
+def run_backtest(pair_name="EUR/USD", period="30d"):
     yahoo_ticker = YAHOO_PAIRS_MAP.get(pair_name, "EURUSD=X")
     
     try:
-        df_1m = yf.download(tickers=yahoo_ticker, period="7d", interval="1m", progress=False, auto_adjust=True)
+        df_1m = yf.download(tickers=yahoo_ticker, period=period, interval="1m", progress=False, auto_adjust=True)
         if df_1m is None or df_1m.empty:
             return f"❌ Не вдалося завантажити 1M дані для бектесту {pair_name}"
         if isinstance(df_1m.columns, pd.MultiIndex):
@@ -61,13 +61,14 @@ def run_backtest(pair_name="EUR/USD", period="7d"):
         if len(df_3m) < 20 or len(df_5m) < 15:
             continue
 
-        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, slice_1m)
+        # Передаємо pair_name для повноцінної роботи адаптивного оптимізатора
+        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, slice_1m, pair_name=pair_name)
         
         signal = analysis.get("signal")
         if signal in ["CALL", "PUT"]:
-            raw_strat_title = analysis.get("strategy_title", "Стратегія")
+            raw_strat_title = analysis.get("strategy_title", "Квантова матриця")
             strat_title = clean_strategy_name(raw_strat_title)
-            exp_mins = int(analysis.get("suggested_exp", 5))
+            exp_mins = int(analysis.get("suggested_exp", 10))
             
             entry_price = float(slice_1m["close"].iloc[-1])
             future_idx = min(i + exp_mins, len(df_1m) - 1)
@@ -115,12 +116,12 @@ def run_backtest(pair_name="EUR/USD", period="7d"):
     overall_wr = (total_wins / total_signals * 100) if total_signals > 0 else 0.0
 
     report = (
-        f"📊 <b>Результати бектесту матриці ({pair_name}):</b>\n\n"
-        f"• Період: <b>7d (Точні 1M / 3M / 5M / 15M дані)</b>\n"
+        f"📊 <b>Результати квантового бектесту ({pair_name}):</b>\n\n"
+        f"• Період: <b>{period} (Історичні дані)</b>\n"
         f"• Всього сигналів: <b>{total_signals}</b>\n"
         f"• ✅ WIN: <b>{total_wins}</b> | ❌ LOSS: <b>{total_losses}</b>\n"
         f"• 🏆 Загальний вінрейт: <b>{overall_wr:.1f}%</b>\n\n"
-        f"📋 <b>ТОП стратегій (зведена статистика):</b>\n"
+        f"📋 <b>Ефективність стратегій:</b>\n"
     )
 
     sorted_strategies = sorted(
@@ -129,12 +130,9 @@ def run_backtest(pair_name="EUR/USD", period="7d"):
         reverse=True
     )
 
-    for strat, data in sorted_strategies[:20]:
+    for strat, data in sorted_strategies[:15]:
         wr = (data["wins"] / data["total"] * 100) if data["total"] > 0 else 0.0
-        icon = "🟢" if wr >= 53 else ("🟡" if wr >= 48 else "🔴")
+        icon = "🟢" if wr >= 75 else ("🟡" if wr >= 60 else "🔴")
         report += f"{icon} <b>{strat}</b>: {data['wins']}/{data['total']} ({wr:.1f}% WR)\n"
-
-    if len(sorted_strategies) > 20:
-        report += f"\n<i>...та ще {len(sorted_strategies) - 20} стратегій.</i>"
 
     return report
