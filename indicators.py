@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
+from regime_detector import detect_market_regime
+from adaptive_optimizer import get_strategy_adaptive_weight
 
 class AdaptiveTechnicalAnalysis:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -21,9 +23,7 @@ class AdaptiveTechnicalAnalysis:
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
         df['bb_width'] = df['bb_width'].fillna(0.001)
 
-        rolling_mean = df['close'].rolling(window=20).mean()
-        rolling_std = df['close'].rolling(window=20).std()
-        df['z_score'] = (df['close'] - rolling_mean) / (rolling_std + 1e-10)
+        df['z_score'] = (df['close'] - sma) / (std + 1e-10)
         df['z_score'] = df['z_score'].fillna(0.0)
 
         high = df['high']
@@ -50,9 +50,7 @@ class AdaptiveTechnicalAnalysis:
 
         df['ema_3'] = df['close'].ewm(span=3, adjust=False).mean()
         df['ema_8'] = df['close'].ewm(span=8, adjust=False).mean()
-        df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
         df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
-        df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
         df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
 
         exp1 = df['close'].ewm(span=12, adjust=False).mean()
@@ -65,9 +63,6 @@ class AdaptiveTechnicalAnalysis:
         highest_high = df['high'].rolling(window=14).max()
         df['stoch_k'] = 100 * ((df['close'] - lowest_low) / (highest_high - lowest_low + 1e-9))
         df['stoch_k'] = df['stoch_k'].fillna(50)
-
-        df['donchian_upper'] = df['high'].rolling(window=20).max()
-        df['donchian_lower'] = df['low'].rolling(window=20).min()
 
         candle_range = (df['high'] - df['low']).replace(0, 0.00001)
         upper_wick = df['high'] - df[['open', 'close']].max(axis=1)
@@ -83,9 +78,9 @@ class AdaptiveTechnicalAnalysis:
         ema = df['close'].ewm(span=span_val, adjust=False).mean()
         current_price = df['close'].iloc[-1]
         current_ema = ema.iloc[-1]
-        if current_price > current_ema * 1.0002:
+        if current_price > current_ema * 1.0001:
             return "BULLISH"
-        elif current_price < current_ema * 0.9998:
+        elif current_price < current_ema * 0.9999:
             return "BEARISH"
         return "NEUTRAL"
 
@@ -111,140 +106,87 @@ class AdaptiveTechnicalAnalysis:
         distances.append(min(mod_val, 250 - mod_val) / (price * round_factor))
         return min(distances) if distances else 0.001
 
-    def generate_master_confluence_signal(self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots) -> dict:
+    def generate_master_confluence_signal(self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots, pair_name="EUR/USD") -> dict:
         if df_1m is None or df_1m.empty or len(df_1m) < 15 or df_3m is None or df_3m.empty:
-            return {'signal': 'NONE', 'reason': 'Мало даних для багатотаймфреймового аналізу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi'}
+            return {'signal': 'NONE', 'reason': 'Мало даних для аналізу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi'}
 
-        buffer_pct = 0.0015
+        regime = detect_market_regime(df_1m, df_3m, df_15m)
+        
+        call_score = 0.0
+        put_score = 0.0
+        reasons = []
 
-        # === СТРАТЕГІЯ 1: Z-Score Mean Reversion (Група: oscillators) ===
-        z_score_1m = float(df_1m['z_score'].iloc[-1]) if 'z_score' in df_1m.columns else 0.0
-        if z_score_1m <= -2.1:
+        last_1m = df_1m.iloc[-1]
+        rsi_1m = float(last_1m.get('rsi', 50))
+        z_score = float(last_1m.get('z_score', 0))
+        stoch_k = float(last_1m.get('stoch_k', 50))
+        wick_ratio = float(last_1m.get('wick_ratio', 0))
+
+        # Адаптивна вага для стратегій
+        w_zscore = get_strategy_adaptive_weight(pair_name, "Z-Score Mean Reversion")
+        w_bb = get_strategy_adaptive_weight(pair_name, "Flat Matrix Bounce")
+        w_trend = get_strategy_adaptive_weight(pair_name, "Trend Breakout")
+
+        # 1. Z-Score Mean Reversion
+        if z_score <= -1.9:
+            call_score += 2.5 * w_zscore
+            reasons.append(f"Z-Score перепроданість ({z_score:.2f})")
+        elif z_score >= 1.9:
+            put_score += 2.5 * w_zscore
+            reasons.append(f"Z-Score перекупленість ({z_score:.2f})")
+
+        # 2. Bollinger / Flat Bounce
+        if last_1m['close'] <= last_1m['bb_lower'] and rsi_1m < 36:
+            call_score += 2.2 * w_bb
+            reasons.append(f"Відбиття від BB Lower (RSI: {rsi_1m:.1f})")
+        elif last_1m['close'] >= last_1m['bb_upper'] and rsi_1m > 64:
+            put_score += 2.2 * w_bb
+            reasons.append(f"Відбиття від BB Upper (RSI: {rsi_1m:.1f})")
+
+        # 3. Trend Alignment
+        if regime == "STRONG_TREND":
+            if global_trend == "BULLISH" and rsi_1m < 49:
+                call_score += 2.8 * w_trend
+                reasons.append("Сильний висхідний тренд + імпульс")
+            elif global_trend == "BEARISH" and rsi_1m > 51:
+                put_score += 2.8 * w_trend
+                reasons.append("Сильний низхідний тренд + імпульс")
+
+        # 4. Stochastic & Price Action
+        if stoch_k < 18 and wick_ratio > 0.45:
+            call_score += 1.8
+            reasons.append(f"Stoch перепроданість + тінь свічки ({wick_ratio:.2f})")
+        elif stoch_k > 82 and wick_ratio > 0.45:
+            put_score += 1.8
+            reasons.append(f"Stoch перекупленість + тінь свічки ({wick_ratio:.2f})")
+
+        threshold = 3.0
+        if call_score >= threshold and call_score > put_score:
             return {
                 'signal': 'CALL',
-                'strategy': 'Z-Score Mean Reversion',
-                'strategy_title': 'Reversal Z-Score CALL',
-                'signal_type_engine': 'oscillators',
-                'confluence_count': 3,
-                'suggested_exp': 5,
-                'reason': f"Z-Score Mean Reversion: ціна нижче середнього ({z_score_1m:.2f})"
-            }
-        elif z_score_1m >= 2.1:
-            return {
-                'signal': 'PUT',
-                'strategy': 'Z-Score Mean Reversion',
-                'strategy_title': 'Reversal Z-Score PUT',
-                'signal_type_engine': 'oscillators',
-                'confluence_count': 3,
-                'suggested_exp': 5,
-                'reason': f"Z-Score Mean Reversion: ціна вище середнього ({z_score_1m:.2f})"
-            }
-
-        # === СТРАТЕГІЯ 2: Flat Matrix Bounce (Група: flat_corridor) ===
-        timeframes_to_check = {
-            '1M': df_1m,
-            '3M': df_3m,
-            '5M': df_5m,
-            '15M': df_15m
-        }
-        adx_15m = float(df_15m['adx'].iloc[-1]) if df_15m is not None and not df_15m.empty and 'adx' in df_15m.columns else 20
-
-        for tf_name, df_tf in timeframes_to_check.items():
-            if df_tf is None or df_tf.empty or 'bb_lower' not in df_tf.columns or 'rsi' not in df_tf.columns:
-                continue
-
-            last_row = df_tf.iloc[-1]
-            tf_price = float(last_row['close'])
-            bb_lower = float(last_row['bb_lower'])
-            bb_upper = float(last_row['bb_upper'])
-            rsi = float(last_row['rsi'])
-            adx = float(last_row.get('adx', 20))
-            stoch_k = float(last_row.get('stoch_k', 50))
-
-            lower_buffer = bb_lower * (1 + buffer_pct)
-            upper_buffer = bb_upper * (1 - buffer_pct)
-
-            max_adx = 22 if tf_name == '1M' else 25
-            rsi_call = 28 if tf_name == '1M' else 35
-            rsi_put = 72 if tf_name == '1M' else 65
-
-            if adx <= max_adx and adx_15m < 28:
-                if (tf_price <= lower_buffer or last_row['low'] <= bb_lower) and rsi < rsi_call and stoch_k < 25:
-                    exp_time = 3 if tf_name == '1M' else (6 if tf_name == '3M' else 10)
-                    return {
-                        'signal': 'CALL',
-                        'strategy': 'Flat Matrix Bounce',
-                        'strategy_title': f'Flat Matrix Bounce CALL [{tf_name}]',
-                        'signal_type_engine': 'flat_corridor',
-                        'confluence_count': 2,
-                        'suggested_exp': exp_time,
-                        'reason': f"Флет [{tf_name}]: Відбиття від BB, RSI: {rsi:.1f}, Stoch: {stoch_k:.1f}"
-                    }
-                elif (tf_price >= upper_buffer or last_row['high'] >= bb_upper) and rsi > rsi_put and stoch_k > 75:
-                    exp_time = 3 if tf_name == '1M' else (6 if tf_name == '3M' else 10)
-                    return {
-                        'signal': 'PUT',
-                        'strategy': 'Flat Matrix Bounce',
-                        'strategy_title': f'Flat Matrix Bounce PUT [{tf_name}]',
-                        'signal_type_engine': 'flat_corridor',
-                        'confluence_count': 2,
-                        'suggested_exp': exp_time,
-                        'reason': f"Флет [{tf_name}]: Відбиття від BB, RSI: {rsi:.1f}, Stoch: {stoch_k:.1f}"
-                    }
-
-        # === СТРАТЕГІЯ 3: Multi-Timeframe Scalp (Група: price_action) ===
-        rsi_1m = float(df_1m['rsi'].iloc[-1]) if 'rsi' in df_1m.columns else 50
-        rsi_3m = float(df_3m['rsi'].iloc[-1]) if 'rsi' in df_3m.columns else 50
-        if rsi_1m < 28 and rsi_3m < 32:
-            return {
-                'signal': 'CALL',
-                'strategy': 'Multi-Timeframe Scalp',
-                'strategy_title': 'Multi-Timeframe Scalp CALL',
-                'signal_type_engine': 'price_action',
-                'confluence_count': 3,
-                'suggested_exp': 4,
-                'reason': f"Multi-TF Scalp: перепроданість 1M ({rsi_1m:.1f}) та 3M"
-            }
-        elif rsi_1m > 72 and rsi_3m > 68:
-            return {
-                'signal': 'PUT',
-                'strategy': 'Multi-Timeframe Scalp',
-                'strategy_title': 'Multi-Timeframe Scalp PUT',
-                'signal_type_engine': 'price_action',
-                'confluence_count': 3,
-                'suggested_exp': 4,
-                'reason': f"Multi-TF Scalp: перекупленість 1M ({rsi_1m:.1f}) та 3M"
-            }
-
-        # === СТРАТЕГІЯ 4: Trend Matrix Breakout (Група: trend_multi) ===
-        trend_1h = self.get_trend(df_1h, 50) if df_1h is not None and not df_1h.empty else global_trend
-        trend_15m = self.get_trend(df_15m, 20) if df_15m is not None and not df_15m.empty else "NEUTRAL"
-        adx_3m = float(df_3m['adx'].iloc[-1]) if 'adx' in df_3m.columns else 20
-
-        if global_trend == "BULLISH" and (trend_1h == "BULLISH" or trend_15m == "BULLISH") and adx_3m > 22 and rsi_1m < 48:
-            return {
-                'signal': 'CALL',
-                'strategy': 'Trend Breakout',
-                'strategy_title': 'Trend Matrix Breakout CALL',
+                'strategy': 'Quantum Confluence Matrix',
+                'strategy_title': f'Квантовий сигнал CALL [{regime}]',
                 'signal_type_engine': 'trend_multi',
-                'confluence_count': 3,
-                'suggested_exp': 12,
-                'reason': "ТРЕНД (1H-1M синхрон): Імпульс за висхідним трендом"
+                'confluence_count': int(round(call_score)),
+                'suggested_exp': 10,
+                'regime': regime,
+                'reason': " | ".join(reasons)
             }
-        elif global_trend == "BEARISH" and (trend_1h == "BEARISH" or trend_15m == "BEARISH") and adx_3m > 22 and rsi_1m > 52:
+        elif put_score >= threshold and put_score > call_score:
             return {
                 'signal': 'PUT',
-                'strategy': 'Trend Breakout',
-                'strategy_title': 'Trend Matrix Breakout PUT',
+                'strategy': 'Quantum Confluence Matrix',
+                'strategy_title': f'Квантовий сигнал PUT [{regime}]',
                 'signal_type_engine': 'trend_multi',
-                'confluence_count': 3,
-                'suggested_exp': 12,
-                'reason': "ТРЕНД (1H-1M синхрон): Імпульс за низхідним трендом"
+                'confluence_count': int(round(put_score)),
+                'suggested_exp': 10,
+                'regime': regime,
+                'reason': " | ".join(reasons)
             }
 
-        return {'signal': 'NONE', 'reason': 'Мультитаймфреймовий баланс нейтральний', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi'}
+        return {'signal': 'NONE', 'reason': f'Режим: {regime}. Бали нижче елітного порогу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi', 'regime': regime}
 
-    def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m) -> dict:
+    def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name="EUR/USD") -> dict:
         global_trend = self.get_trend(df_1h, span_val=200)
         pivots = self.calculate_pivots(df_1h)
         
@@ -257,15 +199,15 @@ class AdaptiveTechnicalAnalysis:
         if df_ind_1m.empty or df_ind_3m.empty:
             return {"signal": "NONE", "reason": "Недостатньо даних"}
 
-        sig_data = self.generate_master_confluence_signal(df_ind_1m, df_ind_3m, df_ind_5m, df_ind_15m, df_ind_1h, global_trend, pivots)
+        sig_data = self.generate_master_confluence_signal(df_ind_1m, df_ind_3m, df_ind_5m, df_ind_15m, df_ind_1h, global_trend, pivots, pair_name)
         
         current_price = float(df_ind_1m['close'].iloc[-1]) if not df_ind_1m.empty else 0.0
         atr = float(df_ind_1m['atr'].iloc[-1]) if not df_ind_1m.empty and 'atr' in df_ind_1m.columns else 0.001
 
         return {
             "signal": sig_data.get("signal", "NONE"),
-            "strategy": sig_data.get("strategy", "MULTI_TF_DUAL_ENGINE"),
-            "strategy_title": sig_data.get("strategy_title", "Multi-TF Dual Engine"),
+            "strategy": sig_data.get("strategy", "QUANTUM_MATRIX"),
+            "strategy_title": sig_data.get("strategy_title", "Quantum Matrix"),
             "signal_type_engine": sig_data.get("signal_type_engine", "trend_multi"),
             "confluence_count": sig_data.get("confluence_count", 1),
             "reason": sig_data.get("reason", "Умови не виконано"),
@@ -279,4 +221,5 @@ class AdaptiveTechnicalAnalysis:
             "current_price": current_price,
             "bb_width": float(df_ind_3m['bb_width'].iloc[-1]) if not df_ind_3m.empty else 0.001,
             "dist_pivot": self.get_min_dist_to_pivot_or_round(current_price, pivots),
+            "regime": sig_data.get("regime", "RANGE_BOUND"),
         }
