@@ -23,7 +23,6 @@ def run_backtest(pair_name="EUR/USD", period="7d"):
     yahoo_ticker = YAHOO_PAIRS_MAP.get(pair_name, "EURUSD=X")
     
     try:
-        # Завантажуємо 1-хвилинні дані (Yahoo надає макс 7 днів 1m даних)
         df_1m = yf.download(tickers=yahoo_ticker, period="7d", interval="1m", progress=False, auto_adjust=True)
         if df_1m is None or df_1m.empty:
             return f"❌ Не вдалося завантажити 1M дані для бектесту {pair_name}"
@@ -48,12 +47,11 @@ def run_backtest(pair_name="EUR/USD", period="7d"):
     multiplier = 1000 if "JPY" in yahoo_ticker else 100000
 
     start_idx = 100
-    step = 3  # Симуляція кожні 3 хвилини для точності й швидкості
+    step = 3
 
     for i in range(start_idx, len(df_1m) - 15, step):
         slice_1m = df_1m.iloc[:i]
         
-        # Ресемплимо точні 3M, 5M, 15M, 1H таймфрейми
         df_3m = resample_candles(slice_1m, "3min")
         df_5m = resample_candles(slice_1m, "5min")
         df_15m = resample_candles(slice_1m, "15min")
