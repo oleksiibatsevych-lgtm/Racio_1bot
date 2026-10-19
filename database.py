@@ -305,6 +305,50 @@ def get_stats():
         return {"total": 0, "wins": 0, "losses": 0, "pending": 0}
 
 
+def get_strategy_time_stats():
+    """
+    Отримує статистику вінрейту за годинами доби та днями тижня з закритих угод.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT 
+                COALESCE(strategy, 'MATRIX') as strategy,
+                EXTRACT(HOUR FROM created_at) as trade_hour,
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE result = 'WIN') as wins,
+                COUNT(*) FILTER (WHERE result = 'LOSS') as losses
+            FROM signals 
+            WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
+            GROUP BY strategy, trade_hour
+            ORDER BY strategy, trade_hour;
+        """)
+        hour_rows = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT 
+                COALESCE(strategy, 'MATRIX') as strategy,
+                EXTRACT(DOW FROM created_at) as trade_dow,
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE result = 'WIN') as wins,
+                COUNT(*) FILTER (WHERE result = 'LOSS') as losses
+            FROM signals 
+            WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
+            GROUP BY strategy, trade_dow
+            ORDER BY strategy, trade_dow;
+        """)
+        dow_rows = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        return {"hours": hour_rows, "dow": dow_rows}
+    except Exception as e:
+        logger.error(f"⚠️ Помилка вибірки статистики за часом: {e}")
+        return {"hours": [], "dow": []}
+
+
 def save_filtered_log(chat_id, log_text):
     try:
         conn = get_connection()
