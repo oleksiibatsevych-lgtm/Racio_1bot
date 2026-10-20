@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import json
 import logging
 import os
@@ -7,7 +8,6 @@ from PIL import Image
 import database
 
 logger = logging.getLogger(__name__)
-
 
 class AITradingAdvisor:
     def __init__(self):
@@ -21,17 +21,13 @@ class AITradingAdvisor:
             for m in genai.list_models():
                 if "generateContent" in m.supported_generation_methods:
                     available_models.append(m.name)
-
             available_models.sort(
-                key=lambda name: (
-                    0 if "flash" in name else (1 if "pro" in name else 2)
-                )
+                key=lambda name: (0 if "flash" in name else (1 if "pro" in name else 2))
             )
             if available_models:
                 return available_models
         except Exception as e:
             logger.warning(f"⚠️ Не вдалося отримати список моделей через API: {e}")
-
         return [
             "gemini-1.5-flash",
             "gemini-1.5-flash-latest",
@@ -40,15 +36,9 @@ class AITradingAdvisor:
             "gemini-2.0-flash-exp",
         ]
 
-    def evaluate_signal(
-        self,
-        name: str,
-        payload: dict,
-        macro_chart=None,
-        mid_chart=None,
-        micro_chart=None,
-    ) -> dict:
+    def evaluate_signal(self, name: str, payload: dict, macro_chart=None, mid_chart=None, micro_chart=None) -> dict:
         suggested_exp = payload.get("suggested_exp", 5)
+        regime = payload.get("regime", "RANGE_BOUND")
 
         if not self.api_key:
             logger.warning("⚠️ GEMINI_API_KEY відсутній. ШІ-аналіз пропущено.")
@@ -59,34 +49,42 @@ class AITradingAdvisor:
                 "reason": "GEMINI_API_KEY не налаштовано",
             }
 
-        recent_history = database.get_recent_trades_summary(limit=6)
+        # Підтягуємо історію останніх угод (Feedback Loop та Few-Shot)
+        recent_history = database.get_recent_trades_summary(limit=8)
+
+        # Динамічний поріг впевненості залежно від ринкового режиму
+        min_confidence_required = 8 if regime in ["CHAOS", "TREND_EXHAUSTION"] else 6
 
         default_prompt = f"""
-        Ти професійний трейдер та ризик-менеджер. Проаналізуй ринкові дані та графіки для активу {name}.
-        Цей сигнал сформовано за стратегією: {payload.get('strategy_title', 'Матриця 45 стратегій')} (Збігів у матриці: {payload.get('confluence_count', 1)}).
+        Ти старший ризик-менеджер елітної системи БІНАРНИХ ОПЦІОНІВ (Fixed Time Trades / High-Yield Options).
+        СУВОРА ВИМОГА: Ніяких стоп-лосів (Stop-Loss), тейк-профітів чи відкладених ордерів тут не існує! Угода закривається виключно за фіксованим ТАЙМЕРОМ ЕКСПІРАЦІЇ. Твоя мета — оцінити, чи закриється ціна вище (для CALL) або нижче (для PUT) від точки входу через вказаний час.
 
-        ІСТОРІЯ ОСТАННІХ УГОД СИСТЕМИ:
+        Актив: {name}
+        Поточний мікро-режим ринку: {regime}
+        Стратегія: {payload.get('strategy_title', 'Quantum Matrix')} (Балів збігу: {payload.get('confluence_count', 1)}).
+
+        ІСТОРІЯ ОСТАННІХ УГОД (Враховуй попередній досвід та помилки системи):
         {recent_history}
         
         Параметри поточного сигналу:
-        - Напрямок: {payload.get('signal')}
-        - Поточна ціна: {payload.get('current_price')}
+        - Напрямок: {payload.get('signal')} (CALL або PUT)
+        - Ціна входу: {payload.get('current_price')}
         - RSI: {payload.get('rsi')}
         - ADX: {payload.get('adx')}
-        - Технічна причина: {payload.get('reason')}
-        - Початкова рекомендація експірації: {suggested_exp} хв
+        - Технічне обґрунтування: {payload.get('reason')}
+        - Рекомендована експірація: {suggested_exp} хв
 
         Завдання:
-        1. Оціни доцільність входу в угоду ("YES" або "NO").
-        2. Вкажи динамічний час експірації у хвилинах ВІД 1 ДО 60 ХВИЛИН.
-        3. Підтверджуй вхід ("YES" з оцінкою confidence >= 5).
+        1. Оціни доцільність входу ("YES" або "NO"). У режимі {regime} будь особливо критичним.
+        2. Вкажи точний час експірації у хвилинах ВІД 1 ДО 60 ХВИЛИН з урахуванням волатильності та режиму {regime}.
+        3. Дай оцінку впевненості confidence від 1 до 10 (мінімально допустима для цього режиму: {min_confidence_required}).
 
-        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних додаткових символів чи обгорток markdown:
+        Відповідь надай ВИКЛЮЧНО у форматі JSON без жодних обгорток markdown:
         {{
             "decision": "YES" або "NO",
             "confidence": <число від 1 до 10>,
             "suggested_expiration": <число від 1 до 60>,
-            "reason": "<коротке обґрунтування українською мовою>"
+            "reason": "<коротке обґрунтування українською мовою з акцентом на час та імпульс без згадки стоп-лосів>"
         }}
         """
 
@@ -107,9 +105,7 @@ class AITradingAdvisor:
         for model_name in models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    content_parts, request_options={"timeout": 15}
-                )
+                response = model.generate_content(content_parts, request_options={"timeout": 15})
                 if response and response.text:
                     response_text = response.text
                     break
@@ -138,10 +134,16 @@ class AITradingAdvisor:
             result = json.loads(clean_text)
             parsed_exp = int(result.get("suggested_expiration", suggested_exp))
             parsed_exp = max(1, min(60, parsed_exp))
+            parsed_conf = int(result.get("confidence", 5))
+            parsed_decision = str(result.get("decision", "NO")).upper()
+
+            # Додатковий перенос у блек-лист/відмова, якщо впевненість нижча за поріг режиму
+            if parsed_conf < min_confidence_required:
+                parsed_decision = "NO"
 
             return {
-                "decision": str(result.get("decision", "NO")).upper(),
-                "confidence": int(result.get("confidence", 0)),
+                "decision": parsed_decision,
+                "confidence": parsed_conf,
                 "suggested_expiration": parsed_exp,
                 "reason": str(result.get("reason", "ШІ надав загальний висновок")),
             }
@@ -156,12 +158,22 @@ class AITradingAdvisor:
 
     def evaluate_closed_trade(self, sig_data: dict) -> str:
         if not self.api_key:
-            return "❌ GEMINI_API_KEY не налаштовано для ретроспективного аналізу."
+            return "❌ GEMINI_API_KEY не налаштовано."
 
         default_review_prompt = f"""
-        Ти експерт-трейдер та ризик-менеджер. Проведи ретроспективний розбір закритої угоди.
-        Актив: {sig_data.get('ticker')}, Напрямок: {sig_data.get('signal_type')}, Результат: {sig_data.get('result')} ({sig_data.get('pips')} пунктів).
-        Дай короткий аналіз українською мовою у 3-4 реченнях.
+        Ти експерт-трейдер з БІНАРНИХ ОПЦІОНІВ (Binary Options).
+        КАТЕГОРИЧНА ВИМОГА: На ринку бінарних опціонів НЕМАЄ СТОП-ЛОСІВ або тейк-профітів! Заборонено використовувати ці терміни!
+        Угода оцінюється виключно за правильністю обраного часу експірації та точкою входу.
+
+        Проведи ретроспективний розбір закритої угоди:
+        - Актив: {sig_data.get('ticker')}
+        - Напрямок: {sig_data.get('signal_type')} (CALL/PUT)
+        - Результат: {sig_data.get('result')} ({sig_data.get('pips')} пунктів)
+        - Час експірації: {sig_data.get('expiration_mins')} хв
+        - RSI: {sig_data.get('rsi')}, ADX: {sig_data.get('adx')}
+
+        Дай короткий аналіз українською мовою у 3-4 реченнях. 
+        Поясни помилку або успіх суворо через призму: точки входу, мікро-імпульсу свічки та ЧАСУ ЕКСПІРАЦІЇ. ЖОДНИХ СТОП-ЛОСІВ!
         """
 
         prompt = database.get_system_prompt("trade_review_prompt", default_review_prompt)
@@ -178,12 +190,4 @@ class AITradingAdvisor:
 
         return "⚠️ Не вдалося отримати звіт від ШІ."
 
-
 ai_advisor_instance = AITradingAdvisor()
-
-
-def analyze_signal_with_gemini(symbol, payload, chart_images=[]):
-    c_macro = chart_images[0] if len(chart_images) > 0 else None
-    c_mid = chart_images[1] if len(chart_images) > 1 else None
-    c_micro = chart_images[2] if len(chart_images) > 2 else None
-    return ai_advisor_instance.evaluate_signal(symbol, payload, c_macro, c_mid, c_micro)
