@@ -106,9 +106,12 @@ class AdaptiveTechnicalAnalysis:
         distances.append(min(mod_val, 250 - mod_val) / (price * round_factor))
         return min(distances) if distances else 0.001
 
-    def generate_master_confluence_signal(self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots, pair_name="EUR/USD") -> dict:
+    def generate_master_confluence_signal(self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots, pair_name="EUR/USD", strategies_status=None) -> dict:
         if df_1m is None or df_1m.empty or len(df_1m) < 15 or df_3m is None or df_3m.empty:
             return {'signal': 'NONE', 'reason': 'Мало даних для аналізу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi'}
+
+        if strategies_status is None:
+            strategies_status = {}
 
         regime = detect_market_regime(df_1m, df_3m, df_15m)
         
@@ -122,43 +125,46 @@ class AdaptiveTechnicalAnalysis:
         stoch_k = float(last_1m.get('stoch_k', 50))
         wick_ratio = float(last_1m.get('wick_ratio', 0))
 
-        # Адаптивна вага для стратегій
         w_zscore = get_strategy_adaptive_weight(pair_name, "Z-Score Mean Reversion")
         w_bb = get_strategy_adaptive_weight(pair_name, "Flat Matrix Bounce")
         w_trend = get_strategy_adaptive_weight(pair_name, "Trend Breakout")
 
-        # 1. Z-Score Mean Reversion
-        if z_score <= -1.9:
-            call_score += 2.5 * w_zscore
-            reasons.append(f"Z-Score перепроданість ({z_score:.2f})")
-        elif z_score >= 1.9:
-            put_score += 2.5 * w_zscore
-            reasons.append(f"Z-Score перекупленість ({z_score:.2f})")
+        # 1. Z-Score Mean Reversion (група: oscillators або moving_averages)
+        if strategies_status.get("oscillators", True):
+            if z_score <= -1.9:
+                call_score += 2.5 * w_zscore
+                reasons.append(f"Z-Score перепроданість ({z_score:.2f})")
+            elif z_score >= 1.9:
+                put_score += 2.5 * w_zscore
+                reasons.append(f"Z-Score перекупленість ({z_score:.2f})")
 
-        # 2. Bollinger / Flat Bounce
-        if last_1m['close'] <= last_1m['bb_lower'] and rsi_1m < 36:
-            call_score += 2.2 * w_bb
-            reasons.append(f"Відбиття від BB Lower (RSI: {rsi_1m:.1f})")
-        elif last_1m['close'] >= last_1m['bb_upper'] and rsi_1m > 64:
-            put_score += 2.2 * w_bb
-            reasons.append(f"Відбиття від BB Upper (RSI: {rsi_1m:.1f})")
+        # 2. Bollinger / Flat Bounce (група: flat_corridor)
+        if strategies_status.get("flat_corridor", True):
+            if last_1m['close'] <= last_1m['bb_lower'] and rsi_1m < 36:
+                call_score += 2.2 * w_bb
+                reasons.append(f"Відбиття від BB Lower (RSI: {rsi_1m:.1f})")
+            elif last_1m['close'] >= last_1m['bb_upper'] and rsi_1m > 64:
+                put_score += 2.2 * w_bb
+                reasons.append(f"Відбиття від BB Upper (RSI: {rsi_1m:.1f})")
 
-        # 3. Trend Alignment
-        if regime == "STRONG_TREND":
-            if global_trend == "BULLISH" and rsi_1m < 49:
-                call_score += 2.8 * w_trend
-                reasons.append("Сильний висхідний тренд + імпульс")
-            elif global_trend == "BEARISH" and rsi_1m > 51:
-                put_score += 2.8 * w_trend
-                reasons.append("Сильний низхідний тренд + імпульс")
+        # 3. Trend Alignment (група: trend_multi)
+        if strategies_status.get("trend_multi", True):
+            if regime == "STRONG_TREND":
+                if global_trend == "BULLISH" and rsi_1m < 49:
+                    call_score += 2.8 * w_trend
+                    reasons.append("Сильний висхідний тренд + імпульс")
+                elif global_trend == "BEARISH" and rsi_1m > 51:
+                    put_score += 2.8 * w_trend
+                    reasons.append("Сильний низхідний тренд + імпульс")
 
-        # 4. Stochastic & Price Action
-        if stoch_k < 18 and wick_ratio > 0.45:
-            call_score += 1.8
-            reasons.append(f"Stoch перепроданість + тінь свічки ({wick_ratio:.2f})")
-        elif stoch_k > 82 and wick_ratio > 0.45:
-            put_score += 1.8
-            reasons.append(f"Stoch перекупленість + тінь свічки ({wick_ratio:.2f})")
+        # 4. Stochastic & Price Action (група: price_action)
+        if strategies_status.get("price_action", True):
+            if stoch_k < 18 and wick_ratio > 0.45:
+                call_score += 1.8
+                reasons.append(f"Stoch перепроданість + тінь свічки ({wick_ratio:.2f})")
+            elif stoch_k > 82 and wick_ratio > 0.45:
+                put_score += 1.8
+                reasons.append(f"Stoch перекупленість + тінь свічки ({wick_ratio:.2f})")
 
         threshold = 3.0
         if call_score >= threshold and call_score > put_score:
@@ -186,7 +192,7 @@ class AdaptiveTechnicalAnalysis:
 
         return {'signal': 'NONE', 'reason': f'Режим: {regime}. Бали нижче елітного порогу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi', 'regime': regime}
 
-    def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name="EUR/USD") -> dict:
+    def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name="EUR/USD", strategies_status=None) -> dict:
         global_trend = self.get_trend(df_1h, span_val=200)
         pivots = self.calculate_pivots(df_1h)
         
@@ -199,7 +205,7 @@ class AdaptiveTechnicalAnalysis:
         if df_ind_1m.empty or df_ind_3m.empty:
             return {"signal": "NONE", "reason": "Недостатньо даних"}
 
-        sig_data = self.generate_master_confluence_signal(df_ind_1m, df_ind_3m, df_ind_5m, df_ind_15m, df_ind_1h, global_trend, pivots, pair_name)
+        sig_data = self.generate_master_confluence_signal(df_ind_1m, df_ind_3m, df_ind_5m, df_ind_15m, df_ind_1h, global_trend, pivots, pair_name, strategies_status)
         
         current_price = float(df_ind_1m['close'].iloc[-1]) if not df_ind_1m.empty else 0.0
         atr = float(df_ind_1m['atr'].iloc[-1]) if not df_ind_1m.empty and 'atr' in df_ind_1m.columns else 0.001
