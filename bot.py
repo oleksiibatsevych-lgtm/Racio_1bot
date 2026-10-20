@@ -233,7 +233,7 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
             df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
         df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
         if df_daily.empty and ticker_yahoo:
-            df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
+            df_daily = fetch_yahoo_fallback(yahoo_ticker, interval="1d", range_period="60d")
         if not df_1h.empty and not df_daily.empty:
             MACRO_CACHE[cache_key] = {"timestamp": current_time, "1h": df_1h, "1d": df_daily}
 
@@ -313,10 +313,16 @@ def process_signal_expiration(sig_id):
             timer.start()
             return
 
+        # ВИПРАВЛЕННЯ ДЛЯ БІНАРНИХ ОПЦІОНІВ (Чистий факт WIN/LOSS без мікро-пунктів)
+        if exit_price == entry_price:
+            result = "NEUTRAL"
+        elif signal_type == "CALL":
+            result = "WIN" if exit_price > entry_price else "LOSS"
+        else: # PUT
+            result = "WIN" if exit_price < entry_price else "LOSS"
+
         multiplier = 1000 if "JPY" in ticker else 100000
-        raw_pips = (exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier
-        pips = int(round(raw_pips))
-        result = "WIN" if pips > 0 else ("LOSS" if pips < 0 else "NEUTRAL")
+        pips = int(round((exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier))
 
         database.update_signal_result(sig_id, result, exit_price, pips)
         if result in ["WIN", "LOSS"]:
@@ -328,7 +334,11 @@ def process_signal_expiration(sig_id):
         res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
         pips_str = f"+{pips}" if pips > 0 else f"{pips}"
         report_str = f"\n----------------------------------\n🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: {entry_price:.5f} ➔ 🏁 Закриття: {exit_price:.5f}"
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Аналіз помилки (ШІ)", callback_data=f"review_{sig_id}")]])
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Аналіз помилки (ШІ)", callback_data=f"review_{sig_id}")],
+            [InlineKeyboardButton("📊 Статистика пари", callback_data=f"pair_stats_{pair_name}")]
+        ])
 
         orig_txt = sig_data.get("message_text", "")
         if orig_txt and "🏁 Результат" not in orig_txt:
@@ -370,7 +380,7 @@ def start_auto_scanner_loop():
             try:
                 if AUTO_SCAN_CHATS:
                     for chat_id in list(AUTO_SCAN_CHATS):
-                        with ThreadPoolExecutor(max_workers=5) as executor:
+                        with ThreadPoolExecutor(max_workers=8) as executor:
                             futures = [
                                 executor.submit(analyze_single_pair, chat_id, pair_name, ticker, auto_mode=True)
                                 for pair_name, ticker in PAIRS_MAP.items()
@@ -382,7 +392,7 @@ def start_auto_scanner_loop():
                                     logger.error(f"Помилка потоку авто-сканера: {ex}")
             except Exception as e:
                 logger.error(f"Помилка авто-сканера: {e}")
-            time.sleep(180)
+            time.sleep(90)
     threading.Thread(target=loop, daemon=True).start()
 
 
@@ -419,7 +429,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             report_no_signal("Недостатньо даних котирувань.")
             return False
 
-        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name=pair_name)
+        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name=pair_name, strategies_status=strategies_status)
         
         strat_title = analysis.get("strategy_title", "")
         clean_name = clean_strategy_name(strat_title)
@@ -428,18 +438,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         if signal_type_engine in strategies_status and not strategies_status[signal_type_engine]:
             report_no_signal(f"Група стратегій вимкнена в меню.")
             return False
-
-        if os.path.exists(PERFORMANCE_CACHE_FILE):
-            try:
-                with open(PERFORMANCE_CACHE_FILE, "r", encoding="utf-8") as f:
-                    perf_cache = json.load(f)
-                    if pair_name in perf_cache and clean_name in perf_cache[pair_name]:
-                        strat_perf = perf_cache[pair_name][clean_name]
-                        if strat_perf["total"] >= 3 and strat_perf["wr"] < 50.0:
-                            report_no_signal(f"Авто-фільтр бектесту: слабкий WR ({strat_perf['wr']}%) на {pair_name}.")
-                            return False
-            except Exception:
-                pass
 
         is_valid, reason_val = validate_signal_conditions(analysis)
         if not is_valid:
@@ -482,6 +480,11 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             c_macro = create_chart_image(df_1h, f"{pair_name} - 1H", tf_label="1H")
             c_mid = create_chart_image(df_15m, f"{pair_name} - 15M", tf_label="15M")
             c_micro = create_chart_image(df_1m, f"{pair_name} - 1M", tf_label="1M")
+            
+            # Додаємо інтелектуальний контекст попередніх помилок для саморефлексії ШІ
+            recent_mistakes = database.get_recent_failed_reviews_summary(pair_name, limit=3)
+            payload["recent_mistakes"] = recent_mistakes
+
             ai_res = ai_advisor_instance.evaluate_signal(pair_name, payload, c_macro, c_mid, c_micro)
         else:
             ai_res = {"decision": "YES", "confidence": 7, "suggested_expiration": exp_time, "reason": "ШІ вимкнено"}
@@ -492,6 +495,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
 
         ai_exp = ai_res.get("suggested_expiration", exp_time)
         direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if payload["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
+        risk_badge = "🔴 Новинний ризик" if news_is_bad else "🟢 Ринок стабільний"
         
         msg_text = (
             f"🎯 <b>АКТИВ: <code>{pair_name}</code></b>\n\n"
@@ -502,20 +506,27 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             f"🧠 ML: <b>{make_progress_bar(win_probability)} {win_probability:.1f}%</b>\n"
             f"🤖 ШІ: <b>{make_progress_bar(ai_res.get('confidence', 6)*10)} {ai_res.get('confidence', 6)}/10</b>\n"
             f"🔥 Збігів: <b>{payload['confluence_count']} балів</b>\n"
-            f"🌐 Режим: <b>{regime}</b>\n\n"
+            f"🌐 Режим: <b>{regime}</b> | Статус: {risk_badge}\n\n"
             f"💡 Причина: <i>{clean_ai_html(ai_res.get('reason', ''))}</i>\n"
             f"🌐 Сесія: {session_str}"
         )
 
+        keyboard_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("⚙️ Змінити актив", callback_data="change_pair"),
+                InlineKeyboardButton("📊 Статистика пари", callback_data=f"pair_stats_{pair_name}")
+            ]
+        ])
+
         sent_msg_id = status_msg_id
         if status_msg_id:
             try:
-                bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id, text=msg_text, parse_mode="HTML")
+                bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup)
             except Exception:
-                sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+                sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup)
                 sent_msg_id = sent_msg.message_id
         else:
-            sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+            sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup)
             sent_msg_id = sent_msg.message_id
 
         sig_id = database.save_signal(
@@ -547,7 +558,7 @@ def run_mass_analysis(chat_id):
     database.clear_filtered_logs(chat_id)
     
     found = False
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {
             executor.submit(analyze_single_pair, chat_id, pair_name, ticker): pair_name
             for pair_name, ticker in PAIRS_MAP.items()
@@ -607,17 +618,18 @@ def run_backtest_all_pairs(chat_id):
                     df.dropna(subset=["open", "high", "low", "close"], inplace=True)
                     
                     tot_s, tot_w = 0, 0
-                    mult = 1000 if "JPY" in yahoo_ticker else 100000
                     for i in range(30, len(df) - 3):
                         s_df = df.iloc[:i]
-                        an = analyzer.analyze_all_timeframes(s_df, s_df, s_df, s_df, s_df, s_df, pair_name=p_name)
-                        if an.get("signal") in ["CALL", "PUT"]:
+                        an = analyzer.analyze_all_timeframes(s_df, s_df, s_df, s_df, s_df, s_df, pair_name=p_name, strategies_status=strategies_status)
+                        sig = an.get("signal")
+                        if sig in ["CALL", "PUT"]:
                             ep = float(s_df["close"].iloc[-1])
                             exp_p = float(df["close"].iloc[i + 3])
-                            pips = int(round((exp_p - ep) * mult if an.get("signal") == "CALL" else (ep - exp_p) * mult))
-                            if pips != 0:
+                            if exp_p != ep:
                                 tot_s += 1
-                                if pips > 0: tot_w += 1
+                                is_win = (exp_p > ep) if sig == "CALL" else (exp_p < ep)
+                                if is_win:
+                                    tot_w += 1
                     wr = (tot_w / tot_s * 100) if tot_s > 0 else 0.0
                     pair_results.append((p_name, wr, tot_s))
             except Exception:
@@ -681,7 +693,7 @@ def handle_message(update, context):
             update.message.reply_text("🔴 Авто-сканер ВИМКНЕНО.")
         else:
             AUTO_SCAN_CHATS.add(chat_id)
-            update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО (кожні 3 хв).")
+            update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО (кожні 1.5 хв).")
     elif text in ["🟢 ML-фільтр: ВКЛ", "🔴 ML-фільтр: ВИКЛ"]:
         global ML_FILTER_ENABLED
         ML_FILTER_ENABLED = not ML_FILTER_ENABLED
@@ -725,6 +737,13 @@ def handle_callback(update, context):
         if PAIRS_MAP.get(pair):
             msg = query.edit_message_text(f"🔍 Аналізую {pair}...")
             threading.Thread(target=analyze_single_pair, args=[chat_id, pair, PAIRS_MAP[pair], False, msg.message_id], daemon=True).start()
+    elif data == "change_pair":
+        buttons = [InlineKeyboardButton(name, callback_data=f"analyze_{name}") for name in PAIRS_MAP.keys()]
+        query.edit_message_text("💵 <b>Оберіть новий актив для аналізу:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)]))
+    elif data.startswith("pair_stats_"):
+        pair = data.replace("pair_stats_", "")
+        stats = database.get_stats()
+        query.edit_message_text(f"📊 <b>Статистика активу <code>{pair}</code></b>\n\nЗагальна кількість угод у системі: {stats.get('total', 0)}\n🏆 Вінрейт загальний: акумулюється в базі даних.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
     elif data == "bt_ALL":
         query.edit_message_text("🌐 Запускаю глобальний бектест для усіх пар...", parse_mode="HTML")
         run_backtest_all_pairs(chat_id)
