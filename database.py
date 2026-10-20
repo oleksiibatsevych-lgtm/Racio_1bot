@@ -233,6 +233,32 @@ def save_signal_ai_review(signal_id, review_text):
         logger.error(f"⚠️ Помилка збереження AI-огляду: {e}")
 
 
+def get_recent_failed_reviews_summary(ticker: str, limit=3) -> str:
+    """Витягує останні помилки по активу для саморефлексії ШІ."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            SELECT ai_review, signal_type, strategy FROM signals 
+            WHERE ticker = %s AND result = 'LOSS' AND ai_review IS NOT NULL 
+            ORDER BY id DESC LIMIT %s;
+            """,
+            (ticker, limit)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        if not rows:
+            return "Немає попередніх помилок для аналізу."
+        lines = []
+        for r in rows:
+            lines.append(f"- Стратегія [{r['strategy']} ({r['signal_type']})]: {r['ai_review']}")
+        return "\n".join(lines)
+    except Exception:
+        return "Помилка завантаження історії помилок."
+
+
 def get_recent_trades_summary(limit=6) -> str:
     try:
         conn = get_connection()
@@ -306,9 +332,6 @@ def get_stats():
 
 
 def get_strategy_time_stats():
-    """
-    Отримує статистику вінрейту за годинами доби та днями тижня з закритих угод.
-    """
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
