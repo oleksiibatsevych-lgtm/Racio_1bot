@@ -48,7 +48,7 @@ from filters import (
 )
 from adaptive_optimizer import calculate_smart_expiration
 from calendar_filter import is_high_impact_news_time
-from backtest import run_backtest, clean_strategy_name, PERFORMANCE_CACHE_FILE
+from backtest import run_backtest, clean_strategy_name, PERFORMANCE_CACHE_FILE, clear_backtest_cache
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -313,7 +313,6 @@ def process_signal_expiration(sig_id):
             timer.start()
             return
 
-        # ВИПРАВЛЕННЯ ДЛЯ БІНАРНИХ ОПЦІОНІВ (Чистий факт WIN/LOSS без мікро-пунктів)
         if exit_price == entry_price:
             result = "NEUTRAL"
         elif signal_type == "CALL":
@@ -448,7 +447,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         win_probability = ml_filter.predict_proba(analysis)
 
         if ML_FILTER_ENABLED:
-            min_ml = 58.0 if auto_mode else 48.0
+            min_ml = 53.0 if auto_mode else 44.0
             if win_probability < min_ml:
                 report_no_signal(f"ML-модель оцінила ймовірність у {win_probability:.1f}%")
                 return False
@@ -481,7 +480,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             c_mid = create_chart_image(df_15m, f"{pair_name} - 15M", tf_label="15M")
             c_micro = create_chart_image(df_1m, f"{pair_name} - 1M", tf_label="1M")
             
-            # Додаємо інтелектуальний контекст попередніх помилок для саморефлексії ШІ
             recent_mistakes = database.get_recent_failed_reviews_summary(pair_name, limit=3)
             payload["recent_mistakes"] = recent_mistakes
 
@@ -596,8 +594,9 @@ def handle_backtest_command(update, context):
         buttons = [InlineKeyboardButton(name, callback_data=f"bt_{name}") for name in PAIRS_MAP.keys()]
         markup_list = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
         markup_list.insert(0, [InlineKeyboardButton("🌐 Бектест для УСІХ пар одразу", callback_data="bt_ALL")])
+        markup_list.insert(1, [InlineKeyboardButton("🗑 Скинути / Очистити кеш бектесту", callback_data="bt_clear_cache")])
         markup = InlineKeyboardMarkup(markup_list)
-        update.message.reply_text("📊 <b>Оберіть валютну пару для бектесту:</b>", parse_mode="HTML", reply_markup=markup)
+        update.message.reply_text("📊 <b>Оберіть валютну пару для бектесту або керування кешем:</b>", parse_mode="HTML", reply_markup=markup)
 
 
 def run_backtest_all_pairs(chat_id):
@@ -651,11 +650,17 @@ def send_strategies_menu(update_obj, is_callback=False):
     buttons = []
     for key, title in GROUPED_STRATEGIES.items():
         active = strategies_status.get(key, True)
-        status_icon = "🟢" if active else "🔴"
-        buttons.append([InlineKeyboardButton(f"{status_icon} {title}", callback_data=f"toggle_group_{key}")])
+        status_icon = "🟢 [ВКЛ]" if active else "🔴 [ВИКЛ]"
+        clean_title = title.split(" ", 1)[1] if " " in title else title
+        buttons.append([InlineKeyboardButton(f"{status_icon} {clean_title}", callback_data=f"toggle_group_{key}")])
+    
+    buttons.append([InlineKeyboardButton("🔙 Головне меню", callback_data="back_to_main_menu")])
     
     markup = InlineKeyboardMarkup(buttons)
-    text_msg = "⚙️ <b>Керування групами стратегій</b>:\nНатисніть на групу, щоб увімкнути/вимкнути її."
+    text_msg = (
+        "⚙️ <b>Панель керування стратегіями</b>:\n\n"
+        "Натисніть на будь-яку групу нижче, щоб миттєво увімкнути або вимкнути її в алгоритмі сигналів:"
+    )
     
     if is_callback:
         try:
@@ -676,7 +681,12 @@ def start(update, context):
         [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
         [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
     ]
-    update.message.reply_text("🤖 Квантовий бот із режимами ринку та адаптивним оптимізатором готовий!", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    update.message.reply_text(
+        "🤖 <b>Квантовий бот із режимами ринку та адаптивним оптимізатором готовий!</b>\n\n"
+        "Алгоритми налаштовані на високий вінрейт та стабільний потік трендових сигналів.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
 
 
 def handle_message(update, context):
@@ -747,6 +757,9 @@ def handle_callback(update, context):
     elif data == "bt_ALL":
         query.edit_message_text("🌐 Запускаю глобальний бектест для усіх пар...", parse_mode="HTML")
         run_backtest_all_pairs(chat_id)
+    elif data == "bt_clear_cache":
+        success, msg_info = clean_backtest_cache()
+        query.edit_message_text(f"{'✅' if success else '❌'} {msg_info}\n\nТепер бектест працюватиме з новими параметрами стратегій з чистого аркуша.")
     elif data.startswith("bt_"):
         pair = data.replace("bt_", "")
         query.edit_message_text(f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)...", parse_mode="HTML")
@@ -829,6 +842,12 @@ def handle_callback(update, context):
                 [InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
             ])
         )
+    elif data == "back_to_main_menu":
+        try:
+            query.message.delete()
+        except Exception:
+            pass
+        query.message.reply_text("🏠 Головне меню активне.", reply_markup=query.message.reply_markup)
     elif data.startswith("toggle_group_"):
         group_key = data.replace("toggle_group_", "")
         if group_key in strategies_status:
