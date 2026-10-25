@@ -124,49 +124,58 @@ class AdaptiveTechnicalAnalysis:
         z_score = float(last_1m.get('z_score', 0))
         stoch_k = float(last_1m.get('stoch_k', 50))
         wick_ratio = float(last_1m.get('wick_ratio', 0))
+        adx = float(last_1m.get('adx', 20))
 
         w_zscore = get_strategy_adaptive_weight(pair_name, "Z-Score Mean Reversion")
         w_bb = get_strategy_adaptive_weight(pair_name, "Flat Matrix Bounce")
         w_trend = get_strategy_adaptive_weight(pair_name, "Trend Breakout")
 
-        # 1. Z-Score Mean Reversion (група: oscillators або moving_averages)
+        # 1. Трендовий фільтр за глобальним трендом 1H/15M
+        if strategies_status.get("trend_multi", True):
+            if global_trend == "BULLISH":
+                call_score += 2.2 * w_trend
+                reasons.append("Глобальний тренд BULLISH (1H)")
+            elif global_trend == "BEARISH":
+                put_score += 2.2 * w_trend
+                reasons.append("Глобальний тренд BEARISH (1H)")
+
+        # 2. Z-Score Mean Reversion
         if strategies_status.get("oscillators", True):
-            if z_score <= -1.9:
-                call_score += 2.5 * w_zscore
+            if z_score <= -1.7:
+                call_score += 2.0 * w_zscore
                 reasons.append(f"Z-Score перепроданість ({z_score:.2f})")
-            elif z_score >= 1.9:
-                put_score += 2.5 * w_zscore
+            elif z_score >= 1.7:
+                put_score += 2.0 * w_zscore
                 reasons.append(f"Z-Score перекупленість ({z_score:.2f})")
 
-        # 2. Bollinger / Flat Bounce (група: flat_corridor)
+        # 3. Bollinger / Flat Bounce
         if strategies_status.get("flat_corridor", True):
-            if last_1m['close'] <= last_1m['bb_lower'] and rsi_1m < 36:
-                call_score += 2.2 * w_bb
+            if last_1m['close'] <= last_1m['bb_lower'] and rsi_1m < 40:
+                call_score += 2.0 * w_bb
                 reasons.append(f"Відбиття від BB Lower (RSI: {rsi_1m:.1f})")
-            elif last_1m['close'] >= last_1m['bb_upper'] and rsi_1m > 64:
-                put_score += 2.2 * w_bb
+            elif last_1m['close'] >= last_1m['bb_upper'] and rsi_1m > 60:
+                put_score += 2.0 * w_bb
                 reasons.append(f"Відбиття від BB Upper (RSI: {rsi_1m:.1f})")
 
-        # 3. Trend Alignment (група: trend_multi)
-        if strategies_status.get("trend_multi", True):
-            if regime == "STRONG_TREND":
-                if global_trend == "BULLISH" and rsi_1m < 49:
-                    call_score += 2.8 * w_trend
-                    reasons.append("Сильний висхідний тренд + імпульс")
-                elif global_trend == "BEARISH" and rsi_1m > 51:
-                    put_score += 2.8 * w_trend
-                    reasons.append("Сильний низхідний тренд + імпульс")
-
-        # 4. Stochastic & Price Action (група: price_action)
+        # 4. Stochastic & Price Action
         if strategies_status.get("price_action", True):
-            if stoch_k < 18 and wick_ratio > 0.45:
-                call_score += 1.8
-                reasons.append(f"Stoch перепроданість + тінь свічки ({wick_ratio:.2f})")
-            elif stoch_k > 82 and wick_ratio > 0.45:
-                put_score += 1.8
-                reasons.append(f"Stoch перекупленість + тінь свічки ({wick_ratio:.2f})")
+            if stoch_k < 20 and wick_ratio > 0.35:
+                call_score += 1.6
+                reasons.append(f"Stoch перепроданість + тінь ({wick_ratio:.2f})")
+            elif stoch_k > 80 and wick_ratio > 0.35:
+                put_score += 1.6
+                reasons.append(f"Stoch перекупленість + тінь ({wick_ratio:.2f})")
 
-        threshold = 3.0
+        # 5. Швидкий імпульсний трендовий тригер
+        if strategies_status.get("trend_multi", True):
+            if global_trend == "BULLISH" and adx > 22 and rsi_1m < 55 and rsi_1m > 42:
+                call_score += 1.8
+                reasons.append("Імпульсний трендовий добір [BULLISH]")
+            elif global_trend == "BEARISH" and adx > 22 and rsi_1m > 45 and rsi_1m < 58:
+                put_score += 1.8
+                reasons.append("Імпульсний трендовий добір [BEARISH]")
+
+        threshold = 2.3
         if call_score >= threshold and call_score > put_score:
             return {
                 'signal': 'CALL',
@@ -190,7 +199,7 @@ class AdaptiveTechnicalAnalysis:
                 'reason': " | ".join(reasons)
             }
 
-        return {'signal': 'NONE', 'reason': f'Режим: {regime}. Бали нижче елітного порогу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi', 'regime': regime}
+        return {'signal': 'NONE', 'reason': f'Режим: {regime}. Бали нижче оптимізованого порогу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi', 'regime': regime}
 
     def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name="EUR/USD", strategies_status=None) -> dict:
         global_trend = self.get_trend(df_1h, span_val=200)
