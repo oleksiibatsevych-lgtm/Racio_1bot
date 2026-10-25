@@ -233,7 +233,7 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
             df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
         df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
         if df_daily.empty and ticker_yahoo:
-            df_daily = fetch_yahoo_fallback(yahoo_ticker, interval="1d", range_period="60d")
+            df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
         if not df_1h.empty and not df_daily.empty:
             MACRO_CACHE[cache_key] = {"timestamp": current_time, "1h": df_1h, "1d": df_daily}
 
@@ -691,7 +691,7 @@ def start(update, context):
     ]
     update.message.reply_text(
         "🤖 <b>Квантовий бот із режимами ринку та адаптивним оптимізатором готовий!</b>\n\n"
-        "Алгоритми налаштовані на високий вінрейт та стабільний потік трендових сигналів.",
+        "Усі системи аналізу (трендові, флетові, осциляторні та рівневі) повністю активні.",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
