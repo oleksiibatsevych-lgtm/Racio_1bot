@@ -1,138 +1,91 @@
 # -*- coding: utf-8 -*-
-import json
 import os
-import re
+import json
+import logging
 import pandas as pd
 import yfinance as yf
 from indicators import AdaptiveTechnicalAnalysis
 from config import YAHOO_PAIRS_MAP
 
+logger = logging.getLogger(__name__)
+analyzer = AdaptiveTechnicalAnalysis()
+
 PERFORMANCE_CACHE_FILE = "pair_strategy_performance.json"
 
-def clean_strategy_name(title):
-    clean = re.sub(r'^\d+\.\s*', '', str(title))
-    clean = re.sub(r'\s*\(\+\d+\s+підтверджень\)', '', clean, flags=re.IGNORECASE)
-    return clean.strip()
+def clean_strategy_name(title: str) -> str:
+    return title.replace("📊 ", "").replace("📉 ", "").replace("⚡ ", "").replace("📈 ", "").replace("📐 ", "").replace("🕯️ ", "").replace("💥 ", "").strip()
 
-def resample_candles(df_1m, rule):
-    if df_1m.empty:
-        return pd.DataFrame()
-    return df_1m.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
-
-def run_backtest(pair_name="EUR/USD", period="30d"):
-    yahoo_ticker = YAHOO_PAIRS_MAP.get(pair_name, "EURUSD=X")
-    
+def clear_backtest_cache():
+    """Повністю очищає кеш бектесту та результатів стратегій для тестування нових параметрів."""
     try:
-        df_1m = yf.download(tickers=yahoo_ticker, period=period, interval="1m", progress=False, auto_adjust=True)
-        if df_1m is None or df_1m.empty:
-            return f"❌ Не вдалося завантажити 1M дані для бектесту {pair_name}"
-        if isinstance(df_1m.columns, pd.MultiIndex):
-            df_1m.columns = df_1m.columns.get_level_values(0)
-        df_1m = df_1m.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
-        df_1m.dropna(subset=["open", "high", "low", "close"], inplace=True)
-        if df_1m.index.tz is not None:
-            df_1m.index = df_1m.index.tz_localize(None)
-    except Exception as e:
-        return f"❌ Помилка завантаження історії: {e}"
-
-    if len(df_1m) < 200:
-        return f"❌ Замало 1M даних для {pair_name}"
-
-    analyzer = AdaptiveTechnicalAnalysis()
-    
-    total_signals = 0
-    total_wins = 0
-    total_losses = 0
-    strategy_stats = {}
-    multiplier = 1000 if "JPY" in yahoo_ticker else 100000
-
-    start_idx = 100
-    step = 3
-
-    for i in range(start_idx, len(df_1m) - 15, step):
-        slice_1m = df_1m.iloc[:i]
-        
-        df_3m = resample_candles(slice_1m, "3min")
-        df_5m = resample_candles(slice_1m, "5min")
-        df_15m = resample_candles(slice_1m, "15min")
-        df_1h = resample_candles(slice_1m, "60min")
-        df_daily = resample_candles(slice_1m, "24h")
-
-        if len(df_3m) < 20 or len(df_5m) < 15:
-            continue
-
-        # Передаємо pair_name для повноцінної роботи адаптивного оптимізатора
-        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, slice_1m, pair_name=pair_name)
-        
-        signal = analysis.get("signal")
-        if signal in ["CALL", "PUT"]:
-            raw_strat_title = analysis.get("strategy_title", "Квантова матриця")
-            strat_title = clean_strategy_name(raw_strat_title)
-            exp_mins = int(analysis.get("suggested_exp", 10))
-            
-            entry_price = float(slice_1m["close"].iloc[-1])
-            future_idx = min(i + exp_mins, len(df_1m) - 1)
-            exit_price = float(df_1m["close"].iloc[future_idx])
-            
-            raw_pips = (exit_price - entry_price) * multiplier if signal == "CALL" else (entry_price - exit_price) * multiplier
-            pips = int(round(raw_pips))
-            
-            if pips != 0:
-                is_win = pips > 0
-                total_signals += 1
-                if is_win:
-                    total_wins += 1
-                else:
-                    total_losses += 1
-                
-                if strat_title not in strategy_stats:
-                    strategy_stats[strat_title] = {"wins": 0, "losses": 0, "total": 0}
-                
-                strategy_stats[strat_title]["total"] += 1
-                if is_win:
-                    strategy_stats[strat_title]["wins"] += 1
-                else:
-                    strategy_stats[strat_title]["losses"] += 1
-
-    try:
-        cache = {}
         if os.path.exists(PERFORMANCE_CACHE_FILE):
-            with open(PERFORMANCE_CACHE_FILE, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-        
-        pair_data = {}
-        for strat, data in strategy_stats.items():
-            t = data["total"]
-            w = data["wins"]
-            wr = (w / t * 100) if t > 0 else 0.0
-            pair_data[strat] = {"wins": w, "total": t, "wr": round(wr, 1)}
-            
-        cache[pair_name] = pair_data
-        with open(PERFORMANCE_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
+            os.remove(PERFORMANCE_CACHE_FILE)
+            return True, "Кеш бектесту та результатів стратегій успішно видалено."
+        return True, "Кеш файл був відсутній, але стан чистий."
     except Exception as e:
-        print(f"Помилка збереження кешу продуктивності: {e}")
+        return False, f"Помилка очищення кешу: {e}"
 
-    overall_wr = (total_wins / total_signals * 100) if total_signals > 0 else 0.0
+def run_backtest(pair_name: str, period: str = "30d") -> str:
+    yahoo_ticker = YAHOO_PAIRS_MAP.get(pair_name, f"{pair_name.replace('/', '')}=X")
+    try:
+        df = yf.download(tickers=yahoo_ticker, period=period, interval="1h", progress=False, auto_adjust=True)
+        if df is None or df.empty:
+            return f"❌ Не вдалося завантажити дані для бектесту {pair_name}"
+            
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
+        df.dropna(subset=["open", "high", "low", "close"], inplace=True)
+        
+        if len(df) < 35:
+            return f"⚠️ Замало свічок для бектесту {pair_name}"
 
-    report = (
-        f"📊 <b>Результати квантового бектесту ({pair_name}):</b>\n\n"
-        f"• Період: <b>{period} (Історичні дані)</b>\n"
-        f"• Всього сигналів: <b>{total_signals}</b>\n"
-        f"• ✅ WIN: <b>{total_wins}</b> | ❌ LOSS: <b>{total_losses}</b>\n"
-        f"• 🏆 Загальний вінрейт: <b>{overall_wr:.1f}%</b>\n\n"
-        f"📋 <b>Ефективність стратегій:</b>\n"
-    )
+        total_signals = 0
+        wins = 0
+        strategy_stats = {}
 
-    sorted_strategies = sorted(
-        strategy_stats.items(),
-        key=lambda x: (x[1]["wins"] / x[1]["total"] if x[1]["total"] > 0 else 0),
-        reverse=True
-    )
+        for i in range(30, len(df) - 3):
+            sub_df = df.iloc[:i]
+            analysis = analyzer.analyze_all_timeframes(sub_df, sub_df, sub_df, sub_df, sub_df, sub_df, pair_name=pair_name)
+            sig = analysis.get("signal")
+            
+            if sig in ["CALL", "PUT"]:
+                strat_raw = analysis.get("strategy_title", "Matrix")
+                strat_name = clean_strategy_name(strat_raw)
+                
+                if strat_name not in strategy_stats:
+                    strategy_stats[strat_name] = {"total": 0, "wins": 0}
+                
+                strategy_stats[strat_name]["total"] += 1
+                total_signals += 1
+                
+                entry_p = float(sub_df["close"].iloc[-1])
+                exit_p = float(df["close"].iloc[i + 3])
+                
+                if exit_p != entry_p:
+                    is_win = (exit_p > entry_p) if sig == "CALL" else (exit_p < entry_p)
+                    if is_win:
+                        wins += 1
+                        strategy_stats[strat_name]["wins"] += 1
 
-    for strat, data in sorted_strategies[:15]:
-        wr = (data["wins"] / data["total"] * 100) if data["total"] > 0 else 0.0
-        icon = "🟢" if wr >= 75 else ("🟡" if wr >= 60 else "🔴")
-        report += f"{icon} <b>{strat}</b>: {data['wins']}/{data['total']} ({wr:.1f}% WR)\n"
-
-    return report
+        winrate = (wins / total_signals * 100) if total_signals > 0 else 0.0
+        
+        report_lines = [
+            f"📊 <b>Результати бектесту для <code>{pair_name}</code> ({period}):</b>\n",
+            f"🎯 Всього сигналів: <b>{total_signals}</b>",
+            f"✅ Перемог (WIN): <b>{wins}</b>",
+            f"🏆 Загальний вінрейт: <b>{winrate:.1f}%</b>\n",
+            "📋 <b>Ефективність стратегій:</b>"
+        ]
+        
+        for s_name, s_data in strategy_stats.items():
+            s_tot = s_data["total"]
+            s_wins = s_data["wins"]
+            s_wr = (s_wins / s_tot * 100) if s_tot > 0 else 0.0
+            icon = "🟢" if s_wr >= 53 else "🔴"
+            report_lines.append(f"{icon} <b>{s_name}</b>: {s_wins}/{s_tot} ({s_wr:.1f}% WR)")
+            
+        return "\n".join(report_lines)
+    except Exception as e:
+        return f"❌ Помилка виконання бектесту: {e}"
