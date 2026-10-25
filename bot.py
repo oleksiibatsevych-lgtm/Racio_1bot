@@ -766,7 +766,7 @@ def handle_callback(update, context):
         query.edit_message_text("🌐 Запускаю глобальний бектест для усіх пар...", parse_mode="HTML")
         run_backtest_all_pairs(chat_id)
     elif data == "bt_clear_cache":
-        success, msg_info = clean_backtest_cache()
+        success, msg_info = clear_backtest_cache()
         query.edit_message_text(f"{'✅' if success else '❌'} {msg_info}\n\nТепер бектест працюватиме з новими параметрами стратегій з чистого аркуша.")
     elif data.startswith("bt_"):
         pair = data.replace("bt_", "")
