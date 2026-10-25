@@ -344,7 +344,15 @@ def process_signal_expiration(sig_id):
             try:
                 bot.edit_message_text(chat_id=sig_data["chat_id"], message_id=sig_data["message_id"], text=f"{orig_txt}\n{report_str}", parse_mode="HTML", reply_markup=keyboard)
             except Exception:
-                bot.send_message(chat_id=sig_data["chat_id"], text=f"🏁 <b>Результат угоди #{sig_id}:</b>\n{res_icon} (<code>{pips_str}</code> п.)", parse_mode="HTML", reply_to_message_id=sig_data["message_id"], reply_markup=keyboard)
+                try:
+                    bot.send_message(
+                        chat_id=sig_data["chat_id"], 
+                        text=f"🏁 <b>Результат угоди #{sig_id}:</b>\n{res_icon} (<code>{pips_str}</code> п.)", 
+                        parse_mode="HTML", 
+                        reply_markup=keyboard
+                    )
+                except Exception:
+                    pass
     except Exception as e:
         logger.exception(f"Помилка таймера {sig_id}: {e}")
 
