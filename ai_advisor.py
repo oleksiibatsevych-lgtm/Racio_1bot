@@ -2,16 +2,32 @@
 import os
 import logging
 import json
-from google import genai
-from google.genai import types
 
 logger = logging.getLogger(__name__)
+
+# Безпечний імпорт нового або старого SDK Google GenAI
+try:
+    from google import genai
+    from google.genai import types
+    USE_NEW_GENAI = True
+except ImportError:
+    try:
+        import google.generativeai as genai
+        USE_NEW_GENAI = False
+    except ImportError:
+        genai = None
+        types = None
+        USE_NEW_GENAI = False
 
 class AIAdvisor:
     def __init__(self):
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
         if api_key:
-            self.client = genai.Client(api_key=api_key)
+            if USE_NEW_GENAI:
+                self.client = genai.Client(api_key=api_key)
+            else:
+                genai.configure(api_key=api_key)
+                self.client = genai.GenerativeModel("gemini-2.5-flash")
             self.model_name = "gemini-2.5-flash"
         else:
             self.client = None
@@ -52,23 +68,35 @@ class AIAdvisor:
         )
 
         try:
-            contents = [prompt]
-            for chart_io, label in [(chart_macro, "1H"), (chart_mid, "15M"), (chart_micro, "1M")]:
-                if chart_io and isinstance(chart_io, bytes):
-                    contents.append(types.Part.from_bytes(data=chart_io, mime_type="image/png"))
-                elif chart_io and hasattr(chart_io, "getvalue"):
-                    contents.append(types.Part.from_bytes(data=chart_io.getvalue(), mime_type="image/png"))
+            if USE_NEW_GENAI:
+                contents = [prompt]
+                for chart_io, label in [(chart_macro, "1H"), (chart_mid, "15M"), (chart_micro, "1M")]:
+                    if chart_io and isinstance(chart_io, bytes):
+                        contents.append(types.Part.from_bytes(data=chart_io, mime_type="image/png"))
+                    elif chart_io and hasattr(chart_io, "getvalue"):
+                        contents.append(types.Part.from_bytes(data=chart_io.getvalue(), mime_type="image/png"))
 
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.2,
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        temperature=0.2,
+                    )
                 )
-            )
+                text_res = response.text.strip()
+            else:
+                # Підтримка старого SDK як резерв
+                img_parts = []
+                for chart_io, label in [(chart_macro, "1H"), (chart_mid, "15M"), (chart_micro, "1M")]:
+                    if chart_io:
+                        val = chart_io.getvalue() if hasattr(chart_io, "getvalue") else chart_io
+                        img_parts.append({"mime_type": "image/png", "data": val})
+                
+                full_prompt = [system_instruction, prompt] + img_parts
+                response = self.client.generate_content(full_prompt)
+                text_res = response.text.strip()
 
-            text_res = response.text.strip()
             if text_res.startswith("```"):
                 text_res = text_res.split("```")[1]
                 if text_res.startswith("json"):
@@ -107,11 +135,14 @@ class AIAdvisor:
         )
 
         try:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[prompt],
-                config=types.GenerateContentConfig(temperature=0.3)
-            )
+            if USE_NEW_GENAI:
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=[prompt],
+                    config=types.GenerateContentConfig(temperature=0.3)
+                )
+            else:
+                response = self.client.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
             logger.error(f"Помилка ретроспективного аналізу: {e}")
