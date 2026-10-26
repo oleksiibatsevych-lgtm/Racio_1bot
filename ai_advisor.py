@@ -36,12 +36,15 @@ class AIAdvisor:
         system_instruction = (
             "Ти — професійний головний трейдер та ризик-менеджер, який спеціалізується виключно на **БІНАРНИХ ОПЦІОНАХ (Binary Options)**.\n"
             "Твоє завдання — оцінити торговий сигнал з погляду точності мікро-входу, відсутності ринкового шуму та адаптивного часу експірації.\n"
+            "Ти аналізуєш три таймфрейми (1H макро-тренд, 15M середній імпульс, 1M мікро-точку входу та свічкові тіні).\n"
+            "Враховуй контекст попередніх помилок по цьому активу, якщо він переданий, щоб уникнути повторних хибних входів.\n"
+            "Базовий адаптивний час експірації вже розрахований системою, але ти можеш скоригувати його в межах від 1 до 60 хвилин з урахуванням поточної волатильності.\n"
             "Відповідь ти зобов'язаний повернути **ВИКЛЮЧНО у форматі валідного JSON** без жодних додаткових символів чи markdown-обгорток (на кшталт ```json ... ```), у такому форматі:\n"
             "{\n"
             '  "decision": "YES" або "NO",\n'
             '  "confidence": ціле число від 1 до 10,\n'
             '  "suggested_expiration": рекомендований час експірації в хвилинах (ціле число від 1 до 60),\n'
-            '  "reason": "Коротке обґрунтування українською мовою з акцентом на мікро-імпульс"\n'
+            '  "reason": "Коротке обґрунтування українською мовою з акцентом на мікро-імпульс, волатильність та свічкові тіні"\n'
             "}"
         )
 
@@ -49,13 +52,15 @@ class AIAdvisor:
             f"Аналіз активу: {pair_name}\n"
             f"Сигнал двигуна: {payload.get('signal')} (Стратегія: {payload.get('strategy_title')})\n"
             f"Поточна ціна: {payload.get('current_price')}\n"
-            f"RSI (1M): {payload.get('rsi')} | ADX: {payload.get('adx')} | Базовий час експірації: {payload.get('suggested_exp')} хв\n"
+            f"RSI (1M): {payload.get('rsi')} | ADX: {payload.get('adx')} | Базовий адаптивний час експірації: {payload.get('suggested_exp')} хв\n"
             f"Причина від двигуна: {payload.get('reason')}\n"
+            f"Останні невдалі угоди по парі (для саморефлексії): {payload.get('recent_mistakes', 'Немає')}\n\n"
+            "Проаналізуй прикріплені графіки (1H, 15M, 1M) та прийми рішення щодо доцільності входу й оптимального часу експірації для бінарних опціонів."
         )
 
         try:
             img_parts = []
-            for chart_io in [chart_macro, chart_mid, chart_micro]:
+            for chart_io, label in [(chart_macro, "1H"), (chart_mid, "15M"), (chart_micro, "1M")]:
                 if chart_io:
                     val = chart_io.getvalue() if hasattr(chart_io, "getvalue") else chart_io
                     img_parts.append({"mime_type": "image/png", "data": val})
@@ -78,15 +83,34 @@ class AIAdvisor:
                 "reason": str(parsed.get("reason", "ШІ підтвердив вхід"))
             }
         except Exception as e:
-            logger.error(f"Помилка ШІ радника: {e}")
+            logger.error(f"Помилка ШІ радника (evaluate_signal): {e}")
             return {
                 "decision": "YES",
                 "confidence": 6,
                 "suggested_expiration": int(payload.get("suggested_exp", 10)),
-                "reason": "Помилка відповіді ШІ, прийнято за алгоритмом."
+                "reason": "Помилка парсингу відповіді ШІ, прийнято за адаптивним алгоритмом."
             }
 
     def evaluate_closed_trade(self, sig_data: dict) -> str:
-        return "Ретроспективний аналіз очікує на дані."
+        if not self.client or not sig_data:
+            return "ШІ вимкнено або даних недостатньо."
+
+        prompt = (
+            f"Проведи глибокий ретроспективний аналіз закритої угоди на бінарних опціонах:\n"
+            f"Актив: {sig_data.get('ticker')}\n"
+            f"Тип сигналу: {sig_data.get('signal_type')}\n"
+            f"Ціна входу: {sig_data.get('entry_price')} -> Ціна закриття: {sig_data.get('exit_price')}\n"
+            f"Результат: {sig_data.get('result')} ({sig_data.get('pips')} пунктів)\n"
+            f"Час експірації: {sig_data.get('expiration_mins')} хв | RSI: {sig_data.get('rsi')} | ADX: {sig_data.get('adx')}\n"
+            f"Стратегія: {sig_data.get('strategy')}\n\n"
+            "Напиши розгорнутий висновок українською мовою (2-3 речення): чому угода завершилася так (WIN/LOSS), чи була правильно підібрана експірація та які уроки варто врахувати майбутньому алгоритму."
+        )
+
+        try:
+            response = self.client.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            logger.error(f"Помилка ретроспективного аналізу: {e}")
+            return "Не вдалося сформувати аналіз помилки через збій API."
 
 ai_advisor_instance = AIAdvisor()
