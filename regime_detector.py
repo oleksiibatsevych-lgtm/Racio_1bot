@@ -1,41 +1,33 @@
-import numpy as np
+# -*- coding: utf-8 -*-
 import pandas as pd
+import numpy as np
 
-def detect_market_regime(df: pd.DataFrame) -> str:
+def detect_market_regime(df_1m: pd.DataFrame, df_3m: pd.DataFrame, df_15m: pd.DataFrame) -> str:
     """
-    Визначає поточний стан ринку:
-    - TRENDING: Сильний спрямований тренд (ADX > 25)
-    - RANGING: Флет / Боковий рух ціни (ADX <= 25)
-    - HIGH_VOLATILITY: Аномально висока волатильність (ATR > 3.5% від ціни)
+    Визначає поточний мікро-режим ринку для адаптації стратегій.
+    Режими: STRONG_TREND, TREND_EXHAUSTION, RANGE_BOUND, SQUEEZE, CHAOS
     """
-    if df is None or len(df) < 20:
-        return "RANGING"
-
-    # Розрахунок True Range (TR) та ATR (14)
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean()
-
-    current_close = df['close'].iloc[-1]
-    current_atr = atr.iloc[-1] if not pd.isna(atr.iloc[-1]) else 0.0
-
-    # Оцінка відносної волатильності
-    volatility_ratio = (current_atr / current_close) if current_close > 0 else 0.0
-
-    # Перевірка наявності колонки ADX або її розрахунок через відхилення EMA
-    if 'adx' in df.columns and not pd.isna(df['adx'].iloc[-1]):
-        adx_val = df['adx'].iloc[-1]
-    else:
-        ema_fast = df['close'].ewm(span=9, adjust=False).mean()
-        ema_slow = df['close'].ewm(span=21, adjust=False).mean()
-        trend_strength = ((ema_fast - ema_slow).abs() / ema_slow) * 100
-        adx_val = trend_strength.iloc[-1] * 10.0
-
-    if volatility_ratio > 0.035:
-        return "HIGH_VOLATILITY"
-    elif adx_val > 25:
-        return "TRENDING"
-    else:
-        return "RANGING"
+    if df_3m is None or df_3m.empty or len(df_3m) < 20:
+        return "RANGE_BOUND"
+    
+    try:
+        adx = float(df_3m['adx'].iloc[-1]) if 'adx' in df_3m.columns else 20.0
+        bb_width = float(df_3m['bb_width'].iloc[-1]) if 'bb_width' in df_3m.columns else 0.002
+        rsi = float(df_3m['rsi'].iloc[-1]) if 'rsi' in df_3m.columns else 50.0
+        
+        # Перевірка на стиснення (Squeeze) смуг Боллінджера
+        bb_widths_tail = df_3m['bb_width'].tail(25) if 'bb_width' in df_3m.columns else pd.Series([0.002])
+        is_squeeze = bb_width <= bb_widths_tail.quantile(0.18)
+        
+        if is_squeeze:
+            return "SQUEEZE"
+        elif adx > 30:
+            return "STRONG_TREND"
+        elif adx < 20 and (rsi < 32 or rsi > 68):
+            return "TREND_EXHAUSTION"
+        elif adx < 23:
+            return "RANGE_BOUND"
+        else:
+            return "CHAOS"
+    except Exception:
+        return "RANGE_BOUND"
