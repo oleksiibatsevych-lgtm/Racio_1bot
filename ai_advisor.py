@@ -5,36 +5,21 @@ import json
 
 logger = logging.getLogger(__name__)
 
-# Безпечний імпорт з повним захистом від несумісності версій
+# Безпечне підключення старого SDK Google Generative AI без конфліктів простору імен
 try:
-    from google import genai
-    from google.genai import types
-    USE_NEW_GENAI = True
+    import google.generativeai as genai
+    HAS_GENAI = True
 except ImportError:
-    USE_NEW_GENAI = False
-
-if not USE_NEW_GENAI:
-    try:
-        import google.generativeai as genai
-        HAS_OLD_GENAI = True
-    except ImportError:
-        genai = None
-        HAS_OLD_GENAI = False
-else:
-    HAS_OLD_GENAI = False
+    genai = None
+    HAS_GENAI = False
 
 class AIAdvisor:
     def __init__(self):
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
-        if api_key:
-            if USE_NEW_GENAI:
-                self.client = genai.Client(api_key=api_key)
-            elif HAS_OLD_GENAI:
-                genai.configure(api_key=api_key)
-                self.client = genai.GenerativeModel("gemini-2.5-flash")
-            else:
-                self.client = None
-            self.model_name = "gemini-2.5-flash"
+        if api_key and HAS_GENAI:
+            genai.configure(api_key=api_key)
+            self.client = genai.GenerativeModel("gemini-1.5-flash")
+            self.model_name = "gemini-1.5-flash"
         else:
             self.client = None
             self.model_name = None
@@ -45,7 +30,7 @@ class AIAdvisor:
                 "decision": "YES", 
                 "confidence": 7, 
                 "suggested_expiration": payload.get("suggested_exp", 10), 
-                "reason": "ШІ вимкнено (відсутній ключ GEMINI_API_KEY)"
+                "reason": "ШІ вимкнено (відсутній ключ або бібліотека)"
             }
 
         system_instruction = (
@@ -69,34 +54,15 @@ class AIAdvisor:
         )
 
         try:
-            if USE_NEW_GENAI:
-                contents = [prompt]
-                for chart_io in [chart_macro, chart_mid, chart_micro]:
-                    if chart_io:
-                        val = chart_io.getvalue() if hasattr(chart_io, "getvalue") else chart_io
-                        contents.append(types.Part.from_bytes(data=val, mime_type="image/png"))
-
-                response = self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
-                        temperature=0.2,
-                    )
-                )
-                text_res = response.text.strip()
-            elif HAS_OLD_GENAI:
-                img_parts = []
-                for chart_io in [chart_macro, chart_mid, chart_micro]:
-                    if chart_io:
-                        val = chart_io.getvalue() if hasattr(chart_io, "getvalue") else chart_io
-                        img_parts.append({"mime_type": "image/png", "data": val})
-                
-                full_prompt = [system_instruction, prompt] + img_parts
-                response = self.client.generate_content(full_prompt)
-                text_res = response.text.strip()
-            else:
-                text_res = '{"decision": "YES", "confidence": 7, "suggested_expiration": 10, "reason": "ШІ клієнт не ініціалізовано"}'
+            img_parts = []
+            for chart_io in [chart_macro, chart_mid, chart_micro]:
+                if chart_io:
+                    val = chart_io.getvalue() if hasattr(chart_io, "getvalue") else chart_io
+                    img_parts.append({"mime_type": "image/png", "data": val})
+            
+            full_prompt = [system_instruction, prompt] + img_parts
+            response = self.client.generate_content(full_prompt)
+            text_res = response.text.strip()
 
             if text_res.startswith("```"):
                 text_res = text_res.split("```")[1]
