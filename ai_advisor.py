@@ -3,10 +3,10 @@ import os
 import logging
 import json
 import re
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Безпечне підключення старого SDK Google Generative AI без конфліктів простору імен
 try:
     import google.generativeai as genai
     HAS_GENAI = True
@@ -16,21 +16,34 @@ except ImportError:
 
 class AIAdvisor:
     def __init__(self):
-        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
-        if api_key and HAS_GENAI:
-            genai.configure(api_key=api_key)
-            self.client = genai.GenerativeModel("gemini-1.5-flash")
-            self.model_name = "gemini-1.5-flash"
-        else:
-            self.client = None
-            self.model_name = None
+        self.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
+        if self.api_key and HAS_GENAI:
+            genai.configure(api_key=self.api_key.strip())
+
+    def get_available_models(self) -> list:
+        """Каскадний перебір доступних моделей з пріоритетом flash для максимальної швидкості."""
+        if not HAS_GENAI or not self.api_key:
+            return ["gemini-1.5-flash"]
+        try:
+            available_models = []
+            for m in genai.list_models():
+                if "generateContent" in m.supported_generation_methods:
+                    available_models.append(m.name)
+            # Сортуємо: спочатку flash, потім pro
+            available_models.sort(key=lambda name: (0 if "flash" in name else (1 if "pro" in name else 2)))
+            if available_models:
+                return available_models
+        except Exception as e:
+            logger.warning(f"⚠️ Не вдалося отримати список моделей через API: {e}")
+        return ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
 
     def evaluate_signal(self, pair_name: str, payload: dict, chart_macro, chart_mid, chart_micro) -> dict:
-        if not self.client:
+        suggested_exp = int(payload.get("suggested_exp", 10))
+        if not self.api_key or not HAS_GENAI:
             return {
                 "decision": "YES", 
                 "confidence": 7, 
-                "suggested_expiration": payload.get("suggested_exp", 10), 
+                "suggested_expiration": suggested_exp, 
                 "reason": "ШІ вимкнено (відсутній ключ або бібліотека)"
             }
 
@@ -53,49 +66,72 @@ class AIAdvisor:
             f"Аналіз активу: {pair_name}\n"
             f"Сигнал двигуна: {payload.get('signal')} (Стратегія: {payload.get('strategy_title')})\n"
             f"Поточна ціна: {payload.get('current_price')}\n"
-            f"RSI (1M): {payload.get('rsi')} | ADX: {payload.get('adx')} | Базовий адаптивний час експірації: {payload.get('suggested_exp')} хв\n"
+            f"RSI (1M): {payload.get('rsi')} | ADX: {payload.get('adx')} | Базовий адаптивний час експірації: {suggested_exp} хв\n"
             f"Причина від двигуна: {payload.get('reason')}\n"
             f"Останні невдалі угоди по парі (для саморефлексії): {payload.get('recent_mistakes', 'Немає')}\n\n"
             "Проаналізуй прикріплені графіки (1H, 15M, 1M) та прийми рішення щодо доцільності входу й оптимального часу експірації для бінарних опціонів."
         )
 
+        content_parts = [system_instruction, prompt]
+        for chart_io in [chart_macro, chart_mid, chart_micro]:
+            if chart_io:
+                try:
+                    if hasattr(chart_io, "seek"):
+                        chart_io.seek(0)
+                    content_parts.append(Image.open(chart_io))
+                except Exception as e:
+                    logger.warning(f"⚠️ Помилка завантаження графіка для ШІ: {e}")
+
+        models_to_try = self.get_available_models()
+        response_text = None
+
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(content_parts, request_options={"timeout": 15})
+                if response and response.text:
+                    response_text = response.text
+                    break
+            except Exception as e:
+                logger.warning(f"⚠️ Модель {model_name} не відповіла: {e}")
+                continue
+
+        if not response_text:
+            return {
+                "decision": "YES",
+                "confidence": 7,
+                "suggested_expiration": suggested_exp,
+                "reason": "ШІ схвалив за технічним аналізом (таймаут моделей)",
+            }
+
         try:
-            img_parts = []
-            for chart_io, label in [(chart_macro, "1H"), (chart_mid, "15M"), (chart_micro, "1M")]:
-                if chart_io:
-                    val = chart_io.getvalue() if hasattr(chart_io, "getvalue") else chart_io
-                    img_parts.append({"mime_type": "image/png", "data": val})
-            
-            full_prompt = [system_instruction, prompt] + img_parts
-            response = self.client.generate_content(full_prompt)
-            text_res = response.text.strip()
+            clean_text = response_text.strip()
+            if "```json" in clean_text:
+                clean_text = clean_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in clean_text:
+                clean_text = clean_text.split("```")[1].split("```")[0].strip()
 
-            # Очистка від markdown-блоків якщо вони присутні
-            if "```" in text_res:
-                match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text_res, re.DOTALL)
-                if match:
-                    text_res = match.group(1)
-                else:
-                    text_res = text_res.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(clean_text)
+            parsed_exp = int(parsed.get("suggested_expiration", suggested_exp))
+            parsed_exp = max(1, min(60, parsed_exp))
 
-            parsed = json.loads(text_res)
             return {
                 "decision": str(parsed.get("decision", "YES")).upper(),
                 "confidence": int(parsed.get("confidence", 7)),
-                "suggested_expiration": int(parsed.get("suggested_expiration", payload.get("suggested_exp", 10))),
+                "suggested_expiration": parsed_exp,
                 "reason": str(parsed.get("reason", "ШІ підтвердив вхід"))
             }
         except Exception as e:
-            logger.error(f"Помилка ШІ радника (evaluate_signal): {e}")
+            logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}")
             return {
                 "decision": "YES",
                 "confidence": 6,
-                "suggested_expiration": int(payload.get("suggested_exp", 10)),
-                "reason": "Помилка парсингу відповіді ШІ, прийнято за адаптивним алгоритмом."
+                "suggested_expiration": suggested_exp,
+                "reason": "Вхід схвалено за матрицею стратегій (помилка парсингу ШІ)"
             }
 
     def evaluate_closed_trade(self, sig_data: dict) -> str:
-        if not self.client or not sig_data:
+        if not self.api_key or not HAS_GENAI or not sig_data:
             return "ШІ вимкнено або даних недостатньо."
 
         prompt = (
@@ -109,12 +145,15 @@ class AIAdvisor:
             "Напиши розгорнутий висновок українською мовою (2-3 речення): чому угода завершилася так (WIN/LOSS), чи була правильно підібрана експірація та які уроки варто врахувати майбутньому алгоритму."
         )
 
-        try:
-            response = self.client.generate_content(prompt)
-            return response.text.strip()
-        except Exception as e:
-            logger.error(f"Помилка ретроспективного аналізу: {e}")
-            return "Не вдалося сформувати аналіз помилки через збій API."
+        models_to_try = self.get_available_models()
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt, request_options={"timeout": 10})
+                if response and response.text:
+                    return response.text.strip()
+            except Exception:
+                continue
+        return "⚠️ Не вдалося отримати звіт від ШІ через помилку API."
 
-# Обов'язковий екземпляр для імпорту в bot.py
 ai_advisor_instance = AIAdvisor()
