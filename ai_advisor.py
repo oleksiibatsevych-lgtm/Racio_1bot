@@ -2,6 +2,7 @@
 import os
 import logging
 import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +70,13 @@ class AIAdvisor:
             response = self.client.generate_content(full_prompt)
             text_res = response.text.strip()
 
-            if text_res.startswith("```"):
-                text_res = text_res.split("```")[1]
-                if text_res.startswith("json"):
-                    text_res = text_res[4:]
-                text_res = text_res.strip()
+            # Очистка від markdown-блоків якщо вони присутні
+            if "```" in text_res:
+                match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text_res, re.DOTALL)
+                if match:
+                    text_res = match.group(1)
+                else:
+                    text_res = text_res.replace("```json", "").replace("```", "").strip()
 
             parsed = json.loads(text_res)
             return {
@@ -113,4 +116,5 @@ class AIAdvisor:
             logger.error(f"Помилка ретроспективного аналізу: {e}")
             return "Не вдалося сформувати аналіз помилки через збій API."
 
+# Обов'язковий екземпляр для імпорту в bot.py
 ai_advisor_instance = AIAdvisor()
