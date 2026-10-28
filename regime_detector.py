@@ -5,7 +5,6 @@ import numpy as np
 def detect_market_regime(df_1m: pd.DataFrame, df_3m: pd.DataFrame = None, df_15m: pd.DataFrame = None) -> str:
     """
     Визначає поточний мікро- та макро-режим ринку для адаптації стратегій.
-    Підтримує повну сумісність із закликами з indicators.py та bot.py.
     Режими: STRONG_TREND, TREND_EXHAUSTION, RANGE_BOUND, SQUEEZE, HIGH_VOLATILITY, CHAOS
     """
     target_df = df_3m if (df_3m is not None and not df_3m.empty and len(df_3m) >= 20) else df_1m
@@ -16,7 +15,6 @@ def detect_market_regime(df_1m: pd.DataFrame, df_3m: pd.DataFrame = None, df_15m
     try:
         current_close = float(target_df['close'].iloc[-1]) if 'close' in target_df.columns else 1.0
 
-        # Розрахунок ATR та оцінка відносної волатильності
         if 'atr' in target_df.columns:
             atr_val = float(target_df['atr'].iloc[-1])
         else:
@@ -28,7 +26,6 @@ def detect_market_regime(df_1m: pd.DataFrame, df_3m: pd.DataFrame = None, df_15m
 
         volatility_ratio = (atr_val / current_close) if current_close > 0 else 0.0
 
-        # Повертаємо режим високої волатильності при аномальному сплеску (ATR > 3.5%)
         if volatility_ratio > 0.035:
             return "HIGH_VOLATILITY"
 
