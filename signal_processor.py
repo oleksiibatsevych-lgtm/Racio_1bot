@@ -1,49 +1,80 @@
-import logging
-import html
-from ai_advisor import analyze_signal_with_gemini
-from filters import calculate_dynamic_expiration, validate_signal_conditions
+# -*- coding: utf-8 -*-
+import pandas as pd
+from regime_detector import detect_market_regime
+from adaptive_optimizer import get_adaptive_rsi_limits
+from ml_model import evaluate_ml_signal
 
-logger = logging.getLogger(__name__)
+def check_htf_alignment(signal_type: str, htf_df: pd.DataFrame) -> bool:
+    """
+    Перевіряє відповідність напрямку сигналу 200-періодній EMA на старшому таймфреймі (1H).
+    """
+    if htf_df is None or htf_df.empty or len(htf_df) < 50:
+        return False
 
+    try:
+        ema_span = min(200, len(htf_df))
+        ema_series = htf_df['close'].ewm(span=ema_span, adjust=False).mean()
+        last_close = float(htf_df['close'].iloc[-1])
+        last_ema = float(ema_series.iloc[-1])
 
-def process_and_filter_signal(
-    pair_name: str, market_data: dict, chart_images: list = None
-) -> dict | None:
-    """Головна функція обробки сигналу перед відправкою користувачу."""
-    adx = float(market_data.get("adx", 20.0))
-    volatility_ratio = float(market_data.get("volatility_ratio", market_data.get("atr_ratio", 1.0)))
+        if signal_type == "CALL" and last_close > last_ema:
+            return True
+        elif signal_type == "PUT" and last_close < last_ema:
+            return True
+    except Exception:
+        pass
 
-    # 1. Розраховуємо динамічний час експірації (1-60 хв)
-    calculated_exp = calculate_dynamic_expiration(market_data)
-    market_data["suggested_exp"] = calculated_exp
+    return False
 
-    # 2. Перевіряємо фільтри ринку
-    is_valid, filter_reason = validate_signal_conditions(market_data)
+def process_signal(df_1m: pd.DataFrame, df_1h: pd.DataFrame = None, ml_filter=None) -> dict:
+    """
+    Комплексна обробка сигналів: режим ринку, адаптивний RSI,
+    мульти-таймфреймова перевірка та оцінка ML.
+    """
+    if df_1m is None or df_1m.empty or len(df_1m) < 15:
+        return {"signal": "NONE", "reason": "Недостатньо даних"}
 
-    if not is_valid:
-        logger.info(
-            f"⏭️ Сигнал для {pair_name} пропущено фільтром: {filter_reason}"
-        )
-        return None
+    regime = detect_market_regime(df_1m)
 
-    # 3. Викликаємо аналіз Gemini
-    ai_result = analyze_signal_with_gemini(pair_name, market_data, chart_images or [])
+    high_low = df_1m['high'] - df_1m['low']
+    high_close = (df_1m['high'] - df_1m['close'].shift()).abs()
+    low_close = (df_1m['low'] - df_1m['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr_series = tr.rolling(14).mean()
 
-    # 4. Записуємо отримані параметри
-    market_data["ai_confidence"] = ai_result.get("confidence", 0)
-    market_data["ai_reason"] = html.escape(str(ai_result.get("reason", "")))
-    
-    parsed_exp = int(ai_result.get("suggested_expiration", calculated_exp))
-    market_data["suggested_exp"] = max(1, min(60, parsed_exp))
+    current_close = float(df_1m['close'].iloc[-1])
+    current_atr = float(atr_series.iloc[-1]) if not pd.isna(atr_series.iloc[-1]) else 0.001
+    base_atr = float(atr_series.mean()) if not pd.isna(atr_series.mean()) else 0.001
 
-    # 5. Відкидаємо сигнали з оцінкою нижче 5
-    if ai_result.get("confidence", 0) < 5:
-        logger.info(
-            f"⏭️ Сигнал для {pair_name} відхилено ШІ. Оцінка: {ai_result.get('confidence', 0)}/10"
-        )
-        return None
+    lower_rsi, upper_rsi = get_adaptive_rsi_limits(regime, current_atr, base_atr)
 
-    logger.info(
-        f"🎯 Сигнал {pair_name} готовий: ШІ {ai_result.get('confidence', 0)}/10, експірація {market_data['suggested_exp']} хв"
-    )
-    return market_data
+    current_rsi = float(df_1m['rsi'].iloc[-1]) if 'rsi' in df_1m.columns else 50.0
+
+    raw_signal = "NONE"
+    if current_rsi <= lower_rsi:
+        raw_signal = "CALL"
+    elif current_rsi >= upper_rsi:
+        raw_signal = "PUT"
+
+    if raw_signal == "NONE":
+        return {"signal": "NONE", "regime": regime, "reason": "Значення RSI в нормі"}
+
+    htf_aligned = check_htf_alignment(raw_signal, df_1h) if df_1h is not None else False
+
+    if ml_filter is not None:
+        features = {"rsi": current_rsi, "adx": 20, "bb_width": 0.002}
+        ml_res = evaluate_ml_signal(ml_filter, features, htf_trend_aligned=htf_aligned)
+        if not ml_res["should_trade"]:
+            return {
+                "signal": "NONE",
+                "regime": regime,
+                "reason": f"ML відхилив вхід (ймовірність: {ml_res['probability']}%, поріг: {ml_res['threshold']}%)"
+            }
+
+    return {
+        "signal": raw_signal,
+        "regime": regime,
+        "htf_aligned": htf_aligned,
+        "rsi_limits": (lower_rsi, upper_rsi),
+        "reason": "Сигнал успішно перевірено"
+    }
