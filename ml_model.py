@@ -75,6 +75,20 @@ class TradingMLFilter:
         )
         return float(p * 100.0 if p <= 1.0 else p)
 
+    def evaluate_ml_signal(self, features_dict: dict, htf_trend_aligned: bool = False) -> dict:
+        """
+        Оцінює сигнал за допомогою ML-моделі з адаптивним порогом (Decision Threshold).
+        Якщо тренд зі старшого таймфрейму (HTF) підтверджує сигнал — поріг знижується до 58%.
+        """
+        prob = self.predict_proba(features_dict)
+        required_threshold = 58.0 if htf_trend_aligned else 75.0
+        should_trade = prob >= required_threshold
+        return {
+            "should_trade": should_trade,
+            "probability": round(prob, 2),
+            "threshold": required_threshold
+        }
+
     def train_model(self):
         conn = None
         try:
@@ -131,3 +145,9 @@ class TradingMLFilter:
             return True, f"✅ ШІ (XGBoost) успішно перенавчено на базі з {len(df)} угод!"
         except Exception as e:
             return False, f"❌ Помилка навчання моделі: {e}"
+
+
+def evaluate_ml_signal(model_obj, features_dict: dict, htf_trend_aligned: bool = False) -> dict:
+    if isinstance(model_obj, TradingMLFilter):
+        return model_obj.evaluate_ml_signal(features_dict, htf_trend_aligned)
+    return {"should_trade": True, "probability": 65.0, "threshold": 58.0}
