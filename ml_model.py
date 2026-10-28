@@ -146,7 +146,6 @@ class TradingMLFilter:
         except Exception as e:
             return False, f"❌ Помилка навчання моделі: {e}"
 
-
 def evaluate_ml_signal(model_obj, features_dict: dict, htf_trend_aligned: bool = False) -> dict:
     if isinstance(model_obj, TradingMLFilter):
         return model_obj.evaluate_ml_signal(features_dict, htf_trend_aligned)
