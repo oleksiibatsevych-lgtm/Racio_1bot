@@ -507,7 +507,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             f"🎯 <b>АКТИВ: <code>{pair_name}</code></b>\n\n"
             f"📊 Напрямок: <b>{direction_icon}</b>\n"
             f"⏳ Експірація: <b>{ai_exp} хв</b>\n"
-            f"📍 Ціна: {payload['current_price']:.5f}\n\n"
+            f"📍 Ціна входу: <code>{payload['current_price']:.5f}</code>\n\n"
             f"📋 Стратегія: <b>{payload['strategy_title']}</b>\n"
             f"🧠 ML: <b>{make_progress_bar(win_probability)} {win_probability:.1f}%</b>\n"
             f"🤖 ШІ: <b>{make_progress_bar(ai_res.get('confidence', 6)*10)} {ai_res.get('confidence', 6)}/10</b>\n"
