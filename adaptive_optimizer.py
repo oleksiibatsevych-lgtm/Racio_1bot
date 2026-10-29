@@ -20,6 +20,7 @@ def get_adaptive_rsi_limits(regime: str, current_atr: float, base_atr: float) ->
 
     return round(lower_bound, 2), round(upper_bound, 2)
 
+
 def calculate_smart_expiration(base_exp: int, regime: str, volatility_ratio: float) -> int:
     """
     Розраховує адаптивний час експірації на основі режиму ринку та відносної волатильності.
@@ -36,6 +37,7 @@ def calculate_smart_expiration(base_exp: int, regime: str, volatility_ratio: flo
         return max(1, min(60, exp))
     except Exception:
         return max(1, min(60, int(base_exp)))
+
 
 def get_strategy_adaptive_weight(pair_name: str, strategy_name: str) -> float:
     """
