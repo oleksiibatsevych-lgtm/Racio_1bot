@@ -1,43 +1,40 @@
 # -*- coding: utf-8 -*-
 import logging
+from adaptive_optimizer import calculate_smart_expiration
 
 logger = logging.getLogger(__name__)
 
-def calculate_dynamic_expiration(analysis_dict) -> int:
+def calculate_dynamic_expiration(analysis_dict: dict) -> int:
     """
-    Динамічний розрахунок експірації з урахуванням типів стратегій та волатильності.
+    Динамічний розрахунок часу експірації з урахуванням режимів та волатильності.
     """
     if not isinstance(analysis_dict, dict):
-        return 15
+        return 5
 
-    base_exp = int(analysis_dict.get("suggested_exp", 15))
-    adx = float(analysis_dict.get("adx", 20.0))
+    base_exp = int(analysis_dict.get("suggested_exp", 5))
+    regime = str(analysis_dict.get("regime", "RANGE_BOUND"))
     volatility_ratio = float(analysis_dict.get("volatility_ratio", 1.0))
-    confluence = int(analysis_dict.get("confluence_count", 1))
 
-    # Захист мінімального часу для середньострокових сигналів
-    calculated_exp = max(5, base_exp)
-    
-    if volatility_ratio > 1.4:
-        calculated_exp = int(calculated_exp * 0.85)
-    elif volatility_ratio < 0.7:
-        calculated_exp = int(calculated_exp * 1.15)
+    return calculate_smart_expiration(base_exp, regime, volatility_ratio)
 
-    if adx > 35:
-        calculated_exp = int(calculated_exp * 0.9)
 
-    return max(1, min(60, calculated_exp))
-
-def check_pivot_level_proximity(analysis_dict, threshold_pct=0.0004) -> tuple[bool, str]:
+def check_pivot_level_proximity(analysis_dict: dict, threshold_pct: float = 0.0004) -> tuple[bool, str]:
+    """
+    Перевірка відстані ціни до ключових Pivot або круглих рівнів.
+    """
     if not isinstance(analysis_dict, dict):
         return True, "OK"
     
     dist_pivot = float(analysis_dict.get("dist_pivot", 0.01))
     if dist_pivot < threshold_pct:
-        return True, f"Ціна близько до ключового рівня ({dist_pivot*100:.3f}%)"
+        return True, f"Ціна у безпосередній близькості до рівня ({dist_pivot*100:.3f}%)"
     return True, "OK"
 
-def validate_signal_conditions(analysis_dict) -> tuple[bool, str]:
+
+def validate_signal_conditions(analysis_dict: dict) -> tuple[bool, str]:
+    """
+    Первинна фільтрація валідності технічних показників сигналу.
+    """
     if isinstance(analysis_dict, dict):
         sig_val = str(analysis_dict.get("signal", "NONE"))
         if sig_val in ["NONE", "HOLD"]:
@@ -46,4 +43,4 @@ def validate_signal_conditions(analysis_dict) -> tuple[bool, str]:
         if rsi <= 0 or rsi >= 100:
             return False, "Некоректні значення RSI"
         return True, "OK"
-    return False, "Некоректні дані"
+    return False, "Некоректні дані аналізу"
