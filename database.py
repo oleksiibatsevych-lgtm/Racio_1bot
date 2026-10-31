@@ -71,7 +71,19 @@ def init_db():
         )
 
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(50);")
-        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_review TEXT;")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_review техно;")
+
+        # Таблиця для персоналізації стратегій по конкретних парах (ВКЛ/ВИКЛ)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pair_strategy_settings (
+                pair_name VARCHAR(50),
+                strategy_key VARCHAR(50),
+                is_active BOOLEAN DEFAULT TRUE,
+                PRIMARY KEY (pair_name, strategy_key)
+            );
+            """
+        )
 
         cursor.execute(
             """
@@ -96,7 +108,7 @@ def init_db():
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано.")
+        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано з урахуванням матриці персоналізації та Shadow Mode.")
     except Exception as e:
         logger.error(f"⚠️ Помилка ініціалізації БД: {e}")
 
@@ -142,7 +154,8 @@ def save_signal(
     volatility_ratio=None,
     wick_ratio=None,
     ema_dist=None,
-    strategy="MATRIX_45",
+    strategy="QUANTUM_MATRIX",
+    status="PENDING",
     **kwargs,
 ):
     try:
@@ -155,13 +168,13 @@ def save_signal(
                 score, expiration_mins, timestamp_str, message_text, rsi, adx, bb_width,
                 session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy, status
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING')
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
             """,
             (
                 chat_id, message_id, ticker, signal_type, entry_price, primary_tf,
                 score, expiration_mins, timestamp_str, message_text, rsi, adx, bb_width,
-                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy
+                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy, status
             ),
         )
         signal_id = cursor.fetchone()[0]
@@ -234,7 +247,6 @@ def save_signal_ai_review(signal_id, review_text):
 
 
 def get_recent_failed_reviews_summary(ticker: str, limit=3) -> str:
-    """Витягує останні помилки по активу для саморефлексії ШІ."""
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -259,56 +271,6 @@ def get_recent_failed_reviews_summary(ticker: str, limit=3) -> str:
         return "Помилка завантаження історії помилок."
 
 
-def get_recent_trades_summary(limit=6) -> str:
-    try:
-        conn = get_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute(
-            """
-            SELECT ticker, signal_type, result, pips, rsi, adx, expiration_mins, 
-                   COALESCE(strategy, 'MATRIX') as strategy, ai_review
-            FROM signals 
-            WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
-            ORDER BY id DESC LIMIT %s;
-            """,
-            (limit,),
-        )
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-
-        if not rows:
-            return "Історія угод порожня."
-
-        summary_lines = []
-        for r in rows:
-            res_flag = "✅ WIN" if r["result"] == "WIN" else "❌ LOSS"
-            review_part = f" | 🧠 Висновок ШІ: {r['ai_review']}" if r.get('ai_review') else ""
-            summary_lines.append(
-                f"- [{r['strategy']}] {r['ticker']} | {r['signal_type']} | {res_flag} ({r['pips']} pips) | "
-                f"Експірація: {r['expiration_mins']}хв | RSI: {r['rsi']}, ADX: {r['adx']}{review_part}"
-            )
-        return "\n".join(summary_lines)
-    except Exception as e:
-        logger.error(f"⚠️ Помилка вибірки історії: {e}")
-        return "Не вдалося завантажити історію."
-
-
-def get_system_prompt(prompt_key, default_text=""):
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT prompt_text FROM system_prompts WHERE prompt_key = %s;", (prompt_key,))
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        if row and row[0]:
-            return row[0]
-    except Exception:
-        pass
-    return default_text
-
-
 def get_stats():
     try:
         conn = get_connection()
@@ -320,7 +282,7 @@ def get_stats():
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses,
                 COUNT(*) FILTER (WHERE status = 'PENDING') as pending
-            FROM signals;
+            FROM signals WHERE status != 'SHADOW';
             """
         )
         stats = cursor.fetchone()
@@ -329,6 +291,88 @@ def get_stats():
         return stats
     except Exception:
         return {"total": 0, "wins": 0, "losses": 0, "pending": 0}
+
+
+def get_detailed_pair_strategy_stats(ticker_filter=None, strategy_filter=None):
+    """
+    Повертає деталізовану статистику зрізу: Валютна пара ✖ Стратегія (включно з Shadow Mode).
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        query = """
+            SELECT 
+                ticker,
+                COALESCE(strategy, 'QUANTUM_MATRIX') as strategy,
+                COUNT(*) as total,
+                COUNT(*) FILTER (WHERE result = 'WIN') as wins,
+                COUNT(*) FILTER (WHERE result = 'LOSS') as losses
+            FROM signals 
+            WHERE result IN ('WIN', 'LOSS')
+        """
+        params = []
+        if ticker_filter:
+            query += " AND ticker = %s"
+            params.append(ticker_filter)
+        if strategy_filter:
+            query += " AND strategy = %s"
+            params.append(strategy_filter)
+            
+        query += " GROUP BY ticker, strategy ORDER BY ticker ASC, wins DESC;"
+        
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"⚠️ Помилка вибірки деталізованої статистики: {e}")
+        return []
+
+
+def get_pair_strategy_status(pair_name: str, strategy_key: str) -> bool:
+    """
+    Перевіряє, чи активна конкретна стратегія для конкретної пари. За замовчуванням True.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT is_active FROM pair_strategy_settings WHERE pair_name = %s AND strategy_key = %s;",
+            (pair_name, strategy_key)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row is not None:
+            return bool(row[0])
+        return True
+    except Exception:
+        return True
+
+
+def set_pair_strategy_status(pair_name: str, strategy_key: str, is_active: bool):
+    """
+    Зберігає стан стратегії для конкретної пари.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (pair_name, strategy_key) DO UPDATE 
+            SET is_active = EXCLUDED.is_active;
+            """,
+            (pair_name, strategy_key, is_active)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка збереження налаштування пари та стратегії: {e}")
 
 
 def get_strategy_time_stats():
@@ -344,7 +388,7 @@ def get_strategy_time_stats():
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses
             FROM signals 
-            WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
+            WHERE result IN ('WIN', 'LOSS')
             GROUP BY strategy, trade_hour
             ORDER BY strategy, trade_hour;
         """)
@@ -358,7 +402,7 @@ def get_strategy_time_stats():
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses
             FROM signals 
-            WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
+            WHERE result IN ('WIN', 'LOSS')
             GROUP BY strategy, trade_dow
             ORDER BY strategy, trade_dow;
         """)
@@ -414,7 +458,7 @@ def clear_all_stats():
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("TRUNCATE TABLE signals, filtered_logs RESTART IDENTITY;")
+        cursor.execute("TRUNCATE TABLE signals, filtered_logs, pair_strategy_settings RESTART IDENTITY;")
         conn.commit()
         cursor.close()
         conn.close()
