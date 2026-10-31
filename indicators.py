@@ -8,6 +8,7 @@ from adaptive_optimizer import (
     calculate_dynamic_threshold,
     calculate_smart_expiration
 )
+import database
 
 class AdaptiveTechnicalAnalysis:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -116,7 +117,7 @@ class AdaptiveTechnicalAnalysis:
         self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots, pair_name="EUR/USD", strategies_status=None
     ) -> dict:
         if df_1m is None or df_1m.empty or len(df_1m) < 15 or df_3m is None or df_3m.empty:
-            return {'signal': 'NONE', 'reason': 'Мало даних для аналізу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi'}
+            return {'signal': 'NONE', 'reason': 'Мало даних для аналізу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi', 'is_shadow': False}
 
         if strategies_status is None:
             strategies_status = {}
@@ -135,6 +136,7 @@ class AdaptiveTechnicalAnalysis:
         call_score = 0.0
         put_score = 0.0
         reasons = []
+        active_strategies_hit = []
 
         rsi_1m = float(last_1m.get('rsi', 50))
         z_score = float(last_1m.get('z_score', 0))
@@ -147,74 +149,100 @@ class AdaptiveTechnicalAnalysis:
         w_bb = get_strategy_adaptive_weight(pair_name, "Flat Matrix Bounce")
         w_trend = get_strategy_adaptive_weight(pair_name, "Trend Breakout")
 
-        # КОМПЛЕКС 1: Мульти-Трендові Системи (1H/15M/3M/1M)
-        if strategies_status.get("trend_multi", True):
+        # 1. TREND_IMPULSE (Мульти-тренд)
+        is_trend_active = strategies_status.get("trend_multi", True) and database.get_pair_strategy_status(pair_name, "trend_multi")
+        if is_trend_active:
             if global_trend == "BULLISH":
                 call_score += 2.2 * w_trend
                 reasons.append("Глобальний тренд BULLISH (1H)")
                 if adx > 22 and rsi_1m > 45 and rsi_1m < upper_rsi:
                     call_score += 1.2
                     reasons.append("Імпульсне продовження тренду")
+                    active_strategies_hit.append("TREND_IMPULSE")
             elif global_trend == "BEARISH":
                 put_score += 2.2 * w_trend
                 reasons.append("Глобальний тренд BEARISH (1H)")
                 if adx > 22 and rsi_1m < 55 and rsi_1m > lower_rsi:
                     put_score += 1.2
                     reasons.append("Імпульсне продовження тренду")
+                    active_strategies_hit.append("TREND_IMPULSE")
 
-        # КОМПЛЕКС 2: Флетові Коридори та Відбої (BB / Z-Score)
-        if strategies_status.get("flat_corridor", True):
+        # 2. RANGE_CORRIDOR (Флетові коридори)
+        is_range_active = strategies_status.get("flat_corridor", True) and database.get_pair_strategy_status(pair_name, "flat_corridor")
+        if is_range_active:
             if last_1m['close'] <= last_1m['bb_lower'] and rsi_1m < lower_rsi:
                 call_score += 2.0 * w_bb
-                reasons.append(f"Відбій BB Lower (RSI: {rsi_1m:.1f} < {lower_rsi})")
+                reasons.append(f"Відбій BB Lower (RSI: {rsi_1m:.1f})")
+                active_strategies_hit.append("RANGE_CORRIDOR")
             elif last_1m['close'] >= last_1m['bb_upper'] and rsi_1m > upper_rsi:
                 put_score += 2.0 * w_bb
-                reasons.append(f"Відбій BB Upper (RSI: {rsi_1m:.1f} > {upper_rsi})")
+                reasons.append(f"Відбій BB Upper (RSI: {rsi_1m:.1f})")
+                active_strategies_hit.append("RANGE_CORRIDOR")
 
             if z_score <= -1.7:
                 call_score += 1.8 * w_zscore
                 reasons.append(f"Z-Score перепроданість ({z_score:.2f})")
+                active_strategies_hit.append("RANGE_CORRIDOR")
             elif z_score >= 1.7:
                 put_score += 1.8 * w_zscore
                 reasons.append(f"Z-Score перекупленість ({z_score:.2f})")
+                active_strategies_hit.append("RANGE_CORRIDOR")
 
-        # КОМПЛЕКС 3: Осцилятори Екстремумів (RSI / Stoch / MACD)
-        if strategies_status.get("oscillators", True):
-            if stoch_k < 18 and macd_hist > 0:
-                call_score += 1.6
-                reasons.append("Stoch екстремум + MACD бичача конвергенція")
-            elif stoch_k > 82 and macd_hist < 0:
-                put_score += 1.6
-                reasons.append("Stoch екстремум + MACD ведмежа конвергенція")
-
-        # КОМПЛЕКС 4: Об'єми, Волатильність та Price Action (Pivot / Wick / Micro-Exp)
-        if strategies_status.get("volume_volatility", True) or strategies_status.get("price_action", True):
+        # 3. PRICE_LEVELS (Price Action & Pivot)
+        is_levels_active = (strategies_status.get("price_action", True) and database.get_pair_strategy_status(pair_name, "price_action")) or \
+                           (strategies_status.get("market_levels", True) and database.get_pair_strategy_status(pair_name, "market_levels"))
+        if is_levels_active:
             dist_piv = self.get_min_dist_to_pivot_or_round(current_price, pivots)
             if dist_piv < 0.0003:
                 if rsi_1m < 45:
                     call_score += 1.5
                     reasons.append("Реакція на Pivot/Круглий рівень (CALL)")
+                    active_strategies_hit.append("PRICE_LEVELS")
                 elif rsi_1m > 55:
                     put_score += 1.5
                     reasons.append("Реакція на Pivot/Круглий рівень (PUT)")
+                    active_strategies_hit.append("PRICE_LEVELS")
 
             if wick_ratio > 0.40:
                 if last_1m['close'] > last_1m['open']:
                     call_score += 1.3
-                    reasons.append(f"Price Action: Довга нижня тінь ({wick_ratio:.2f})")
+                    reasons.append(f"Price Action: Нижня тінь ({wick_ratio:.2f})")
+                    active_strategies_hit.append("PRICE_LEVELS")
                 else:
                     put_score += 1.3
-                    reasons.append(f"Price Action: Довга верхня тінь ({wick_ratio:.2f})")
+                    reasons.append(f"Price Action: Верхня тінь ({wick_ratio:.2f})")
+                    active_strategies_hit.append("PRICE_LEVELS")
+
+        # 4. MICRO_BREAKOUT (Волатильні пробої)
+        is_breakout_active = (strategies_status.get("volume_volatility", True) and database.get_pair_strategy_status(pair_name, "volume_volatility")) or \
+                             (strategies_status.get("oscillators", True) and database.get_pair_strategy_status(pair_name, "oscillators"))
+        if is_breakout_active:
+            if stoch_k < 18 and macd_hist > 0:
+                call_score += 1.6
+                reasons.append("Stoch екстремум + MACD конвергенція")
+                active_strategies_hit.append("MICRO_BREAKOUT")
+            elif stoch_k > 82 and macd_hist < 0:
+                put_score += 1.6
+                reasons.append("Stoch екстремум + MACD дивергенція")
+                active_strategies_hit.append("MICRO_BREAKOUT")
 
         base_suggested_exp = 5 if regime in ["SQUEEZE", "TREND_EXHAUSTION"] else 10
         smart_exp = calculate_smart_expiration(base_suggested_exp, regime, vol_ratio)
+        dominant_strategy = active_strategies_hit[0] if active_strategies_hit else "QUANTUM_MATRIX"
+
+        # ПЕРЕВІРКА НА SHADOW MODE (якщо стратегія вимкнена користувачем, але дає сигнал)
+        # Визначаємо чи вимкнена глобально чи по парах конкретна стратегія
+        is_any_target_active = True
+        if call_score >= dyn_threshold or put_score >= dyn_threshold:
+            # Перевіримо чи активна хоча б одна спрацьована стратегія
+            pass
 
         if call_score >= dyn_threshold and call_score > put_score:
             return {
                 'signal': 'CALL',
-                'strategy': 'Quantum Confluence Matrix',
+                'strategy': dominant_strategy,
                 'strategy_title': f'Квантовий CALL [{regime}]',
-                'signal_type_engine': 'trend_multi',
+                'signal_type_engine': dominant_strategy,
                 'confluence_count': int(round(call_score)),
                 'suggested_exp': smart_exp,
                 'regime': regime,
@@ -224,9 +252,9 @@ class AdaptiveTechnicalAnalysis:
         elif put_score >= dyn_threshold and put_score > call_score:
             return {
                 'signal': 'PUT',
-                'strategy': 'Quantum Confluence Matrix',
+                'strategy': dominant_strategy,
                 'strategy_title': f'Квантовий PUT [{regime}]',
-                'signal_type_engine': 'trend_multi',
+                'signal_type_engine': dominant_strategy,
                 'confluence_count': int(round(put_score)),
                 'suggested_exp': smart_exp,
                 'regime': regime,
@@ -236,7 +264,7 @@ class AdaptiveTechnicalAnalysis:
 
         return {
             'signal': 'NONE', 
-            'reason': f'Режим: {regime}. Бали ({max(call_score, put_score):.1f}) нижче динамічного порогу ({dyn_threshold:.1f})', 
+            'reason': f'Режим: {regime}. Бали нижче динамічного порогу ({dyn_threshold:.1f})', 
             'suggested_exp': smart_exp, 
             'strategy': 'NONE', 
             'signal_type_engine': 'trend_multi', 
