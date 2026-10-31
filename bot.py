@@ -45,8 +45,8 @@ from ai_advisor import ai_advisor_instance
 from filters import (
     check_pivot_level_proximity,
     validate_signal_conditions,
+    calculate_dynamic_expiration,
 )
-from adaptive_optimizer import calculate_smart_expiration
 from calendar_filter import is_high_impact_news_time
 from backtest import run_backtest, clean_strategy_name, PERFORMANCE_CACHE_FILE, clear_backtest_cache
 
@@ -439,7 +439,6 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name=pair_name, strategies_status=strategies_status)
         
         strat_title = analysis.get("strategy_title", "")
-        clean_name = clean_strategy_name(strat_title)
 
         signal_type_engine = analysis.get("signal_type_engine", "trend_multi")
         if signal_type_engine in strategies_status and not strategies_status[signal_type_engine]:
@@ -465,10 +464,9 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             report_no_signal(f"Невдале розташування відносно рівнів: {pivot_reason}")
             return False
 
-        base_exp = analysis.get("suggested_exp", 10)
+        exp_time = calculate_dynamic_expiration(analysis)
         regime = analysis.get("regime", "RANGE_BOUND")
-        vol_ratio = analysis.get("volatility_ratio", 1.0)
-        exp_time = calculate_smart_expiration(base_exp, regime, vol_ratio)
+        dyn_thresh = analysis.get("dyn_threshold", 2.3)
 
         payload = {
             "signal": analysis.get("signal"),
@@ -506,9 +504,10 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         msg_text = (
             f"🎯 <b>АКТИВ: <code>{pair_name}</code></b>\n\n"
             f"📊 Напрямок: <b>{direction_icon}</b>\n"
-            f"⏳ Експірація: <b>{ai_exp} хв</b>\n"
-            f"📍 Ціна входу: <code>{payload['current_price']:.5f}</code>\n\n"
+            f"⏳ Адаптивна експірація: <b>{ai_exp} хв</b>\n"
+            f"📍 Ціна: {payload['current_price']:.5f}\n\n"
             f"📋 Стратегія: <b>{payload['strategy_title']}</b>\n"
+            f"⚡ Динамічний поріг: <b>{dyn_thresh:.1f} балів</b>\n"
             f"🧠 ML: <b>{make_progress_bar(win_probability)} {win_probability:.1f}%</b>\n"
             f"🤖 ШІ: <b>{make_progress_bar(ai_res.get('confidence', 6)*10)} {ai_res.get('confidence', 6)}/10</b>\n"
             f"🔥 Збігів: <b>{payload['confluence_count']} балів</b>\n"
@@ -627,7 +626,7 @@ def run_backtest_all_pairs(chat_id):
                     tot_s, tot_w = 0, 0
                     for i in range(30, len(df) - 3):
                         s_df = df.iloc[:i]
-                        an = analyzer.analyze_all_timeframes(s_df, s_df, s_df, s_df, s_df, s_df, pair_name=p_name, strategies_status=strategies_status)
+                        an = analyzer.analyze_all_timeframes(s_df, s_df, s_df, s_df, s_df, s_df, pair_name=p_n, strategies_status=strategies_status)
                         sig = an.get("signal")
                         if sig in ["CALL", "PUT"]:
                             ep = float(s_df["close"].iloc[-1])
@@ -690,8 +689,8 @@ def start(update, context):
         [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
     ]
     update.message.reply_text(
-        "🤖 <b>Квантовий бот із режимами ринку та адаптивним оптимізатором готовий!</b>\n\n"
-        "Усі системи аналізу (трендові, флетові, осциляторні та рівневі) повністю активні.",
+        "🤖 <b>Квантовий бот із динамічними порогами та оптимізацією мікро-експірацій готовий!</b>\n\n"
+        "Усі чотири комплекси стратегій активні.",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
@@ -893,6 +892,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Квантовий бот із новими модулями запущено!")
+    logger.info("🚀 Квантовий бот із оновленими модулями запущено!")
     updater.start_polling()
     updater.idle()
