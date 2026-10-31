@@ -2,13 +2,19 @@
 import pandas as pd
 import numpy as np
 from regime_detector import detect_market_regime
-from adaptive_optimizer import get_strategy_adaptive_weight
+from adaptive_optimizer import (
+    get_strategy_adaptive_weight, 
+    get_adaptive_rsi_limits,
+    calculate_dynamic_threshold,
+    calculate_smart_expiration
+)
 
 class AdaptiveTechnicalAnalysis:
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty or len(df) < 14:
             return df
         
+        df = df.copy()
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -20,7 +26,7 @@ class AdaptiveTechnicalAnalysis:
         std = df['close'].rolling(window=20).std()
         df['bb_upper'] = sma + (std * 2)
         df['bb_lower'] = sma - (std * 2)
-        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / sma
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / (sma + 1e-10)
         df['bb_width'] = df['bb_width'].fillna(0.001)
 
         df['z_score'] = (df['close'] - sma) / (std + 1e-10)
@@ -106,7 +112,9 @@ class AdaptiveTechnicalAnalysis:
         distances.append(min(mod_val, 250 - mod_val) / (price * round_factor))
         return min(distances) if distances else 0.001
 
-    def generate_master_confluence_signal(self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots, pair_name="EUR/USD", strategies_status=None) -> dict:
+    def generate_master_confluence_signal(
+        self, df_1m, df_3m, df_5m, df_15m, df_1h, global_trend, pivots, pair_name="EUR/USD", strategies_status=None
+    ) -> dict:
         if df_1m is None or df_1m.empty or len(df_1m) < 15 or df_3m is None or df_3m.empty:
             return {'signal': 'NONE', 'reason': 'Мало даних для аналізу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi'}
 
@@ -114,107 +122,143 @@ class AdaptiveTechnicalAnalysis:
             strategies_status = {}
 
         regime = detect_market_regime(df_1m, df_3m, df_15m)
+        last_1m = df_1m.iloc[-1]
         
+        current_price = float(last_1m['close'])
+        curr_atr = float(last_1m.get('atr', 0.001))
+        base_atr = float(df_1m['atr'].mean()) if 'atr' in df_1m.columns else curr_atr
+        vol_ratio = (curr_atr / base_atr) if base_atr > 0 else 1.0
+
+        lower_rsi, upper_rsi = get_adaptive_rsi_limits(regime, curr_atr, base_atr)
+        dyn_threshold = calculate_dynamic_threshold(regime, vol_ratio, base_threshold=2.3)
+
         call_score = 0.0
         put_score = 0.0
         reasons = []
 
-        last_1m = df_1m.iloc[-1]
         rsi_1m = float(last_1m.get('rsi', 50))
         z_score = float(last_1m.get('z_score', 0))
         stoch_k = float(last_1m.get('stoch_k', 50))
         wick_ratio = float(last_1m.get('wick_ratio', 0))
         adx = float(last_1m.get('adx', 20))
+        macd_hist = float(last_1m.get('macd_hist', 0))
 
         w_zscore = get_strategy_adaptive_weight(pair_name, "Z-Score Mean Reversion")
         w_bb = get_strategy_adaptive_weight(pair_name, "Flat Matrix Bounce")
         w_trend = get_strategy_adaptive_weight(pair_name, "Trend Breakout")
 
-        # 1. Трендовий фільтр за глобальним трендом 1H/15M
+        # КОМПЛЕКС 1: Мульти-Трендові Системи (1H/15M/3M/1M)
         if strategies_status.get("trend_multi", True):
             if global_trend == "BULLISH":
                 call_score += 2.2 * w_trend
                 reasons.append("Глобальний тренд BULLISH (1H)")
+                if adx > 22 and rsi_1m > 45 and rsi_1m < upper_rsi:
+                    call_score += 1.2
+                    reasons.append("Імпульсне продовження тренду")
             elif global_trend == "BEARISH":
                 put_score += 2.2 * w_trend
                 reasons.append("Глобальний тренд BEARISH (1H)")
+                if adx > 22 and rsi_1m < 55 and rsi_1m > lower_rsi:
+                    put_score += 1.2
+                    reasons.append("Імпульсне продовження тренду")
 
-        # 2. Z-Score Mean Reversion
-        if strategies_status.get("oscillators", True):
+        # КОМПЛЕКС 2: Флетові Коридори та Відбої (BB / Z-Score)
+        if strategies_status.get("flat_corridor", True):
+            if last_1m['close'] <= last_1m['bb_lower'] and rsi_1m < lower_rsi:
+                call_score += 2.0 * w_bb
+                reasons.append(f"Відбій BB Lower (RSI: {rsi_1m:.1f} < {lower_rsi})")
+            elif last_1m['close'] >= last_1m['bb_upper'] and rsi_1m > upper_rsi:
+                put_score += 2.0 * w_bb
+                reasons.append(f"Відбій BB Upper (RSI: {rsi_1m:.1f} > {upper_rsi})")
+
             if z_score <= -1.7:
-                call_score += 2.0 * w_zscore
+                call_score += 1.8 * w_zscore
                 reasons.append(f"Z-Score перепроданість ({z_score:.2f})")
             elif z_score >= 1.7:
-                put_score += 2.0 * w_zscore
+                put_score += 1.8 * w_zscore
                 reasons.append(f"Z-Score перекупленість ({z_score:.2f})")
 
-        # 3. Bollinger / Flat Bounce
-        if strategies_status.get("flat_corridor", True):
-            if last_1m['close'] <= last_1m['bb_lower'] and rsi_1m < 40:
-                call_score += 2.0 * w_bb
-                reasons.append(f"Відбиття від BB Lower (RSI: {rsi_1m:.1f})")
-            elif last_1m['close'] >= last_1m['bb_upper'] and rsi_1m > 60:
-                put_score += 2.0 * w_bb
-                reasons.append(f"Відбиття від BB Upper (RSI: {rsi_1m:.1f})")
-
-        # 4. Stochastic & Price Action
-        if strategies_status.get("price_action", True):
-            if stoch_k < 20 and wick_ratio > 0.35:
+        # КОМПЛЕКС 3: Осцилятори Екстремумів (RSI / Stoch / MACD)
+        if strategies_status.get("oscillators", True):
+            if stoch_k < 18 and macd_hist > 0:
                 call_score += 1.6
-                reasons.append(f"Stoch перепроданість + тінь ({wick_ratio:.2f})")
-            elif stoch_k > 80 and wick_ratio > 0.35:
+                reasons.append("Stoch екстремум + MACD бичача конвергенція")
+            elif stoch_k > 82 and macd_hist < 0:
                 put_score += 1.6
-                reasons.append(f"Stoch перекупленість + тінь ({wick_ratio:.2f})")
+                reasons.append("Stoch екстремум + MACD ведмежа конвергенція")
 
-        # 5. Швидкий імпульсний трендовий тригер
-        if strategies_status.get("trend_multi", True):
-            if global_trend == "BULLISH" and adx > 22 and rsi_1m < 55 and rsi_1m > 42:
-                call_score += 1.8
-                reasons.append("Імпульсний трендовий добір [BULLISH]")
-            elif global_trend == "BEARISH" and adx > 22 and rsi_1m > 45 and rsi_1m < 58:
-                put_score += 1.8
-                reasons.append("Імпульсний трендовий добір [BEARISH]")
+        # КОМПЛЕКС 4: Об'єми, Волатильність та Price Action (Pivot / Wick / Micro-Exp)
+        if strategies_status.get("volume_volatility", True) or strategies_status.get("price_action", True):
+            dist_piv = self.get_min_dist_to_pivot_or_round(current_price, pivots)
+            if dist_piv < 0.0003:
+                if rsi_1m < 45:
+                    call_score += 1.5
+                    reasons.append("Реакція на Pivot/Круглий рівень (CALL)")
+                elif rsi_1m > 55:
+                    put_score += 1.5
+                    reasons.append("Реакція на Pivot/Круглий рівень (PUT)")
 
-        threshold = 2.3
-        if call_score >= threshold and call_score > put_score:
+            if wick_ratio > 0.40:
+                if last_1m['close'] > last_1m['open']:
+                    call_score += 1.3
+                    reasons.append(f"Price Action: Довга нижня тінь ({wick_ratio:.2f})")
+                else:
+                    put_score += 1.3
+                    reasons.append(f"Price Action: Довга верхня тінь ({wick_ratio:.2f})")
+
+        base_suggested_exp = 5 if regime in ["SQUEEZE", "TREND_EXHAUSTION"] else 10
+        smart_exp = calculate_smart_expiration(base_suggested_exp, regime, vol_ratio)
+
+        if call_score >= dyn_threshold and call_score > put_score:
             return {
                 'signal': 'CALL',
                 'strategy': 'Quantum Confluence Matrix',
-                'strategy_title': f'Квантовий сигнал CALL [{regime}]',
+                'strategy_title': f'Квантовий CALL [{regime}]',
                 'signal_type_engine': 'trend_multi',
                 'confluence_count': int(round(call_score)),
-                'suggested_exp': 10,
+                'suggested_exp': smart_exp,
                 'regime': regime,
+                'dyn_threshold': dyn_threshold,
                 'reason': " | ".join(reasons)
             }
-        elif put_score >= threshold and put_score > call_score:
+        elif put_score >= dyn_threshold and put_score > call_score:
             return {
                 'signal': 'PUT',
                 'strategy': 'Quantum Confluence Matrix',
-                'strategy_title': f'Квантовий сигнал PUT [{regime}]',
+                'strategy_title': f'Квантовий PUT [{regime}]',
                 'signal_type_engine': 'trend_multi',
                 'confluence_count': int(round(put_score)),
-                'suggested_exp': 10,
+                'suggested_exp': smart_exp,
                 'regime': regime,
+                'dyn_threshold': dyn_threshold,
                 'reason': " | ".join(reasons)
             }
 
-        return {'signal': 'NONE', 'reason': f'Режим: {regime}. Бали нижче оптимізованого порогу', 'suggested_exp': 10, 'strategy': 'NONE', 'signal_type_engine': 'trend_multi', 'regime': regime}
+        return {
+            'signal': 'NONE', 
+            'reason': f'Режим: {regime}. Бали ({max(call_score, put_score):.1f}) нижче динамічного порогу ({dyn_threshold:.1f})', 
+            'suggested_exp': smart_exp, 
+            'strategy': 'NONE', 
+            'signal_type_engine': 'trend_multi', 
+            'regime': regime
+        }
 
     def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name="EUR/USD", strategies_status=None) -> dict:
         global_trend = self.get_trend(df_1h, span_val=200)
         pivots = self.calculate_pivots(df_1h)
         
-        df_ind_1m = self.calculate_indicators(df_1m.copy()) if df_1m is not None and not df_1m.empty else pd.DataFrame()
-        df_ind_3m = self.calculate_indicators(df_3m.copy()) if df_3m is not None and not df_3m.empty else pd.DataFrame()
-        df_ind_5m = self.calculate_indicators(df_5m.copy()) if df_5m is not None and not df_5m.empty else pd.DataFrame()
-        df_ind_15m = self.calculate_indicators(df_15m.copy()) if df_15m is not None and not df_15m.empty else pd.DataFrame()
-        df_ind_1h = self.calculate_indicators(df_1h.copy()) if df_1h is not None and not df_1h.empty else pd.DataFrame()
+        df_ind_1m = self.calculate_indicators(df_1m) if df_1m is not None and not df_1m.empty else pd.DataFrame()
+        df_ind_3m = self.calculate_indicators(df_3m) if df_3m is not None and not df_3m.empty else pd.DataFrame()
+        df_ind_5m = self.calculate_indicators(df_5m) if df_5m is not None and not df_5m.empty else pd.DataFrame()
+        df_ind_15m = self.calculate_indicators(df_15m) if df_15m is not None and not df_15m.empty else pd.DataFrame()
+        df_ind_1h = self.calculate_indicators(df_1h) if df_1h is not None and not df_1h.empty else pd.DataFrame()
 
         if df_ind_1m.empty or df_ind_3m.empty:
             return {"signal": "NONE", "reason": "Недостатньо даних"}
 
-        sig_data = self.generate_master_confluence_signal(df_ind_1m, df_ind_3m, df_ind_5m, df_ind_15m, df_ind_1h, global_trend, pivots, pair_name, strategies_status)
+        sig_data = self.generate_master_confluence_signal(
+            df_ind_1m, df_ind_3m, df_ind_5m, df_ind_15m, df_ind_1h, global_trend, pivots, pair_name, strategies_status
+        )
         
         current_price = float(df_ind_1m['close'].iloc[-1]) if not df_ind_1m.empty else 0.0
         atr = float(df_ind_1m['atr'].iloc[-1]) if not df_ind_1m.empty and 'atr' in df_ind_1m.columns else 0.001
@@ -230,11 +274,12 @@ class AdaptiveTechnicalAnalysis:
             "adx": float(df_ind_3m['adx'].iloc[-1]) if 'adx' in df_ind_3m.columns else 20,
             "atr": atr,
             "volatility_ratio": (atr / current_price) * 1000 if current_price > 0 else 1.0,
-            "suggested_exp": sig_data.get("suggested_exp", 10),
+            "suggested_exp": sig_data.get("suggested_exp", 5),
             "global_trend": global_trend,
             "pivots": pivots,
             "current_price": current_price,
             "bb_width": float(df_ind_3m['bb_width'].iloc[-1]) if not df_ind_3m.empty else 0.001,
             "dist_pivot": self.get_min_dist_to_pivot_or_round(current_price, pivots),
             "regime": sig_data.get("regime", "RANGE_BOUND"),
+            "dyn_threshold": sig_data.get("dyn_threshold", 2.3)
         }
