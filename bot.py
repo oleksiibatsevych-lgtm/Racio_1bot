@@ -48,7 +48,13 @@ from filters import (
     calculate_dynamic_expiration,
 )
 from calendar_filter import is_high_impact_news_time
-from backtest import run_backtest, clean_strategy_name, PERFORMANCE_CACHE_FILE, clear_backtest_cache
+from backtest import (
+    run_backtest,
+    run_backtest_all_detailed,
+    clean_strategy_name,
+    PERFORMANCE_CACHE_FILE,
+    clear_backtest_cache,
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -330,7 +336,6 @@ def process_signal_expiration(sig_id):
         res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
         pips_str = f"+{pips}" if pips > 0 else f"{pips}"
         
-        # Адаптивна картка закриття угоди з візуальною анімаційною плашкою
         report_str = (
             f"\n──────────────────────────────────────\n"
             f"🏁 <b>РЕЗУЛЬТАТ УГОДИ: {res_icon} (<code>{pips_str}</code> pips)</b>\n"
@@ -498,11 +503,9 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
 
         ai_exp = ai_res.get("suggested_expiration", exp_time)
         
-        # Бейдж тикера та напрямку в стилі комплексного дизайну 1
         direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if payload["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
         risk_badge = "🔴 Новинний ризик" if news_is_bad else "🟢 Ринок стабільний"
         
-        # Колірна градація ймовірності ML та ШІ
         ml_badge = f"{make_progress_bar(win_probability)} {win_probability:.1f}%"
         ai_conf = ai_res.get('confidence', 6)
         ai_badge = f"{make_progress_bar(ai_conf * 10)} {ai_conf}/10"
@@ -612,47 +615,15 @@ def handle_backtest_command(update, context):
 
 
 def run_backtest_all_pairs(chat_id):
-    bot.send_message(chat_id=chat_id, text="🌐 <b>Запускаю паралельний бектест для УСІХ пар (30 днів)...</b>", parse_mode="HTML")
+    bot.send_message(chat_id=chat_id, text="🌐 <b>Запускаю паралельний бектест по УСІХ парах та УСІХ стратегіях (30d)...</b>", parse_mode="HTML")
     
     def worker():
-        summary_lines = ["🌐 <b>Глобальний звіт бектесту по всіх парах (30d):</b>\n"]
-        pair_results = []
-        
-        for p_name in PAIRS_MAP.keys():
-            try:
-                yahoo_ticker = YAHOO_PAIRS_MAP.get(p_name, "EURUSD=X")
-                df = yf.download(tickers=yahoo_ticker, period="30d", interval="1h", progress=False, auto_adjust=True)
-                if df is not None and not df.empty:
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.get_level_values(0)
-                    df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})
-                    df.dropna(subset=["open", "high", "low", "close"], inplace=True)
-                    
-                    tot_s, tot_w = 0, 0
-                    for i in range(30, len(df) - 3):
-                        s_df = df.iloc[:i]
-                        an = analyzer.analyze_all_timeframes(s_df, s_df, s_df, s_df, s_df, s_df, pair_name=p_n, strategies_status=strategies_status)
-                        sig = an.get("signal")
-                        if sig in ["CALL", "PUT"]:
-                            ep = float(s_df["close"].iloc[-1])
-                            exp_p = float(df["close"].iloc[i + 3])
-                            if exp_p != ep:
-                                tot_s += 1
-                                is_win = (exp_p > ep) if sig == "CALL" else (exp_p < ep)
-                                if is_win:
-                                    tot_w += 1
-                    wr = (tot_w / tot_s * 100) if tot_s > 0 else 0.0
-                    pair_results.append((p_name, wr, tot_s))
-            except Exception:
-                continue
-                
-        pair_results.sort(key=lambda x: x[1], reverse=True)
-        for p_n, wr_val, sigs in pair_results:
-            ico = "🟢" if wr_val >= 53 else ("🟡" if wr_val >= 48 else "🔴")
-            summary_lines.append(f"{ico} <b>{p_n}</b>: <b>{wr_val:.1f}% WR</b> (Сигналів: {sigs})")
-            
-        summary_lines.append("\n💡 <i>Кеш стратегій оновлено! Авто-фільтр активовано.</i>")
-        bot.send_message(chat_id=chat_id, text="\n".join(summary_lines), parse_mode="HTML")
+        try:
+            reports = run_backtest_all_detailed("30d")
+            for rep in reports:
+                bot.send_message(chat_id=chat_id, text=rep, parse_mode="HTML")
+        except Exception as e:
+            bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -688,7 +659,6 @@ def start(update, context):
     database.register_user(user.id, user.username)
     ml_txt = "🤖 ML-Модель: ВКЛ" if ML_FILTER_ENABLED else "🤖 ML-Модель: ВИКЛ"
     
-    # Оптимізована компактна клавіатура у 3 рядки відповідно до комплексної пропозиції 2
     keyboard = [
         [KeyboardButton("⚡ Масовий сканер"), KeyboardButton("🔔 Авто-сканер [ВКЛ]" if update.effective_chat.id in AUTO_SCAN_CHATS else "🔔 Авто-сканер [ВИКЛ]"), KeyboardButton("💵 Вибір пари")],
         [KeyboardButton("📈 Статистика"), KeyboardButton("📊 Бектест (30d)"), KeyboardButton("⚙️ Конфігуратор")],
@@ -735,7 +705,6 @@ def handle_message(update, context):
         finished = stats.get('wins', 0) + stats.get('losses', 0)
         winrate = (stats.get('wins', 0) / finished * 100) if finished > 0 else 0.0
         
-        # Інтерактивний Inline-Дашборд статистики відповідно до комплексної пропозиції 3
         msg = (
             "📊 <b>ДАШБОРД ЕФЕКТИВНОСТІ МАТРИЦІ</b>\n"
             "──────────────────────────────────────\n"
@@ -778,12 +747,11 @@ def handle_callback(update, context):
             wins = r['wins']
             wr = (wins / tot * 100) if tot > 0 else 0
             ico = "🟢" if wr >= 55 else ("🟡" if wr >= 48 else "🔴")
-            lines.append(f"{ico} <b>{r['strategy']}</b>: {wins}/{tot} WIN ({wr:.1f%})")
+            lines.append(f"{ico} <b>{r['strategy']}</b>: {wins}/{tot} WIN ({wr:.1f}% WR)")
         if len(rows) == 0:
             lines.append("⚠️ Недостатньо закритих угод для цього активу.")
         query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до дашборду", callback_data="back_to_stats")]]))
     elif data == "dash_matrix":
-        # Розбивка Пара ✖ Стратегія
         rows = database.get_detailed_pair_strategy_stats()
         lines = ["🔀 <b>МАТРИЦЯ: ПАРА ✖ СТРАТЕГІЯ</b>\n──────────────────────────────────────"]
         for r in rows[:15]:
@@ -797,7 +765,6 @@ def handle_callback(update, context):
             lines.append("⚠️ База даних угод порожня.")
         query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до дашборду", callback_data="back_to_stats")]]))
     elif data == "custom_pairs_menu":
-        # Меню вибору пари для налаштування стратегій (Варіант 5)
         buttons = [InlineKeyboardButton(name, callback_data=f"cpair_{name}") for name in PAIRS_MAP.keys()]
         markup = InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)] + [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_strategies")]])
         query.edit_message_text("🎯 <b>Оберіть актив для персоналізації стратегій:</b>", parse_mode="HTML", reply_markup=markup)
@@ -816,7 +783,6 @@ def handle_callback(update, context):
         current_st = database.get_pair_strategy_status(pair_name, s_key)
         database.set_pair_strategy_status(pair_name, s_key, not current_st)
         
-        # Перемальовуємо меню для цієї ж пари
         buttons = []
         for sk, st in GROUPED_STRATEGIES.items():
             is_act = database.get_pair_strategy_status(pair_name, sk)
