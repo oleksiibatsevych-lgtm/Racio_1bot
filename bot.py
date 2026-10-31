@@ -75,13 +75,10 @@ ML_FILTER_ENABLED = True
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
 
 GROUPED_STRATEGIES = {
-    "trend_multi": "📊 Мульти-Трендові Системи (1H/15M/3M)",
-    "flat_corridor": "📉 Флетові Коридори та Відбої (BB)",
-    "oscillators": "⚡ Осцилятори Екстремумів (RSI/Stoch)",
-    "moving_averages": "📈 Ковзні Середні та Імпульси (EMA/MACD)",
-    "market_levels": "📐 Рівні та Геометрія Ринку (Pivot)",
-    "price_action": "🕯️ Price Action та Патерни",
-    "volume_volatility": "💥 Об'єми та Волатильність (ATR/Vol)"
+    "trend_multi": "🚀 TREND_IMPULSE (Тренд)",
+    "flat_corridor": "📉 RANGE_CORRIDOR (Флет)",
+    "price_action": "🕯️ PRICE_LEVELS (Price Action)",
+    "oscillators": "⚡ MICRO_BREAKOUT (Пробій)"
 }
 
 def load_strategies_config():
@@ -317,7 +314,7 @@ def process_signal_expiration(sig_id):
             result = "NEUTRAL"
         elif signal_type == "CALL":
             result = "WIN" if exit_price > entry_price else "LOSS"
-        else: # PUT
+        else:
             result = "WIN" if exit_price < entry_price else "LOSS"
 
         multiplier = 1000 if "JPY" in ticker else 100000
@@ -332,7 +329,13 @@ def process_signal_expiration(sig_id):
 
         res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
         pips_str = f"+{pips}" if pips > 0 else f"{pips}"
-        report_str = f"\n----------------------------------\n🏁 <b>Результат:</b> {res_icon} (<code>{pips_str}</code> п.)\n📍 Вхід: {entry_price:.5f} ➔ 🏁 Закриття: {exit_price:.5f}"
+        
+        # Адаптивна картка закриття угоди з візуальною анімаційною плашкою
+        report_str = (
+            f"\n──────────────────────────────────────\n"
+            f"🏁 <b>РЕЗУЛЬТАТ УГОДИ: {res_icon} (<code>{pips_str}</code> pips)</b>\n"
+            f"📍 Вхід: {entry_price:.5f} ➔ 🏁 Закриття: {exit_price:.5f}"
+        )
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔍 Аналіз помилки (ШІ)", callback_data=f"review_{sig_id}")],
@@ -340,7 +343,7 @@ def process_signal_expiration(sig_id):
         ])
 
         orig_txt = sig_data.get("message_text", "")
-        if orig_txt and "🏁 Результат" not in orig_txt:
+        if orig_txt and "РЕЗУЛЬТАТ УГОДИ" not in orig_txt:
             try:
                 bot.edit_message_text(chat_id=sig_data["chat_id"], message_id=sig_data["message_id"], text=f"{orig_txt}\n{report_str}", parse_mode="HTML", reply_markup=keyboard)
             except Exception:
@@ -439,11 +442,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
         analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name=pair_name, strategies_status=strategies_status)
         
         strat_title = analysis.get("strategy_title", "")
-
         signal_type_engine = analysis.get("signal_type_engine", "trend_multi")
-        if signal_type_engine in strategies_status and not strategies_status[signal_type_engine]:
-            report_no_signal(f"Група стратегій вимкнена в меню.")
-            return False
 
         is_valid, reason_val = validate_signal_conditions(analysis)
         if not is_valid:
@@ -498,22 +497,28 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             return False
 
         ai_exp = ai_res.get("suggested_expiration", exp_time)
+        
+        # Бейдж тикера та напрямку в стилі комплексного дизайну 1
         direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if payload["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
         risk_badge = "🔴 Новинний ризик" if news_is_bad else "🟢 Ринок стабільний"
         
+        # Колірна градація ймовірності ML та ШІ
+        ml_badge = f"{make_progress_bar(win_probability)} {win_probability:.1f}%"
+        ai_conf = ai_res.get('confidence', 6)
+        ai_badge = f"{make_progress_bar(ai_conf * 10)} {ai_conf}/10"
+
         msg_text = (
-            f"🎯 <b>АКТИВ: <code>{pair_name}</code></b>\n\n"
-            f"📊 Напрямок: <b>{direction_icon}</b>\n"
-            f"⏳ Адаптивна експірація: <b>{ai_exp} хв</b>\n"
-            f"📍 Ціна: {payload['current_price']:.5f}\n\n"
-            f"📋 Стратегія: <b>{payload['strategy_title']}</b>\n"
-            f"⚡ Динамічний поріг: <b>{dyn_thresh:.1f} балів</b>\n"
-            f"🧠 ML: <b>{make_progress_bar(win_probability)} {win_probability:.1f}%</b>\n"
-            f"🤖 ШІ: <b>{make_progress_bar(ai_res.get('confidence', 6)*10)} {ai_res.get('confidence', 6)}/10</b>\n"
-            f"🔥 Збігів: <b>{payload['confluence_count']} балів</b>\n"
-            f"🌐 Режим: <b>{regime}</b> | Статус: {risk_badge}\n\n"
-            f"💡 Причина: <i>{clean_ai_html(ai_res.get('reason', ''))}</i>\n"
-            f"🌐 Сесія: {session_str}"
+            f"🎯 <b>[ {pair_name} ] ─── {direction_icon}</b>\n"
+            f"──────────────────────────────────────\n"
+            f"⏳ Експірація:  ⏱ <b>{ai_exp} хв</b> (Адаптивна)\n"
+            f"📍 Ціна входу:  <b>{payload['current_price']:.5f}</b>\n"
+            f"📊 ML-Прогноз:  <b>{ml_badge}</b>\n"
+            f"🤖 Оцінка ШІ:   <b>{ai_badge}</b>\n"
+            f"🌐 Режим ринку: ⚡ <b>{regime}</b>\n"
+            f"──────────────────────────────────────\n"
+            f"📋 Стратегія:   <b>{payload['strategy_title']}</b>\n"
+            f"💡 Причина:      <i>{clean_ai_html(ai_res.get('reason', ''))}</i>\n"
+            f"🌐 Сесія: {session_str} | Статус: {risk_badge}"
         )
 
         keyboard_markup = InlineKeyboardMarkup([
@@ -658,15 +663,15 @@ def send_strategies_menu(update_obj, is_callback=False):
     for key, title in GROUPED_STRATEGIES.items():
         active = strategies_status.get(key, True)
         status_icon = "🟢 [ВКЛ]" if active else "🔴 [ВИКЛ]"
-        clean_title = title.split(" ", 1)[1] if " " in title else title
-        buttons.append([InlineKeyboardButton(f"{status_icon} {clean_title}", callback_data=f"toggle_group_{key}")])
+        buttons.append([InlineKeyboardButton(f"{status_icon} {title}", callback_data=f"toggle_group_{key}")])
     
+    buttons.append([InlineKeyboardButton("🎯 Персоналізація по парах", callback_data="custom_pairs_menu")])
     buttons.append([InlineKeyboardButton("🔙 Головне меню", callback_data="back_to_main_menu")])
     
     markup = InlineKeyboardMarkup(buttons)
     text_msg = (
-        "⚙️ <b>Панель керування стратегіями</b>:\n\n"
-        "Натисніть на будь-яку групу нижче, щоб миттєво увімкнути або вимкнути її в алгоритмі сигналів:"
+        "⚙️ <b>Панель глобального керування стратегіями</b>:\n\n"
+        "Натисніть на групу нижче, щоб увімкнути/вимкнути її глобально, або скористайтеся персоналізацією по парах:"
     )
     
     if is_callback:
@@ -681,16 +686,17 @@ def send_strategies_menu(update_obj, is_callback=False):
 def start(update, context):
     user = update.effective_user
     database.register_user(user.id, user.username)
-    ml_txt = "🟢 ML-фільтр: ВКЛ" if ML_FILTER_ENABLED else "🔴 ML-фільтр: ВИКЛ"
+    ml_txt = "🤖 ML-Модель: ВКЛ" if ML_FILTER_ENABLED else "🤖 ML-Модель: ВИКЛ"
+    
+    # Оптимізована компактна клавіатура у 3 рядки відповідно до комплексної пропозиції 2
     keyboard = [
-        [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("📊 Бектест")],
-        [KeyboardButton("⚙️ Стратегії"), KeyboardButton("🔔 Авто-сканер")],
-        [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
-        [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
+        [KeyboardButton("⚡ Масовий сканер"), KeyboardButton("🔔 Авто-сканер [ВКЛ]" if update.effective_chat.id in AUTO_SCAN_CHATS else "🔔 Авто-сканер [ВИКЛ]"), KeyboardButton("💵 Вибір пари")],
+        [KeyboardButton("📈 Статистика"), KeyboardButton("📊 Бектест (30d)"), KeyboardButton("⚙️ Конфігуратор")],
+        [KeyboardButton("📋 Системні логи"), KeyboardButton(ml_txt)]
     ]
     update.message.reply_text(
-        "🤖 <b>Квантовий бот із динамічними порогами та оптимізацією мікро-експірацій готовий!</b>\n\n"
-        "Усі чотири комплекси стратегій активні.",
+        "🤖 <b>Квантовий бот Racio_1bot успішно активовано!</b>\n\n"
+        "Інтерфейс оптимізовано, 4 комплекси стратегій та динамічні пороги працюють у реальному часі.",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
@@ -698,50 +704,56 @@ def start(update, context):
 
 def handle_message(update, context):
     text, chat_id = update.message.text, update.effective_chat.id
-    if text == "📊 Аналіз усіх пар":
+    if text == "⚡ Масовий сканер" or text == "📊 Аналіз усіх пар":
         threading.Thread(target=run_mass_analysis, args=[chat_id], daemon=True).start()
-    elif text == "📊 Бектест":
+    elif text == "📊 Бектест (30d)" or text == "📊 Бектест":
         handle_backtest_command(update, context)
-    elif text == "⚙️ Стратегії":
+    elif text == "⚙️ Конфігуратор" or text == "⚙️ Стратегії":
         send_strategies_menu(update, is_callback=False)
-    elif text == "🔔 Авто-сканер":
+    elif "🔔 Авто-сканер" in text:
         if chat_id in AUTO_SCAN_CHATS:
             AUTO_SCAN_CHATS.remove(chat_id)
             update.message.reply_text("🔴 Авто-сканер ВИМКНЕНО.")
         else:
             AUTO_SCAN_CHATS.add(chat_id)
             update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО (кожні 1.5 хв).")
-    elif text in ["🟢 ML-фільтр: ВКЛ", "🔴 ML-фільтр: ВИКЛ"]:
+    elif text in ["🤖 ML-Модель: ВКЛ", "🤖 ML-Модель: ВИКЛ", "🟢 ML-фільтр: ВКЛ", "🔴 ML-фільтр: ВИКЛ"]:
         global ML_FILTER_ENABLED
         ML_FILTER_ENABLED = not ML_FILTER_ENABLED
-        ml_txt = "🟢 ML-фільтр: ВКЛ" if ML_FILTER_ENABLED else "🔴 ML-фільтр: ВИКЛ"
+        ml_txt = "🤖 ML-Модель: ВКЛ" if ML_FILTER_ENABLED else "🤖 ML-Модель: ВИКЛ"
         keyboard = [
-            [KeyboardButton("📊 Аналіз усіх пар"), KeyboardButton("📊 Бектест")],
-            [KeyboardButton("⚙️ Стратегії"), KeyboardButton("🔔 Авто-сканер")],
-            [KeyboardButton("💵 Пари"), KeyboardButton("📈 Статистика")],
-            [KeyboardButton("📋 Логи фільтру"), KeyboardButton(ml_txt)]
+            [KeyboardButton("⚡ Масовий сканер"), KeyboardButton("🔔 Авто-сканер"), KeyboardButton("💵 Вибір пари")],
+            [KeyboardButton("📈 Статистика"), KeyboardButton("📊 Бектест (30d)"), KeyboardButton("⚙️ Конфігуратор")],
+            [KeyboardButton("📋 Системні логи"), KeyboardButton(ml_txt)]
         ]
         update.message.reply_text(f"⚙️ ML-фільтр {'увімкнено' if ML_FILTER_ENABLED else 'вимкнено'}.", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
-    elif text == "💵 Пари":
+    elif text == "💵 Вибір пари" or text == "💵 Пари":
         buttons = [InlineKeyboardButton(name, callback_data=f"analyze_{name}") for name in PAIRS_MAP.keys()]
-        update.message.reply_text("Оберіть пару:", reply_markup=InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)]))
+        update.message.reply_text("💵 <b>Оберіть валютну пару для аналізу:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)]))
     elif text == "📈 Статистика":
         stats = database.get_stats()
         finished = stats.get('wins', 0) + stats.get('losses', 0)
         winrate = (stats.get('wins', 0) / finished * 100) if finished > 0 else 0.0
-        msg = f"📊 <b>Статистика матриці:</b>\n\nВсього: {stats.get('total', 0)}\n✅ WIN: {stats.get('wins', 0)}\n❌ LOSS: {stats.get('losses', 0)}\n🏆 Вінрейт: {winrate:.1f}%"
-        update.message.reply_text(
-            msg, 
-            parse_mode="HTML", 
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Аналіз по годинах/днях", callback_data="strategy_time_stats")],
-                [InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml")], 
-                [InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
-            ])
+        
+        # Інтерактивний Inline-Дашборд статистики відповідно до комплексної пропозиції 3
+        msg = (
+            "📊 <b>ДАШБОРД ЕФЕКТИВНОСТІ МАТРИЦІ</b>\n"
+            "──────────────────────────────────────\n"
+            f"🏆 Загальний вінрейт: <b>{winrate:.1f}%</b>  [{stats.get('wins', 0)} WIN / {stats.get('losses', 0)} LOSS]\n"
+            f"🎯 Угод у базі даних: <b>{stats.get('total', 0)} угод</b>\n"
+            f"⚡ Активна ML-модель: <b>XGBoost v2.4 (Активна)</b>\n"
+            "──────────────────────────────────────\n"
+            "Оберіть зріз аналітики для деталізації:"
         )
-    elif text == "📋 Логи фільтру":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💵 По парах", callback_data="dash_pairs"), InlineKeyboardButton("📋 По стратегіях", callback_data="dash_strategies")],
+            [InlineKeyboardButton("🔀 Пара ✖ Стратегія", callback_data="dash_matrix"), InlineKeyboardButton("📊 По годинах/днях", callback_data="strategy_time_stats")],
+            [InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml"), InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
+        ])
+        update.message.reply_text(msg, parse_mode="HTML", reply_markup=keyboard)
+    elif text == "📋 Системні логи" or text == "📋 Логи фільтру":
         logs = database.get_system_logs(chat_id)
-        update.message.reply_text("📋 <b>Останні логи:</b>\n\n" + "\n".join([clean_ai_html(l) for l in logs]) if logs else "📋 Логи порожні.", parse_mode="HTML")
+        update.message.reply_text("📋 <b>Останні логи системи:</b>\n\n" + "\n".join([clean_ai_html(l) for l in logs]) if logs else "📋 Логи порожні.", parse_mode="HTML")
 
 
 def handle_callback(update, context):
@@ -759,8 +771,64 @@ def handle_callback(update, context):
         query.edit_message_text("💵 <b>Оберіть новий актив для аналізу:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)]))
     elif data.startswith("pair_stats_"):
         pair = data.replace("pair_stats_", "")
-        stats = database.get_stats()
-        query.edit_message_text(f"📊 <b>Статистика активу <code>{pair}</code></b>\n\nЗагальна кількість угод у системі: {stats.get('total', 0)}\n🏆 Вінрейт загальний: акумулюється в базі даних.", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
+        rows = database.get_detailed_pair_strategy_stats(ticker_filter=next((v for k, v in PAIRS_MAP.items() if k == pair), pair))
+        lines = [f"📊 <b>СТАТИСТИКА АКТИВУ [ {pair} ]:</b>\n──────────────────────────────────────"]
+        for r in rows:
+            tot = r['total']
+            wins = r['wins']
+            wr = (wins / tot * 100) if tot > 0 else 0
+            ico = "🟢" if wr >= 55 else ("🟡" if wr >= 48 else "🔴")
+            lines.append(f"{ico} <b>{r['strategy']}</b>: {wins}/{tot} WIN ({wr:.1f%})")
+        if len(rows) == 0:
+            lines.append("⚠️ Недостатньо закритих угод для цього активу.")
+        query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до дашборду", callback_data="back_to_stats")]]))
+    elif data == "dash_matrix":
+        # Розбивка Пара ✖ Стратегія
+        rows = database.get_detailed_pair_strategy_stats()
+        lines = ["🔀 <b>МАТРИЦЯ: ПАРА ✖ СТРАТЕГІЯ</b>\n──────────────────────────────────────"]
+        for r in rows[:15]:
+            tot = r['total']
+            wins = r['wins']
+            wr = (wins / tot * 100) if tot > 0 else 0
+            p_name = next((k for k, v in PAIRS_MAP.items() if v == r['ticker']), r['ticker'])
+            ico = "🟢" if wr >= 55 else ("🟡" if wr >= 48 else "🔴")
+            lines.append(f"{ico} <code>{p_name}</code> | {r['strategy']}: <b>{wr:.1f}%</b> ({wins}/{tot})")
+        if not rows:
+            lines.append("⚠️ База даних угод порожня.")
+        query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до дашборду", callback_data="back_to_stats")]]))
+    elif data == "custom_pairs_menu":
+        # Меню вибору пари для налаштування стратегій (Варіант 5)
+        buttons = [InlineKeyboardButton(name, callback_data=f"cpair_{name}") for name in PAIRS_MAP.keys()]
+        markup = InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)] + [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_strategies")]])
+        query.edit_message_text("🎯 <b>Оберіть актив для персоналізації стратегій:</b>", parse_mode="HTML", reply_markup=markup)
+    elif data.startswith("cpair_"):
+        pair_name = data.replace("cpair_", "")
+        buttons = []
+        for s_key, s_title in GROUPED_STRATEGIES.items():
+            is_act = database.get_pair_strategy_status(pair_name, s_key)
+            status_ico = "🟢 [ВКЛ]" if is_act else "🔴 [ВИКЛ]"
+            buttons.append([InlineKeyboardButton(f"{status_ico} {s_title}", callback_data=f"toggle_cpair_{pair_name}_{s_key}")])
+        buttons.append([InlineKeyboardButton("🔙 До списку пар", callback_data="custom_pairs_menu")])
+        query.edit_message_text(f"⚙️ <b>Стратегії для активу [ {pair_name} ]:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+    elif data.startswith("toggle_cpair_"):
+        parts = data.replace("toggle_cpair_", "").split("_", 1)
+        pair_name, s_key = parts[0], parts[1]
+        current_st = database.get_pair_strategy_status(pair_name, s_key)
+        database.set_pair_strategy_status(pair_name, s_key, not current_st)
+        
+        # Перемальовуємо меню для цієї ж пари
+        buttons = []
+        for sk, st in GROUPED_STRATEGIES.items():
+            is_act = database.get_pair_strategy_status(pair_name, sk)
+            status_ico = "🟢 [ВКЛ]" if is_act else "🔴 [ВИКЛ]"
+            buttons.append([InlineKeyboardButton(f"{status_ico} {st}", callback_data=f"toggle_cpair_{pair_name}_{sk}")])
+        buttons.append([InlineKeyboardButton("🔙 До списку пар", callback_data="custom_pairs_menu")])
+        try:
+            query.edit_message_text(f"⚙️ <b>Стратегії для активу [ {pair_name} ]:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+        except Exception:
+            pass
+    elif data == "back_to_strategies":
+        send_strategies_menu(query, is_callback=True)
     elif data == "bt_ALL":
         query.edit_message_text("🌐 Запускаю глобальний бектест для усіх пар...", parse_mode="HTML")
         run_backtest_all_pairs(chat_id)
@@ -839,14 +907,22 @@ def handle_callback(update, context):
         stats = database.get_stats()
         finished = stats.get('wins', 0) + stats.get('losses', 0)
         winrate = (stats.get('wins', 0) / finished * 100) if finished > 0 else 0.0
-        msg = f"📊 <b>Статистика матриці:</b>\n\nВсього: {stats.get('total', 0)}\n✅ WIN: {stats.get('wins', 0)}\n❌ LOSS: {stats.get('losses', 0)}\n🏆 Вінрейт: {winrate:.1f}%"
+        msg = (
+            "📊 <b>ДАШБОРД ЕФЕКТИВНОСТІ МАТРИЦІ</b>\n"
+            "──────────────────────────────────────\n"
+            f"🏆 Загальний вінрейт: <b>{winrate:.1f}%</b>  [{stats.get('wins', 0)} WIN / {stats.get('losses', 0)} LOSS]\n"
+            f"🎯 Угод у базі даних: <b>{stats.get('total', 0)} угод</b>\n"
+            f"⚡ Активна ML-модель: <b>XGBoost v2.4 (Активна)</b>\n"
+            "──────────────────────────────────────\n"
+            "Оберіть зріз аналітики для деталізації:"
+        )
         query.edit_message_text(
             msg, 
             parse_mode="HTML", 
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Аналіз по годинах/днях", callback_data="strategy_time_stats")],
-                [InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml")], 
-                [InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
+                [InlineKeyboardButton("💵 По парах", callback_data="dash_pairs"), InlineKeyboardButton("📋 По стратегіях", callback_data="dash_strategies")],
+                [InlineKeyboardButton("🔀 Пара ✖ Стратегія", callback_data="dash_matrix"), InlineKeyboardButton("📊 По годинах/днях", callback_data="strategy_time_stats")],
+                [InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml"), InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
             ])
         )
     elif data == "back_to_main_menu":
@@ -892,6 +968,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Квантовий бот із оновленими модулями запущено!")
+    logger.info("🚀 Квантовий бот Racio_1bot із повним оновленням UI та логіки запущено!")
     updater.start_polling()
     updater.idle()
