@@ -71,7 +71,7 @@ def init_db():
         )
 
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(50);")
-        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_review техно;")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_review TEXT;")
 
         # Таблиця для персоналізації стратегій по конкретних парах (ВКЛ/ВИКЛ)
         cursor.execute(
