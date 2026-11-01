@@ -934,6 +934,6 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Квантовий бот Racio_1bot із повним оновленням UI та логіки запущено!")
+    logger.info("🚀 Квантовий бот із оновленими модулями запущено!")
     updater.start_polling()
     updater.idle()
