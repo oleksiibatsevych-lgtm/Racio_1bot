@@ -59,7 +59,7 @@ def calculate_dynamic_threshold(regime: str, volatility_ratio: float, base_thres
         "RANGE_BOUND": 1.0,
         "SQUEEZE": 0.85,
         "TREND_EXHAUSTION": 0.95,
-        "CHAOS": 1.25
+        "CHAOS": 1.35
     }
     w = regime_weights.get(regime, 1.0)
     dyn_thresh = (base_threshold * w) + vol_adj
@@ -68,8 +68,7 @@ def calculate_dynamic_threshold(regime: str, volatility_ratio: float, base_thres
 
 def get_strategy_adaptive_weight(pair_name: str, strategy_name: str) -> float:
     """
-    Динамічна вага стратегії для конкретної валютної пари.
-    Враховує специфіку трендових та флетових пар з 21 валютної пари.
+    Динамічна вага стратегії для конкретної валютної пари з урахуванням її волатильності.
     """
     # Агресивні волатильні пари з вираженими трендами
     aggressive_trend_pairs = [
@@ -80,14 +79,14 @@ def get_strategy_adaptive_weight(pair_name: str, strategy_name: str) -> float:
     choppy_pairs = ["EUR/GBP", "AUD/CAD", "CAD/CHF", "CHF/JPY", "AUD/CHF"]
 
     # Трендові стратегії та пробої
-    if "Trend" in strategy_name or "Breakout" in strategy_name or "Мульти-Трендові" in strategy_name:
+    if "Trend" in strategy_name or "Breakout" in strategy_name or "TREND_IMPULSE" in strategy_name:
         if pair_name in aggressive_trend_pairs:
             return 1.25  # Підсилюємо трендові сигнали на волатильних парах
         if pair_name in choppy_pairs:
             return 0.85  # Ослаблюємо трендові сигнали на флетових парах
 
     # Флетові стратегії та відбої (Mean Reversion / BB Bounce)
-    if "Mean Reversion" in strategy_name or "Bounce" in strategy_name or "Flat" in strategy_name:
+    if "Mean Reversion" in strategy_name or "Bounce" in strategy_name or "RANGE_CORRIDOR" in strategy_name:
         if "EUR/USD" in pair_name or "USD/CHF" in pair_name or pair_name in choppy_pairs:
             return 1.15  # Мажори та флетові пари краще відпрацьовують відбої
 
