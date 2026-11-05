@@ -63,7 +63,13 @@ class AdaptiveTechnicalAnalysis:
         # Обчислення VWAP (Volume Weighted Average Price)
         typical_price = (df['high'] + df['low'] + df['close']) / 3.0
         vol = df['volume'] if ('volume' in df.columns and df['volume'].sum() > 0) else pd.Series(1.0, index=df.index)
-        df['vwap'] = (typical_price * vol).cumsum() / (vol.cumsum() + 1e-10)
+        # VWAP скидається щодня (UTC), інакше це просто «середнє за весь датасет»
+        try:
+            session_key = pd.Series(df.index.date, index=df.index)
+            pv = typical_price * vol
+            df['vwap'] = pv.groupby(session_key).cumsum() / (vol.groupby(session_key).cumsum() + 1e-10)
+        except Exception:
+            df['vwap'] = (typical_price * vol).cumsum() / (vol.cumsum() + 1e-10)
 
         # Обчислення Каналів Кельтнера (Keltner Channels)
         df['keltner_mid'] = df['ema_20']
@@ -332,8 +338,18 @@ class AdaptiveTechnicalAnalysis:
         
         current_price = float(df_ind_1m['close'].iloc[-1]) if not df_ind_1m.empty else 0.0
         atr = float(df_ind_1m['atr'].iloc[-1]) if not df_ind_1m.empty and 'atr' in df_ind_1m.columns else 0.001
+        atr_mean = float(df_ind_1m['atr'].mean()) if 'atr' in df_ind_1m.columns else atr
+        vol_ratio_rel = (atr / atr_mean) if atr_mean > 0 else 1.0
+        ema_20_last = float(df_ind_1m['ema_20'].iloc[-1]) if 'ema_20' in df_ind_1m.columns else current_price
+        ema_dist = ((current_price - ema_20_last) / current_price) if current_price > 0 else 0.0
+        wick_ratio_last = float(df_ind_1m['wick_ratio'].iloc[-1]) if 'wick_ratio' in df_ind_1m.columns else 0.0
+        divergence_last = self.detect_rsi_divergence(df_ind_1m)
 
         return {
+            "divergence": divergence_last,
+            "wick_ratio": wick_ratio_last,
+            "ema_dist": ema_dist,
+            "vol_ratio_rel": vol_ratio_rel,
             "signal": sig_data.get("signal", "NONE"),
             "strategy": sig_data.get("strategy", "QUANTUM_MATRIX"),
             "strategy_title": sig_data.get("strategy_title", "Quantum Matrix"),
