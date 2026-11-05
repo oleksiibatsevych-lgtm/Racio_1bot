@@ -24,15 +24,20 @@ class AIAdvisor:
         """Каскадний перебір доступних моделей з пріоритетом flash для максимальної швидкості."""
         if not HAS_GENAI or not self.api_key:
             return ["gemini-1.5-flash"]
+        import time as _t
+        cached = getattr(self, "_models_cache", None)
+        if cached and _t.time() - cached[0] < 3600:
+            return cached[1]
         try:
             available_models = []
             for m in genai.list_models():
                 if "generateContent" in m.supported_generation_methods:
                     available_models.append(m.name)
-            # Сортуємо: спочатку flash, потім pro
+            # Сортуємо: спочатку flash, потім pro; беремо лише 3 найшвидші
             available_models.sort(key=lambda name: (0 if "flash" in name else (1 if "pro" in name else 2)))
             if available_models:
-                return available_models
+                self._models_cache = (_t.time(), available_models[:3])
+                return self._models_cache[1]
         except Exception as e:
             logger.warning(f"⚠️ Не вдалося отримати список моделей через API: {e}")
         return ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
@@ -65,6 +70,7 @@ class AIAdvisor:
         prompt = (
             f"Аналіз активу: {pair_name}\n"
             f"Сигнал двигуна: {payload.get('signal')} (Стратегія: {payload.get('strategy_title')})\n"
+            f"Робочий таймфрейм сигналу: {payload.get('tf', '1m')} | Незалежних підтверджень: {payload.get('confirmations', 'н/д')}\n"
             f"Поточна ціна: {payload.get('current_price')}\n"
             f"RSI (1M): {payload.get('rsi')} | ADX: {payload.get('adx')} | Базовий адаптивний час експірації: {suggested_exp} хв\n"
             f"Причина від двигуна: {payload.get('reason')}\n"
