@@ -48,6 +48,9 @@ from filters import (
     calculate_dynamic_expiration,
 )
 from calendar_filter import is_high_impact_news_time
+from signal_pipeline import generate_candidates
+from quality_gate import SignalGate, SegmentFilter
+from timeframe_profiles import PROFILES, ACTIVE_PROFILES
 from backtest import (
     run_backtest,
     run_backtest_all_detailed,
@@ -77,6 +80,8 @@ MACRO_CACHE = {}
 CACHE_TTL = 900
 AUTO_SCAN_CHATS = set()
 ML_FILTER_ENABLED = True
+signal_gate = SignalGate()
+segment_filter = SegmentFilter(database, break_even=0.50, min_trades=40)
 
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
 
@@ -199,7 +204,8 @@ def fetch_yahoo_fallback(ticker, interval="1m", range_period="5d"):
             df_yf = df_yf[["open", "high", "low", "close", "volume"]].copy()
             df_yf.dropna(subset=["open", "high", "low", "close"], inplace=True)
             if df_yf.index.tz is not None:
-                df_yf.index = df_yf.index.tz_localize(None)
+                # конвертуємо в UTC, а не просто відкидаємо зону (інакше час зсувається)
+                df_yf.index = df_yf.index.tz_convert("UTC").tz_localize(None)
             return df_yf
     except Exception as e:
         logger.warning(f"Yahoo fallback failed for {ticker}: {e}")
@@ -214,7 +220,7 @@ def resample_candles(df_1m, rule):
 
 def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
     global MACRO_CACHE
-    df_1m = fetch_finnhub_candles(ticker_finnhub, resolution="1", count_candles=600)
+    df_1m = fetch_finnhub_candles(ticker_finnhub, resolution="1", count_candles=1500)
     if df_1m.empty and ticker_yahoo:
         df_1m = fetch_yahoo_fallback(ticker_yahoo, interval="1m", range_period="5d")
     if df_1m.empty:
@@ -239,12 +245,6 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
             df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
         if not df_1h.empty and not df_daily.empty:
             MACRO_CACHE[cache_key] = {"timestamp": current_time, "1h": df_1h, "1d": df_daily}
-
-    live_p = get_live_price(ticker_finnhub) or (get_live_price(ticker_yahoo) if ticker_yahoo else None)
-    if live_p and not df_1m.empty:
-        df_1m.iloc[-1, df_1m.columns.get_loc("close")] = live_p
-        if not df_3m.empty: df_3m.iloc[-1, df_3m.columns.get_loc("close")] = live_p
-        if not df_5m.empty: df_5m.iloc[-1, df_5m.columns.get_loc("close")] = live_p
 
     return df_daily, df_1h, df_15m, df_5m, df_3m, df_1m
 
@@ -288,6 +288,7 @@ def get_exit_price(ticker, name=""):
 
 
 def process_signal_expiration(sig_id):
+    claimed = False
     try:
         sig_data = database.get_signal_by_id(sig_id)
         if not sig_data or sig_data.get("status") != "PENDING":
@@ -308,9 +309,14 @@ def process_signal_expiration(sig_id):
             timer.start()
             return
 
+        if not database.claim_signal(sig_id):
+            return  # інший потік уже обробляє цей сигнал
+        claimed = True
+
         pair_name = next((k for k, v in PAIRS_MAP.items() if v == ticker), "")
         exit_price = get_exit_price(ticker, pair_name)
         if not exit_price:
+            database.release_signal(sig_id)
             timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
@@ -363,6 +369,8 @@ def process_signal_expiration(sig_id):
                     pass
     except Exception as e:
         logger.exception(f"Помилка таймера {sig_id}: {e}")
+        if claimed:
+            database.release_signal(sig_id)
 
 
 def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
@@ -407,12 +415,143 @@ def start_auto_scanner_loop():
                                     logger.error(f"Помилка потоку авто-сканера: {ex}")
             except Exception as e:
                 logger.error(f"Помилка авто-сканера: {e}")
-            time.sleep(90)
+            # прокидаємось на початку кожної хвилини (+2с), щоб піймати свіжу закриту свічку
+            time.sleep(max(1.0, 62.0 - (time.time() % 60)))
     threading.Thread(target=loop, daemon=True).start()
 
 
 start_background_checker()
 start_auto_scanner_loop()
+
+
+def build_ml_features(cand, session_code, hour):
+    return {
+        "rsi": cand.get("rsi", 50), "adx": cand.get("adx", 20), "bb_width": cand.get("bb_width", 0.001),
+        "session_code": session_code, "hour": hour, "divergence": cand.get("divergence", "NONE"),
+        "dist_pivot": cand.get("dist_pivot", 0.0), "volatility_ratio": cand.get("volatility_ratio", 1.0),
+        "wick_ratio": cand.get("wick_ratio", 0.0), "ema_dist": cand.get("ema_dist", 0.0),
+        "tf_minutes": cand.get("tf_minutes", 1), "confirmations": cand.get("confirmations", 0),
+    }
+
+
+def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mode, status_msg_id, news_is_bad):
+    """
+    Проганяє одного кандидата крізь фільтри та, якщо все ок, відправляє сигнал.
+    Повертає (відправлено: bool, причина_відмови: str).
+    """
+    tf = cand["tf"]
+    prof = PROFILES[tf]
+    is_valid, reason_val = validate_signal_conditions(cand)
+    if not is_valid:
+        return False, reason_val
+
+    session_str, s_code, s_hour = get_current_session_info()
+
+    ok, why = segment_filter.check(ticker_finnhub, tf, cand.get("strategy", "QUANTUM_MATRIX"), s_hour)
+    if not ok:
+        return False, why
+
+    ok, why = signal_gate.check(cand)
+    if not ok:
+        return False, why
+
+    features = build_ml_features(cand, s_code, s_hour)
+    win_probability = ml_filter.predict_proba(features)
+    if ML_FILTER_ENABLED and ml_filter.is_active:
+        min_ml = cand["ml_min_auto"] if auto_mode else cand["ml_min_manual"]
+        if win_probability < min_ml:
+            return False, f"ML оцінила ймовірність у {win_probability:.1f}%"
+
+    is_pivot_ok, pivot_reason = check_pivot_level_proximity(cand)
+    if not is_pivot_ok:
+        return False, pivot_reason
+
+    exp_time = cand["suggested_exp"]
+    lo, hi = cand["exp_range"]
+    regime = cand.get("regime", "RANGE_BOUND")
+
+    payload = {
+        "signal": cand.get("signal"), "strategy": cand.get("strategy", "QUANTUM_MATRIX"),
+        "strategy_title": cand.get("strategy_title", ""), "confluence_count": cand.get("confluence_count", 1),
+        "current_price": cand.get("current_price"), "rsi": cand.get("rsi"), "adx": cand.get("adx"),
+        "reason": cand.get("reason"), "suggested_exp": exp_time, "tf": tf,
+        "confirmations": cand.get("confirmations"),
+    }
+
+    ai_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
+    if ai_key:
+        c_macro = create_chart_image(frames.get("1h"), f"{pair_name} - 1H", tf_label="1H")
+        c_mid = create_chart_image(frames.get(prof["confirm"]), f"{pair_name} - {prof['confirm']}", tf_label=prof["confirm"])
+        c_micro = create_chart_image(frames.get(prof["primary"]), f"{pair_name} - {tf}", tf_label=tf)
+        payload["recent_mistakes"] = database.get_recent_failed_reviews_summary(ticker_finnhub, limit=3)
+        ai_res = ai_advisor_instance.evaluate_signal(pair_name, payload, c_macro, c_mid, c_micro)
+    else:
+        ai_res = {"decision": "YES", "confidence": 7, "suggested_expiration": exp_time, "reason": "ШІ вимкнено"}
+
+    if ai_res.get("decision", "YES") != "YES" or ai_res.get("confidence", 6) < (6 if auto_mode else 5):
+        return False, f"ШІ відхилив: {ai_res.get('reason', '')}"
+
+    # ШІ може коригувати експірацію лише в межах діапазону цього ТФ
+    ai_exp = int(max(lo, min(hi, int(ai_res.get("suggested_expiration", exp_time)))))
+
+    # Ціна входу — реальна ціна в момент відправки, а не ціна закриття свічки
+    entry_price = get_live_price(ticker_finnhub) or cand["current_price"]
+    entry_price = float(entry_price)
+
+    direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if cand["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
+    risk_badge = "🔴 Новинний ризик" if news_is_bad else "🟢 Ринок стабільний"
+    if ml_filter.is_active:
+        ml_badge = f"{make_progress_bar(win_probability)} {win_probability:.1f}%"
+    else:
+        ml_badge = "нейтральна (збір даних)"
+    ai_conf = ai_res.get("confidence", 6)
+    ai_badge = f"{make_progress_bar(ai_conf * 10)} {ai_conf}/10"
+    conf_txt = ", ".join(cand.get("confirmation_names", []))
+
+    msg_text = (
+        f"🎯 <b>[ {pair_name} ] ─── {direction_icon}</b>\n"
+        f"──────────────────────────────────────\n"
+        f"⏳ Експірація:  ⏱ <b>{ai_exp} хв</b> (ТФ сигналу: <b>{tf}</b>)\n"
+        f"📍 Ціна входу:  <b>{entry_price:.5f}</b>\n"
+        f"📊 ML-Прогноз:  <b>{ml_badge}</b>\n"
+        f"🤖 Оцінка ШІ:   <b>{ai_badge}</b>\n"
+        f"🌐 Режим ринку: ⚡ <b>{regime}</b>\n"
+        f"✅ Підтверджень: <b>{cand['confirmations']}</b> — <i>{clean_ai_html(conf_txt)}</i>\n"
+        f"──────────────────────────────────────\n"
+        f"📋 Стратегія:   <b>{payload['strategy_title']}</b>\n"
+        f"💡 Причина:      <i>{clean_ai_html(ai_res.get('reason', ''))}</i>\n"
+        f"🌐 Сесія: {session_str} | Статус: {risk_badge}"
+    )
+
+    keyboard_markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⚙️ Змінити актив", callback_data="change_pair"),
+        InlineKeyboardButton("📊 Статистика пари", callback_data=f"pair_stats_{pair_name}"),
+    ]])
+
+    sent_msg_id = status_msg_id
+    if status_msg_id:
+        try:
+            bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup)
+        except Exception:
+            sent_msg_id = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup).message_id
+    else:
+        sent_msg_id = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup).message_id
+
+    sig_id = database.save_signal(
+        chat_id=chat_id, message_id=sent_msg_id, ticker=ticker_finnhub,
+        signal_type=cand["signal"], entry_price=entry_price, primary_tf=tf,
+        score=cand["confirmations"], expiration_mins=ai_exp, message_text=msg_text,
+        timestamp_str=get_utc_now().strftime("%Y-%m-%d %H:%M:%S"),
+        rsi=cand.get("rsi"), adx=cand.get("adx"), bb_width=cand.get("bb_width"),
+        session_code=s_code, hour=s_hour, divergence=cand.get("divergence", "NONE"),
+        dist_pivot=cand.get("dist_pivot"), volatility_ratio=cand.get("volatility_ratio"),
+        wick_ratio=cand.get("wick_ratio"), ema_dist=cand.get("ema_dist"),
+        strategy=cand.get("strategy"),
+    )
+    signal_gate.register(cand, ai_exp)
+    if sig_id:
+        schedule_signal_timer(sig_id, get_utc_now(), ai_exp)
+    return True, "OK"
 
 
 def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, status_msg_id=None):
@@ -440,125 +579,38 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
                 except Exception:
                     pass
 
-        if df_1m is None or df_1m.empty or len(df_1m) < 10:
+        if df_1m is None or df_1m.empty or len(df_1m) < 30:
             report_no_signal("Недостатньо даних котирувань.")
             return False
 
-        analysis = analyzer.analyze_all_timeframes(df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name=pair_name, strategies_status=strategies_status)
-        
-        strat_title = analysis.get("strategy_title", "")
-        signal_type_engine = analysis.get("signal_type_engine", "trend_multi")
-
-        is_valid, reason_val = validate_signal_conditions(analysis)
-        if not is_valid:
-            report_no_signal(reason_val)
-            return False
-
-        session_str, s_code, s_hour = get_current_session_info()
-        win_probability = ml_filter.predict_proba(analysis)
-
-        if ML_FILTER_ENABLED:
-            min_ml = 53.0 if auto_mode else 44.0
-            if win_probability < min_ml:
-                report_no_signal(f"ML-модель оцінила ймовірність у {win_probability:.1f}%")
-                return False
-
-        is_pivot_ok, pivot_reason = check_pivot_level_proximity(analysis)
-        if not is_pivot_ok:
-            report_no_signal(f"Невдале розташування відносно рівнів: {pivot_reason}")
-            return False
-
-        exp_time = calculate_dynamic_expiration(analysis)
-        regime = analysis.get("regime", "RANGE_BOUND")
-        dyn_thresh = analysis.get("dyn_threshold", 2.3)
-
-        payload = {
-            "signal": analysis.get("signal"),
-            "strategy": analysis.get("strategy", "QUANTUM_MATRIX"),
-            "strategy_title": strat_title,
-            "confluence_count": analysis.get("confluence_count", 1),
-            "current_price": analysis.get("current_price"),
-            "rsi": analysis.get("rsi"),
-            "adx": analysis.get("adx"),
-            "reason": analysis.get("reason"),
-            "suggested_exp": exp_time,
-        }
-
-        ai_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
-        if ai_key:
-            c_macro = create_chart_image(df_1h, f"{pair_name} - 1H", tf_label="1H")
-            c_mid = create_chart_image(df_15m, f"{pair_name} - 15M", tf_label="15M")
-            c_micro = create_chart_image(df_1m, f"{pair_name} - 1M", tf_label="1M")
-            
-            recent_mistakes = database.get_recent_failed_reviews_summary(pair_name, limit=3)
-            payload["recent_mistakes"] = recent_mistakes
-
-            ai_res = ai_advisor_instance.evaluate_signal(pair_name, payload, c_macro, c_mid, c_micro)
-        else:
-            ai_res = {"decision": "YES", "confidence": 7, "suggested_expiration": exp_time, "reason": "ШІ вимкнено"}
-
-        if ai_res.get("decision", "YES") != "YES" or ai_res.get("confidence", 6) < (6 if auto_mode else 5):
-            report_no_signal(f"ШІ відхилив сигнал: {ai_res.get('reason', '')}")
-            return False
-
-        ai_exp = ai_res.get("suggested_expiration", exp_time)
-        
-        direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if payload["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
-        risk_badge = "🔴 Новинний ризик" if news_is_bad else "🟢 Ринок стабільний"
-        
-        ml_badge = f"{make_progress_bar(win_probability)} {win_probability:.1f}%"
-        ai_conf = ai_res.get('confidence', 6)
-        ai_badge = f"{make_progress_bar(ai_conf * 10)} {ai_conf}/10"
-
-        msg_text = (
-            f"🎯 <b>[ {pair_name} ] ─── {direction_icon}</b>\n"
-            f"──────────────────────────────────────\n"
-            f"⏳ Експірація:  ⏱ <b>{ai_exp} хв</b> (Адаптивна)\n"
-            f"📍 Ціна входу:  <b>{payload['current_price']:.5f}</b>\n"
-            f"📊 ML-Прогноз:  <b>{ml_badge}</b>\n"
-            f"🤖 Оцінка ШІ:   <b>{ai_badge}</b>\n"
-            f"🌐 Режим ринку: ⚡ <b>{regime}</b>\n"
-            f"──────────────────────────────────────\n"
-            f"📋 Стратегія:   <b>{payload['strategy_title']}</b>\n"
-            f"💡 Причина:      <i>{clean_ai_html(ai_res.get('reason', ''))}</i>\n"
-            f"🌐 Сесія: {session_str} | Статус: {risk_badge}"
+        frames = {"1d": df_daily, "1h": df_1h, "15m": df_15m, "5m": df_5m, "3m": df_3m, "1m": df_1m}
+        candidates, rejections = generate_candidates(
+            pair_name, frames, get_utc_now(), strategies_status=strategies_status,
+            max_age_sec=None if auto_mode else 300,
         )
 
-        keyboard_markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("⚙️ Змінити актив", callback_data="change_pair"),
-                InlineKeyboardButton("📊 Статистика пари", callback_data=f"pair_stats_{pair_name}")
-            ]
-        ])
+        reasons = [f"{tf}: {r}" for tf, r in rejections.items()]
+        sent = 0
+        status_id = status_msg_id
+        for cand in candidates:
+            ok, why = process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mode, status_id, news_is_bad)
+            if ok:
+                sent += 1
+                status_id = None  # перше повідомлення редагує статус, решта — нові
+            else:
+                reasons.append(f"{cand['tf']}: {why}")
 
-        sent_msg_id = status_msg_id
-        if status_msg_id:
-            try:
-                bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup)
-            except Exception:
-                sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup)
-                sent_msg_id = sent_msg.message_id
-        else:
-            sent_msg = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup)
-            sent_msg_id = sent_msg.message_id
-
-        sig_id = database.save_signal(
-            chat_id=chat_id, message_id=sent_msg_id, ticker=ticker_finnhub,
-            signal_type=payload["signal"], entry_price=payload["current_price"],
-            expiration_mins=ai_exp, message_text=msg_text,
-            timestamp_str=get_utc_now().strftime("%Y-%m-%d %H:%M:%S"),
-            rsi=payload.get("rsi"), adx=payload.get("adx"), strategy=payload.get("strategy")
-        )
-        schedule_signal_timer(sig_id, get_utc_now(), ai_exp)
-        return True
+        if sent == 0:
+            report_no_signal(" | ".join(reasons) if reasons else "Сигнал відсутній")
+        return sent > 0
     except Exception as e:
         logger.exception(f"Помилка аналізу {pair_name}: {e}")
         if status_msg_id:
             try:
                 bot.edit_message_text(
-                    chat_id=chat_id, 
-                    message_id=status_msg_id, 
-                    text=f"❌ <b>Помилка аналізу <code>{pair_name}</code></b>\n\n💡 <i>Деталі: {str(e)}</i>", 
+                    chat_id=chat_id,
+                    message_id=status_msg_id,
+                    text=f"❌ <b>Помилка аналізу <code>{pair_name}</code></b>\n\n💡 <i>Деталі: {str(e)}</i>",
                     parse_mode="HTML"
                 )
             except Exception:
@@ -686,7 +738,7 @@ def handle_message(update, context):
             update.message.reply_text("🔴 Авто-сканер ВИМКНЕНО.")
         else:
             AUTO_SCAN_CHATS.add(chat_id)
-            update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО (кожні 1.5 хв).")
+            update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО (щохвилини, ТФ: 1m/3m/5m/15m).")
     elif text in ["🤖 ML-Модель: ВКЛ", "🤖 ML-Модель: ВИКЛ", "🟢 ML-фільтр: ВКЛ", "🔴 ML-фільтр: ВИКЛ"]:
         global ML_FILTER_ENABLED
         ML_FILTER_ENABLED = not ML_FILTER_ENABLED
@@ -710,7 +762,7 @@ def handle_message(update, context):
             "──────────────────────────────────────\n"
             f"🏆 Загальний вінрейт: <b>{winrate:.1f}%</b>  [{stats.get('wins', 0)} WIN / {stats.get('losses', 0)} LOSS]\n"
             f"🎯 Угод у базі даних: <b>{stats.get('total', 0)} угод</b>\n"
-            f"⚡ Активна ML-модель: <b>XGBoost v2.4 (Активна)</b>\n"
+            f"⚡ ML-фільтр: <b>{ml_filter.status_line()}</b>\n"
             "──────────────────────────────────────\n"
             "Оберіть зріз аналітики для деталізації:"
         )
@@ -878,7 +930,7 @@ def handle_callback(update, context):
             "──────────────────────────────────────\n"
             f"🏆 Загальний вінрейт: <b>{winrate:.1f}%</b>  [{stats.get('wins', 0)} WIN / {stats.get('losses', 0)} LOSS]\n"
             f"🎯 Угод у базі даних: <b>{stats.get('total', 0)} угод</b>\n"
-            f"⚡ Активна ML-модель: <b>XGBoost v2.4 (Активна)</b>\n"
+            f"⚡ ML-фільтр: <b>{ml_filter.status_line()}</b>\n"
             "──────────────────────────────────────\n"
             "Оберіть зріз аналітики для деталізації:"
         )
