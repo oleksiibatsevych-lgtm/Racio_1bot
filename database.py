@@ -105,6 +105,9 @@ def init_db():
             """
         )
 
+        # після аварійного перезапуску повертаємо «зависші» сигнали в чергу
+        cursor.execute("UPDATE signals SET status = 'PENDING' WHERE status = 'PROCESSING';")
+
         conn.commit()
         cursor.close()
         conn.close()
@@ -329,6 +332,67 @@ def get_detailed_pair_strategy_stats(ticker_filter=None, strategy_filter=None):
     except Exception as e:
         logger.error(f"⚠️ Помилка вибірки деталізованої статистики: {e}")
         return []
+
+
+def get_segment_stats():
+    """Статистика сегментів «пара × ТФ × стратегія» для SegmentFilter."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            SELECT ticker,
+                   COALESCE(primary_tf, '1m') AS tf,
+                   COALESCE(strategy, 'QUANTUM_MATRIX') AS strategy,
+                   COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE result = 'WIN') AS wins
+            FROM signals
+            WHERE result IN ('WIN', 'LOSS')
+            GROUP BY ticker, COALESCE(primary_tf, '1m'), COALESCE(strategy, 'QUANTUM_MATRIX');
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"⚠️ Помилка статистики сегментів: {e}")
+        return []
+
+
+def claim_signal(signal_id) -> bool:
+    """
+    Атомарно переводить PENDING -> PROCESSING. Повертає True лише одному викликачу,
+    тож таймер і фоновий checker не оброблять один сигнал двічі.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE signals SET status = 'PROCESSING' WHERE id = %s AND status = 'PENDING' RETURNING id;",
+            (signal_id,),
+        )
+        got = cursor.fetchone() is not None
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return got
+    except Exception as e:
+        logger.error(f"⚠️ Помилка claim_signal: {e}")
+        return False
+
+
+def release_signal(signal_id):
+    """Повертає PROCESSING -> PENDING (якщо ціну закриття отримати не вдалося)."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE signals SET status = 'PENDING' WHERE id = %s AND status = 'PROCESSING';", (signal_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка release_signal: {e}")
 
 
 def get_pair_strategy_status(pair_name: str, strategy_key: str) -> bool:
