@@ -18,16 +18,34 @@ def calculate_dynamic_expiration(analysis_dict: dict) -> int:
     return calculate_smart_expiration(base_exp, regime, volatility_ratio)
 
 
-def check_pivot_level_proximity(analysis_dict: dict, threshold_pct: float = 0.0004) -> tuple[bool, str]:
+def check_pivot_level_proximity(analysis_dict: dict, threshold_pct: float = 0.00025) -> tuple[bool, str]:
     """
-    Перевірка відстані ціни до ключових Pivot або круглих рівнів.
+    Блокує вхід, якщо ціна впритул до рівня, що стоїть НА ШЛЯХУ угоди:
+    CALL — рівень (R1/R2/P) трохи вище ціни; PUT — рівень (S1/S2/P) трохи нижче.
+    Сигнали ВІД рівня (відбій) не блокуються.
+    Стратегії відбою (PRICE_LEVELS, RANGE_CORRIDOR) та CHAOS-sweep пропускаються.
     """
     if not isinstance(analysis_dict, dict):
         return True, "OK"
-    
-    dist_pivot = float(analysis_dict.get("dist_pivot", 0.01))
-    if dist_pivot < threshold_pct:
-        return True, f"Ціна у безпосередній близькості до рівня ({dist_pivot*100:.3f}%)"
+
+    if str(analysis_dict.get("strategy", "")) in ("PRICE_LEVELS", "RANGE_CORRIDOR"):
+        return True, "OK"
+
+    price = float(analysis_dict.get("current_price", 0) or 0)
+    pivots = analysis_dict.get("pivots") or {}
+    direction = str(analysis_dict.get("signal", "NONE"))
+    if price <= 0 or direction not in ("CALL", "PUT") or not pivots:
+        return True, "OK"
+
+    levels = [float(v) for v in pivots.values() if v and float(v) > 0]
+    if direction == "CALL":
+        ahead = [lv for lv in levels if lv > price and (lv - price) / price < threshold_pct]
+    else:
+        ahead = [lv for lv in levels if lv < price and (price - lv) / price < threshold_pct]
+
+    if ahead:
+        nearest = min(ahead, key=lambda lv: abs(lv - price))
+        return False, f"Рівень {nearest:.5f} впритул на шляху ціни ({direction})"
     return True, "OK"
 
 
