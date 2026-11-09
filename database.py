@@ -334,6 +334,29 @@ def get_detailed_pair_strategy_stats(ticker_filter=None, strategy_filter=None):
         return []
 
 
+EXPORT_COLUMNS = [
+    "id", "timestamp_str", "ticker", "signal_type", "strategy", "primary_tf", "expiration_mins", "score",
+    "entry_price", "exit_price", "pips", "result", "rsi", "adx", "bb_width", "session_code", "hour",
+    "divergence", "dist_pivot", "volatility_ratio", "wick_ratio", "ema_dist",
+]
+
+
+def export_resolved_signals():
+    """Усі завершені угоди (без важких текстових полів) для зовнішнього аналізу."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT " + ", ".join(EXPORT_COLUMNS) +
+            " FROM signals WHERE result IN ('WIN', 'LOSS', 'NEUTRAL') ORDER BY id ASC;"
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return EXPORT_COLUMNS, rows
+    finally:
+        conn.close()
+
+
 def get_segment_stats():
     """Статистика сегментів «пара × ТФ × стратегія» для SegmentFilter."""
     try:
@@ -395,10 +418,21 @@ def release_signal(signal_id):
         logger.error(f"⚠️ Помилка release_signal: {e}")
 
 
+_STATUS_CACHE = {}
+_STATUS_TTL_SEC = 60
+
+
 def get_pair_strategy_status(pair_name: str, strategy_key: str) -> bool:
     """
     Перевіряє, чи активна конкретна стратегія для конкретної пари. За замовчуванням True.
+    Результат кешується на 60 с: рушій викликає це багато разів на хвилину, а кожен виклик
+    без кешу відкривав нове з'єднання з БД.
     """
+    key = (pair_name, strategy_key)
+    hit = _STATUS_CACHE.get(key)
+    if hit and time.time() - hit[0] < _STATUS_TTL_SEC:
+        return hit[1]
+    value = True
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -410,10 +444,11 @@ def get_pair_strategy_status(pair_name: str, strategy_key: str) -> bool:
         cursor.close()
         conn.close()
         if row is not None:
-            return bool(row[0])
-        return True
+            value = bool(row[0])
     except Exception:
-        return True
+        value = True
+    _STATUS_CACHE[key] = (time.time(), value)
+    return value
 
 
 def set_pair_strategy_status(pair_name: str, strategy_key: str, is_active: bool):
@@ -432,6 +467,7 @@ def set_pair_strategy_status(pair_name: str, strategy_key: str, is_active: bool)
             """,
             (pair_name, strategy_key, is_active)
         )
+        _STATUS_CACHE[(pair_name, strategy_key)] = (time.time(), bool(is_active))
         conn.commit()
         cursor.close()
         conn.close()
