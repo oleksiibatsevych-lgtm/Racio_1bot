@@ -49,6 +49,7 @@ from filters import (
 )
 from calendar_filter import is_high_impact_news_time
 from signal_pipeline import generate_candidates
+import tick_candles
 from quality_gate import SignalGate, SegmentFilter
 from timeframe_profiles import PROFILES, ACTIVE_PROFILES
 from backtest import (
@@ -223,7 +224,12 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
     df_1m = fetch_finnhub_candles(ticker_finnhub, resolution="1", count_candles=1500)
     if df_1m.empty and ticker_yahoo:
         df_1m = fetch_yahoo_fallback(ticker_yahoo, interval="1m", range_period="5d")
-    if df_1m.empty:
+    # Yahoo інколи відстає на десятки хвилин — добудовуємо свіжі свічки з живих тиків Finnhub WS
+    try:
+        df_1m = tick_candles.merge_with_history(ticker_finnhub, df_1m)
+    except Exception as e:
+        logger.warning(f"tick_candles merge failed for {ticker_finnhub}: {e}")
+    if df_1m is None or df_1m.empty:
         return None, None, None, None, None, None
 
     df_3m = resample_candles(df_1m, "3min")
@@ -344,7 +350,7 @@ def process_signal_expiration(sig_id):
         
         report_str = (
             f"\n──────────────────────────────────────\n"
-            f"🏁 <b>РЕЗУЛЬТАТ УГОДИ: {res_icon} (<code>{pips_str}</code> pips)</b>\n"
+            f"🏁 <b>РЕЗУЛЬТАТ УГОДИ: {res_icon} (<code>{pips_str}</code> пунктів ≈ {pips / 10:+.1f} піпса)</b>\n"
             f"📍 Вхід: {entry_price:.5f} ➔ 🏁 Закриття: {exit_price:.5f}"
         )
         
@@ -361,7 +367,7 @@ def process_signal_expiration(sig_id):
                 try:
                     bot.send_message(
                         chat_id=sig_data["chat_id"], 
-                        text=f"🏁 <b>Результат угоди #{sig_id}:</b>\n{res_icon} (<code>{pips_str}</code> п.)", 
+                        text=f"🏁 <b>Результат угоди #{sig_id}:</b>\n{res_icon} (<code>{pips_str}</code> пунктів ≈ {pips / 10:+.1f} піпса)", 
                         parse_mode="HTML", 
                         reply_markup=keyboard
                     )
@@ -636,6 +642,29 @@ def run_mass_analysis(chat_id):
                 logger.error(f"Помилка в масовому аналізі: {ex}")
 
     bot.send_message(chat_id=chat_id, text="✅ Масовий аналіз завершено!" if found else "✅ Аналіз завершено. Сигналів не знайдено.")
+
+
+def handle_export_command(update, context):
+    """/export — надсилає CSV з усіма завершеними угодами для аналізу."""
+    import csv
+    try:
+        columns, rows = database.export_resolved_signals()
+        if not rows:
+            update.message.reply_text("📭 Завершених угод у базі ще немає.")
+            return
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(columns)
+        writer.writerows(rows)
+        data = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+        data.name = "signals_export.csv"
+        update.message.reply_document(
+            document=data, filename="signals_export.csv",
+            caption=f"📤 Експорт: {len(rows)} завершених угод.",
+        )
+    except Exception as e:
+        logger.exception(f"Помилка експорту: {e}")
+        update.message.reply_text(f"❌ Помилка експорту: {e}")
 
 
 def handle_backtest_command(update, context):
@@ -984,6 +1013,7 @@ if __name__ == "__main__":
     updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
     updater.dispatcher.add_handler(CommandHandler("start", start))
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
+    updater.dispatcher.add_handler(CommandHandler("export", handle_export_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
     logger.info("🚀 Квантовий бот із оновленими модулями запущено!")
