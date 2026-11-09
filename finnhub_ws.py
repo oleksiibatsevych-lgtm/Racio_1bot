@@ -5,6 +5,7 @@ import threading
 import time
 import websocket
 from config import FINNHUB_API_KEY, FINNHUB_TOKEN, PAIRS_MAP
+import tick_candles
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ def on_message(ws, message):
                 price = item.get("p")
                 if sym and price:
                     live_prices[sym] = float(price)
+                    tick_candles.add_tick(sym, price, item.get("t"))
     except Exception as e:
         logger.error(f"⚠️ Помилка обробки WS повідомлення: {e}")
 
