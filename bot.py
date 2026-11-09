@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -511,7 +513,10 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
     else:
         ml_badge = "нейтральна (збір даних)"
     ai_conf = ai_res.get("confidence", 6)
-    ai_badge = f"{make_progress_bar(ai_conf * 10)} {ai_conf}/10"
+    if ai_res.get("ai_available", True):
+        ai_badge = f"{make_progress_bar(ai_conf * 10)} {ai_conf}/10"
+    else:
+        ai_badge = "недоступний (оцінку не застосовано)"
     conf_txt = ", ".join(cand.get("confirmation_names", []))
 
     msg_text = (
@@ -665,6 +670,45 @@ def handle_export_command(update, context):
     except Exception as e:
         logger.exception(f"Помилка експорту: {e}")
         update.message.reply_text(f"❌ Помилка експорту: {e}")
+
+
+LAB_PROC = None
+
+
+def handle_lab_run_command(update, context):
+    """/lab_run — запускає лабораторію у фоні (скачує 1m-історію і перевіряє ~640 конфігурацій)."""
+    global LAB_PROC
+    if LAB_PROC is not None and LAB_PROC.poll() is None:
+        update.message.reply_text("⏳ Лабораторія вже працює. Результат: /lab")
+        return
+    base = os.path.dirname(os.path.abspath(__file__))
+    try:
+        log = open(os.path.join(base, "lab.log"), "w")
+        LAB_PROC = subprocess.Popen(["nice", "-n", "19", sys.executable, "lab.py", "--download"],
+                                    cwd=base, stdout=log, stderr=subprocess.STDOUT)
+        update.message.reply_text("🧪 Лабораторію запущено у фоні (зазвичай 2–5 хв). Коли завершиться, надішліть /lab")
+    except Exception as e:
+        update.message.reply_text(f"❌ Не вдалося запустити лабораторію: {e}")
+
+
+def handle_lab_command(update, context):
+    """/lab — надсилає останній звіт лабораторії."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    if LAB_PROC is not None and LAB_PROC.poll() is None:
+        update.message.reply_text("⏳ Лабораторія ще рахує, спробуйте через хвилину.")
+        return
+    path = os.path.join(base, "lab_summary.txt")
+    if not os.path.exists(path):
+        update.message.reply_text("📭 Звіту ще немає. Запустіть /lab_run")
+        return
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    for i in range(0, len(text), 3500):
+        update.message.reply_text(text[i:i + 3500])
+    csv_path = os.path.join(base, "lab_report.csv")
+    if os.path.exists(csv_path):
+        with open(csv_path, "rb") as f:
+            update.message.reply_document(document=f, filename="lab_report.csv", caption="Повний звіт по всіх конфігураціях")
 
 
 def handle_backtest_command(update, context):
@@ -1014,6 +1058,8 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("start", start))
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(CommandHandler("export", handle_export_command))
+    updater.dispatcher.add_handler(CommandHandler("lab_run", handle_lab_run_command))
+    updater.dispatcher.add_handler(CommandHandler("lab", handle_lab_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
     logger.info("🚀 Квантовий бот із оновленими модулями запущено!")
