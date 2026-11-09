@@ -127,9 +127,13 @@ def generate_candidates(pair_name: str, frames: dict, now: datetime,
         # свіжість останньої закритої свічки
         bar_end = p_df.index[-1] + timedelta(minutes=prof["minutes"])
         age = (now - bar_end).total_seconds()
-        limit = max_age_sec if max_age_sec is not None else min(prof["minutes"] * 60, 90)
+        limit = max_age_sec if max_age_sec is not None else prof.get("max_age_sec", 150)
         if require_fresh and age > limit:
-            rejections[pkey] = f"свічка застаріла ({int(age)}с > {int(limit)}с)"
+            if age > 600:
+                rejections[pkey] = (f"котирування відстають на ~{int(age // 60)} хв "
+                                    f"(джерело даних не оновлюється для цієї пари)")
+            else:
+                rejections[pkey] = f"свічка застаріла ({int(age)}с > {int(limit)}с)"
             continue
 
         try:
