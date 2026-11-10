@@ -86,7 +86,10 @@ def count_confirmations(direction: str, strategy: str, global_trend: str,
                 hits.append("Старший ТФ не проти відбою")
     else:
         # за трендом / пробій
-        if global_trend == want:
+        if strategy == "TREND_IMPULSE":
+            if _slope_ok(ind_mid, direction):
+                hits.append("EMA20 старшого ТФ за сигналом")
+        elif global_trend == want:
             hits.append("Глобальний тренд (EMA200 1H) за сигналом")
         if _slope_ok(ind_confirm, direction):
             hits.append("EMA20 підтверджуючого ТФ за сигналом")

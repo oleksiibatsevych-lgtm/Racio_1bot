@@ -84,7 +84,7 @@ CACHE_TTL = 900
 AUTO_SCAN_CHATS = set()
 ML_FILTER_ENABLED = True
 signal_gate = SignalGate()
-segment_filter = SegmentFilter(database, break_even=0.50, min_trades=40)
+segment_filter = SegmentFilter(database, break_even=0.54, min_trades=40)
 
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
 

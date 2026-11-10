@@ -202,15 +202,20 @@ class AdaptiveTechnicalAnalysis:
         # 1. КЛАСТЕР: TREND_IMPULSE (Виключно за трендом на відкатах до EMA/VWAP)
         is_trend_active = strategies_status.get("trend_multi", True) and database.get_pair_strategy_status(pair_name, "trend_multi")
         if is_trend_active and regime != "CHAOS":
-            if global_trend == "BULLISH":
+            mid_trend = self.get_trend(df_15m, span_val=50)
+            confirm_trend = self.get_trend(df_3m, span_val=50)
+            previous = df_1m.iloc[-2]
+            previous_ema = float(previous.get('ema_20', previous['close']))
+            previous_vwap = float(previous.get('vwap', previous['close']))
+            if global_trend == mid_trend == confirm_trend == "BULLISH":
                 # Відкат до EMA20 або VWAP під час висхідного тренду
-                if (current_price <= ema_20_val * 1.0005 or current_price <= vwap_val * 1.0005) and rsi_1m > 38 and rsi_1m < upper_rsi:
+                if (previous['low'] <= previous_ema * 1.0005 or previous['low'] <= previous_vwap * 1.0005) and current_price > last_1m['open'] and current_price > ema_20_val and rsi_1m > 38 and rsi_1m < upper_rsi:
                     call_score += 2.5 * w_trend
                     reasons.append("Trend Pullback Continuation (BULLISH EMA/VWAP)")
                     active_strategies_hit.append("TREND_IMPULSE")
-            elif global_trend == "BEARISH":
+            elif global_trend == mid_trend == confirm_trend == "BEARISH":
                 # Відкат до EMA20 або VWAP під час спадного тренду
-                if (current_price >= ema_20_val * 0.9995 or current_price >= vwap_val * 0.9995) and rsi_1m < 62 and rsi_1m > lower_rsi:
+                if (previous['high'] >= previous_ema * 0.9995 or previous['high'] >= previous_vwap * 0.9995) and current_price < last_1m['open'] and current_price < ema_20_val and rsi_1m < 62 and rsi_1m > lower_rsi:
                     put_score += 2.5 * w_trend
                     reasons.append("Trend Pullback Continuation (BEARISH EMA/VWAP)")
                     active_strategies_hit.append("TREND_IMPULSE")
@@ -219,11 +224,11 @@ class AdaptiveTechnicalAnalysis:
         is_range_active = strategies_status.get("flat_corridor", True) and database.get_pair_strategy_status(pair_name, "flat_corridor")
         if is_range_active and regime in ["RANGE_BOUND", "TREND_EXHAUSTION"]:
             if (last_1m['close'] <= last_1m['bb_lower'] or z_score <= -1.8) and (rsi_1m < lower_rsi or divergence == "BULLISH"):
-                call_score += 2.2 * w_bb
+                call_score += 2.4 * w_bb
                 reasons.append(f"Range Corridor Bounce (BB Lower / RSI Div: {divergence})")
                 active_strategies_hit.append("RANGE_CORRIDOR")
             elif (last_1m['close'] >= last_1m['bb_upper'] or z_score >= 1.8) and (rsi_1m > upper_rsi or divergence == "BEARISH"):
-                put_score += 2.2 * w_bb
+                put_score += 2.4 * w_bb
                 reasons.append(f"Range Corridor Bounce (BB Upper / RSI Div: {divergence})")
                 active_strategies_hit.append("RANGE_CORRIDOR")
 
@@ -321,7 +326,7 @@ class AdaptiveTechnicalAnalysis:
 
     def analyze_all_timeframes(self, df_daily, df_1h, df_15m, df_5m, df_3m, df_1m, pair_name="EUR/USD", strategies_status=None) -> dict:
         global_trend = self.get_trend(df_1h, span_val=200)
-        pivots = self.calculate_pivots(df_1h)
+        pivots = self.calculate_pivots(df_daily if df_daily is not None and not df_daily.empty and len(df_daily) >= 2 else df_1h)
         
         df_ind_1m = self.calculate_indicators(df_1m) if df_1m is not None and not df_1m.empty else pd.DataFrame()
         df_ind_3m = self.calculate_indicators(df_3m) if df_3m is not None and not df_3m.empty else pd.DataFrame()

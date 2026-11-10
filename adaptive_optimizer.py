@@ -89,5 +89,6 @@ def get_strategy_adaptive_weight(pair_name: str, strategy_name: str) -> float:
     if "Mean Reversion" in strategy_name or "Bounce" in strategy_name or "RANGE_CORRIDOR" in strategy_name:
         if "EUR/USD" in pair_name or "USD/CHF" in pair_name or pair_name in choppy_pairs:
             return 1.15  # Мажори та флетові пари краще відпрацьовують відбої
+        return 1.1
 
     return 1.0
