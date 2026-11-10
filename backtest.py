@@ -11,7 +11,6 @@
     беззбитковий рівень при виплаті 85%.
 """
 import os
-import json
 import logging
 from datetime import timedelta
 
@@ -22,6 +21,11 @@ from signal_pipeline import generate_candidates
 from filters import check_pivot_level_proximity, validate_signal_conditions
 from quality_gate import SignalGate, wilson_bounds
 from timeframe_profiles import PROFILES, ACTIVE_PROFILES
+from reversion_engine import (
+    PRESETS, CONFLUENCE_KEYS, is_reversion, load_strategy_config, candidates_from_indicators,
+    calculate_indicators as reversion_indicators,
+)
+import database
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +90,56 @@ def load_macro(pair_name: str):
 
 def load_strategy_settings():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategies_config.json")
-    if not os.path.exists(path):
-        return {}
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    return load_strategy_config(path)
+
+
+def _record_trade(pair_name, cand, now, prices, trades, gate, open_reversions):
+    strategy = cand.get("strategy", "?")
+    reversion = is_reversion(cand)
+    if reversion and open_reversions.get(strategy, now) > now:
+        return
+    exp = cand["suggested_exp"]
+    exit_time = now + timedelta(minutes=exp)
+    if now not in prices.index or exit_time not in prices.index:
+        return
+    if not gate.check(cand, now_ts=now.timestamp())[0]:
+        return
+    gate.register(cand, exp, now_ts=now.timestamp())
+    if reversion:
+        open_reversions[strategy] = exit_time
+    entry = float(prices.loc[now, "open"])
+    exit_p = float(prices.loc[exit_time, "open"])
+    if exit_p == entry:
+        return
+    win = (exit_p > entry) if cand["signal"] == "CALL" else (exit_p < entry)
+    trades.append({
+        "pair": pair_name, "tf": cand["tf"], "strategy": strategy,
+        "signal": cand["signal"], "exp": exp, "win": bool(win),
+        "confirmations": cand["confirmations"], "regime": cand.get("regime", ""),
+        "entry_time": now, "exit_time": exit_time,
+    })
+
+
+def simulate_reversion_pair(pair_name, df_5m, strategies_status=None, start=None, end=None,
+                            pair_enabled=None):
+    """Повна 5m-історія для прогріву; точні open входу/експірації, без перекриття пресету."""
+    settings = load_strategy_settings() if strategies_status is None else strategies_status
+    indicators = reversion_indicators(df_5m)
+    trades, open_reversions = [], {}
+    gate = SignalGate()
+    for i in range(200, len(indicators)):
+        now = indicators.index[i] + timedelta(minutes=5)
+        if start is not None and now < start:
+            continue
+        if end is not None and now >= end:
+            break
+        candidates = candidates_from_indicators(pair_name, indicators.iloc[:i + 1], now,
+                                                 settings, pair_enabled)
+        for cand in candidates:
+            if end is not None and now + timedelta(minutes=cand["suggested_exp"]) >= end:
+                continue
+            _record_trade(pair_name, cand, now, df_5m, trades, gate, open_reversions)
+    return trades
 
 
 def simulate_pair(pair_name: str, df_1m: pd.DataFrame, profiles=None, step_cap: int = 300,
@@ -101,9 +151,12 @@ def simulate_pair(pair_name: str, df_1m: pd.DataFrame, profiles=None, step_cap: 
     profiles = profiles or ACTIVE_PROFILES
     trades = []
     gate = SignalGate()
+    open_reversions = {}
     full_1h = df_1h if df_1h is not None else _resample(df_1m, "1h")
     daily = df_daily if df_daily is not None else _resample(df_1m, "1D")
     strategies_status = load_strategy_settings() if strategies_status is None else strategies_status
+    rev_indicators = reversion_indicators(_resample(df_1m, "5min"))
+    reversion_times = set()
     events = {}
     for pkey in profiles:
         prof = PROFILES[pkey]
@@ -117,6 +170,12 @@ def simulate_pair(pair_name: str, df_1m: pd.DataFrame, profiles=None, step_cap: 
 
         for bar_start in closes:
             events.setdefault(bar_start + timedelta(minutes=tfm), []).append(pkey)
+
+    if any(strategies_status.get(key, True) for key in PRESETS):
+        for bar_start in rev_indicators.index[200:]:
+            now = bar_start + timedelta(minutes=5)
+            reversion_times.add(now)
+            events.setdefault(now, [])
 
     for now, event_profiles in sorted(events.items()):
         if now not in df_1m.index:
@@ -136,32 +195,18 @@ def simulate_pair(pair_name: str, df_1m: pd.DataFrame, profiles=None, step_cap: 
             "1h": full_1h[full_1h.index + timedelta(hours=1) <= now],
             "1d": pd.concat([daily[daily.index < now.normalize()], current_day]),
         }
-        cands, _rej = generate_candidates(pair_name, frames, now, strategies_status, profiles=event_profiles)
+        cands = []
+        if event_profiles and any(strategies_status.get(key, True) for key in CONFLUENCE_KEYS):
+            cands, _rej = generate_candidates(pair_name, frames, now, strategies_status, profiles=event_profiles)
+        if now in reversion_times:
+            closed = rev_indicators.loc[rev_indicators.index + timedelta(minutes=5) <= now]
+            cands = candidates_from_indicators(pair_name, closed, now, strategies_status,
+                                               database.get_pair_strategy_status) + cands
         for cand in cands:
-            ok, _ = validate_signal_conditions(cand)
-            if not ok:
-                continue
-            ok, _ = check_pivot_level_proximity(cand)
-            if not ok:
-                continue
-            exp = cand["suggested_exp"]
-            exit_time = now + timedelta(minutes=exp)
-            if exit_time not in df_1m.index:
-                continue
-            ok, _ = gate.check(cand, now_ts=now.timestamp())
-            if not ok:
-                continue
-            gate.register(cand, exp, now_ts=now.timestamp())
-            entry = float(df_1m.loc[now, "open"])
-            exit_p = float(df_1m.loc[exit_time, "open"])
-            if exit_p == entry:
-                continue
-            win = (exit_p > entry) if cand["signal"] == "CALL" else (exit_p < entry)
-            trades.append({
-                "pair": pair_name, "tf": cand["tf"], "strategy": cand.get("strategy", "?"),
-                "signal": cand["signal"], "exp": exp, "win": bool(win),
-                "confirmations": cand["confirmations"], "regime": cand.get("regime", ""),
-            })
+            if not is_reversion(cand):
+                if not validate_signal_conditions(cand)[0] or not check_pivot_level_proximity(cand)[0]:
+                    continue
+            _record_trade(pair_name, cand, now, df_1m, trades, gate, open_reversions)
     return trades
 
 

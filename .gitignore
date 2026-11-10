@@ -1,0 +1,6 @@
+lab_report.csv
+lab_summary.txt
+lab_validated.json
+lab_data/
+ml_model.pkl
+__pycache__/

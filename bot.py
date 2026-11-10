@@ -51,6 +51,10 @@ from filters import (
 )
 from calendar_filter import is_high_impact_news_time
 from signal_pipeline import generate_candidates, build_closed_frames
+from reversion_engine import (
+    PRESETS, CONFLUENCE_KEYS, ReversionGuard, is_reversion, load_strategy_config,
+    generate_candidates as generate_reversion_candidates,
+)
 import tick_candles
 from quality_gate import SignalGate, SegmentFilter
 from timeframe_profiles import PROFILES, ACTIVE_PROFILES
@@ -94,6 +98,7 @@ CACHE_TTL = 900
 AUTO_SCAN_CHATS = set()
 ML_FILTER_ENABLED = True
 signal_gate = SignalGate()
+reversion_guard = ReversionGuard()
 segment_filter = SegmentFilter(database, break_even=0.54, min_trades=40)
 
 STRATEGIES_CONFIG_FILE = "strategies_config.json"
@@ -102,25 +107,14 @@ GROUPED_STRATEGIES = {
     "trend_multi": "🚀 TREND_IMPULSE (Тренд)",
     "flat_corridor": "📉 RANGE_CORRIDOR (Флет)",
     "price_action": "🕯️ PRICE_LEVELS (Price Action)",
-    "oscillators": "⚡ MICRO_BREAKOUT (Пробій)"
+    "oscillators": "⚡ MICRO_BREAKOUT (Пробій)",
+    "REV_RSI14": "↩️ REV_RSI14 (5m → 60 хв)",
+    "REV_BB3": "↩️ REV_BB3 (5m → 60 хв)",
+    "REV_RSI7": "↩️ REV_RSI7 (5m → 45 хв)",
 }
 
 def load_strategies_config():
-    default_cfg = {key: True for key in GROUPED_STRATEGIES.keys()}
-    if os.path.exists(STRATEGIES_CONFIG_FILE):
-        try:
-            with open(STRATEGIES_CONFIG_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-                for visible, legacy in (("price_action", "market_levels"), ("oscillators", "volume_volatility")):
-                    if visible not in saved and legacy in saved:
-                        saved[visible] = saved[legacy]
-                for k in default_cfg:
-                    if k not in saved:
-                        saved[k] = True
-                return saved
-        except Exception:
-            pass
-    return default_cfg
+    return load_strategy_config(STRATEGIES_CONFIG_FILE)
 
 def save_strategies_config(cfg):
     try:
@@ -463,15 +457,31 @@ def build_ml_features(cand, session_code, hour):
 
 
 def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mode, status_msg_id, news_is_bad):
+    if news_is_bad:
+        return False, "Пауза через новини"
+    if is_reversion(cand):
+        with reversion_guard.reserve(pair_name, cand["strategy"], ticker_finnhub,
+                                     database.has_open_reversion_signal) as (ok, reason):
+            if not ok:
+                return False, reason
+            return _process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames,
+                                      auto_mode, status_msg_id, news_is_bad)
+    return _process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames,
+                              auto_mode, status_msg_id, news_is_bad)
+
+
+def _process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mode, status_msg_id, news_is_bad):
     """
     Проганяє одного кандидата крізь фільтри та, якщо все ок, відправляє сигнал.
     Повертає (відправлено: bool, причина_відмови: str).
     """
     tf = cand["tf"]
     prof = PROFILES[tf]
-    is_valid, reason_val = validate_signal_conditions(cand)
-    if not is_valid:
-        return False, reason_val
+    reversion = is_reversion(cand)
+    if not reversion:
+        is_valid, reason_val = validate_signal_conditions(cand)
+        if not is_valid:
+            return False, reason_val
 
     session_str, s_code, s_hour = get_current_session_info()
 
@@ -483,19 +493,22 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
     if not ok:
         return False, why
 
-    features = build_ml_features(cand, s_code, s_hour)
-    win_probability = ml_filter.predict_proba(features)
-    if ML_FILTER_ENABLED and ml_filter.is_active:
+    win_probability = 0
+    if not reversion:
+        features = build_ml_features(cand, s_code, s_hour)
+        win_probability = ml_filter.predict_proba(features)
+    if not reversion and ML_FILTER_ENABLED and ml_filter.is_active:
         min_ml = cand["ml_min_auto"] if auto_mode else cand["ml_min_manual"]
         if win_probability < min_ml:
             return False, f"ML оцінила ймовірність у {win_probability:.1f}%"
 
-    is_pivot_ok, pivot_reason = check_pivot_level_proximity(cand)
-    if not is_pivot_ok:
-        return False, pivot_reason
+    if not reversion:
+        is_pivot_ok, pivot_reason = check_pivot_level_proximity(cand)
+        if not is_pivot_ok:
+            return False, pivot_reason
 
-    exp_time = cand["suggested_exp"]
-    lo, hi = cand["exp_range"]
+    exp_time = PRESETS[cand["strategy"]] if reversion else cand["suggested_exp"]
+    lo, hi = (exp_time, exp_time) if reversion else cand["exp_range"]
     regime = cand.get("regime", "RANGE_BOUND")
 
     payload = {
@@ -509,7 +522,7 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
 
     ai_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
     c_macro = c_mid = c_micro = None
-    if ai_key:
+    if ai_key and not reversion:
         closed = build_closed_frames(frames, get_utc_now())
         charts = []
         for label in payload["chart_tfs"]:
@@ -517,12 +530,14 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
             charts.append(create_chart_image(chart_df, f"{pair_name} - {label}", tf_label=label) if chart_df is not None and not chart_df.empty else None)
         c_macro, c_mid, c_micro = charts
         payload["recent_mistakes"] = database.get_recent_failed_reviews_summary(ticker_finnhub, limit=3)
-    ai_res = ai_advisor_instance.evaluate_signal(pair_name, payload, c_macro, c_mid, c_micro)
+    ai_res = (dict(decision="YES", confidence=0, ai_available=False, reason=cand["reason"])
+              if reversion else ai_advisor_instance.evaluate_signal(pair_name, payload, c_macro, c_mid, c_micro))
 
-    if ai_res.get("decision", "YES") != "YES" or ai_res.get("confidence", 6) < (6 if auto_mode else 5):
+    if not reversion and (ai_res.get("decision", "YES") != "YES" or ai_res.get("confidence", 6) < (6 if auto_mode else 5)):
         return False, f"ШІ відхилив: {ai_res.get('reason', '')}"
 
-    if (get_utc_now() - cand["bar_end"]).total_seconds() > prof["max_age_sec"] + 30:
+    age = (get_utc_now() - cand["bar_end"]).total_seconds()
+    if age < 0 or age > (180 if reversion else prof["max_age_sec"] + 30):
         return False, "Сигнал застарів під час перевірки ШІ"
     ok, why = signal_gate.check(cand)
     if not ok:
@@ -542,12 +557,16 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
 
     direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if cand["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
     risk_badge = "🔴 Новинний ризик" if news_is_bad else "🟢 Ринок стабільний"
-    if ml_filter.is_active:
+    if reversion:
+        ml_badge = "не застосовується (REV)"
+    elif ml_filter.is_active:
         ml_badge = f"{make_progress_bar(win_probability)} {win_probability:.1f}%"
     else:
         ml_badge = "нейтральна (збір даних)"
     ai_conf = ai_res.get("confidence", 6)
-    if ai_res.get("ai_available", True):
+    if reversion:
+        ai_badge = "не застосовується (фіксований пресет)"
+    elif ai_res.get("ai_available", True):
         ai_badge = f"{make_progress_bar(ai_conf * 10)} {ai_conf}/10"
     else:
         ai_badge = "недоступний (оцінку не застосовано)"
@@ -556,7 +575,7 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
     msg_text = (
         f"🎯 <b>[ {pair_name} ] ─── {direction_icon}</b>\n"
         f"──────────────────────────────────────\n"
-        f"⏳ Експірація:  ⏱ <b>{ai_exp} хв</b> (ТФ сигналу: <b>{tf}</b>)\n"
+        f"⏳ Експірація:  ⏱ <b>{ai_exp} хв</b>{' — фіксована' if reversion else ''} (ТФ сигналу: <b>{tf}</b>)\n"
         f"📍 Ціна входу:  <b>{entry_price:.5f}</b>\n"
         f"📊 ML-Прогноз:  <b>{ml_badge}</b>\n"
         f"🤖 Оцінка ШІ:   <b>{ai_badge}</b>\n"
@@ -600,6 +619,8 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
         bot.send_message(chat_id=chat_id, text="⚠️ Сигнал не збережено в БД; автоматичний результат не відстежується.")
         return False, "Помилка збереження сигналу"
     signal_gate.register(cand, ai_exp)
+    if reversion:
+        reversion_guard.register(pair_name, cand["strategy"], ai_exp)
     schedule_signal_timer(sig_id, signal_time, ai_exp)
     return True, "OK"
 
@@ -634,10 +655,16 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             return False
 
         frames = {"1d": df_daily, "1h": df_1h, "15m": df_15m, "5m": df_5m, "3m": df_3m, "1m": df_1m}
-        candidates, rejections = generate_candidates(
-            pair_name, frames, get_utc_now(), strategies_status=strategies_status,
-            max_age_sec=None if auto_mode else 300,
-        )
+        candidates, rejections = [], {}
+        if any(strategies_status.get(key, True) for key in CONFLUENCE_KEYS):
+            candidates, rejections = generate_candidates(
+                pair_name, frames, get_utc_now(), strategies_status=strategies_status,
+                max_age_sec=None if auto_mode else 300,
+            )
+        candidates = generate_reversion_candidates(
+            pair_name, frames, get_utc_now(), strategies_status,
+            pair_enabled=database.get_pair_strategy_status,
+        ) + candidates
 
         reasons = [f"{tf}: {r}" for tf, r in rejections.items()]
         sent = 0

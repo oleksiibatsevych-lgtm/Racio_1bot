@@ -206,6 +206,19 @@ def get_signal_by_id(signal_id):
         return None
 
 
+def has_open_reversion_signal(ticker, strategy):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM signals WHERE ticker = %s AND strategy = %s "
+                "AND status IN ('PENDING', 'PROCESSING'));", (ticker, strategy)
+            )
+            return bool(cursor.fetchone()[0])
+    finally:
+        conn.close()
+
+
 def get_pending_signals():
     try:
         conn = get_connection()

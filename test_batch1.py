@@ -3,6 +3,7 @@ import html
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ import finnhub_ws
 import indicators
 import ml_model
 import tick_candles
+import reversion_engine
 from signal_pipeline import build_closed_frames, closed_only
 from timeframe_profiles import PROFILES
 
@@ -31,10 +33,14 @@ BOT_TREE = ast.parse((ROOT / "bot.py").read_text())
 
 def bot_functions():
     namespace = dict(pd=pd, datetime=datetime, timedelta=timedelta, timezone=timezone,
-                     html=html, os=os, json=json, logger=logging.getLogger("batch1"),
+                     html=html, os=os, re=re, json=json, logger=logging.getLogger("batch1"),
                      InlineKeyboardButton=InlineKeyboardButton, InlineKeyboardMarkup=InlineKeyboardMarkup,
                      KeyboardButton=KeyboardButton, ReplyKeyboardMarkup=ReplyKeyboardMarkup)
     functions = [node for node in BOT_TREE.body if isinstance(node, ast.FunctionDef)]
+    namespace.update(is_reversion=reversion_engine.is_reversion, PRESETS=reversion_engine.PRESETS,
+                     CONFLUENCE_KEYS=reversion_engine.CONFLUENCE_KEYS,
+                     load_strategy_config=reversion_engine.load_strategy_config,
+                     reversion_guard=reversion_engine.ReversionGuard())
     exec(compile(ast.Module(body=functions, type_ignores=[]), "bot_functions", "exec"), namespace)
     return namespace
 
