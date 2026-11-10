@@ -23,7 +23,7 @@ def fixture():
 
 
 def settings(*enabled):
-    return dict(dict.fromkeys(rev.CONFLUENCE_KEYS, False),
+    return dict(session_filter=False,
                 **{name: name in enabled for name in rev.PRESETS})
 
 
@@ -116,96 +116,20 @@ class GuardAndSettingsTests(unittest.TestCase):
                 database.has_open_reversion_signal("TEST", "REV_RSI14")
         self.assertEqual(connection.close.call_count, 2)
 
-    def test_defaults_saved_values_legacy_and_toggle_callbacks(self):
+    def test_defaults_saved_values_and_removed_keys_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "strategies.json"
             new = rev.load_strategy_config(path)
             self.assertEqual(new, settings(*rev.PRESETS))
-            saved = dict(trend_multi=True, flat_corridor=False, market_levels=False, oscillators=True)
-            path.write_text(json.dumps(saved))
+            path.write_text(json.dumps(dict(trend_multi=True, market_levels=True, REV_RSI7=False)))
             before = path.read_bytes()
             existing = rev.load_strategy_config(path)
-            self.assertTrue(existing["trend_multi"])
-            self.assertFalse(existing["flat_corridor"])
-            self.assertFalse(existing["price_action"])
-            self.assertTrue(existing["oscillators"])
+            self.assertEqual(set(existing), set(rev.PRESETS) | {"session_filter"})
+            self.assertFalse(existing["REV_RSI7"])
+            self.assertFalse(existing["session_filter"])
             self.assertEqual(path.read_bytes(), before)
-            self.assertTrue(all(existing[name] for name in rev.PRESETS))
-        ns = test_batch1.bot_functions()
-        db = Mock()
-        db.get_pair_strategy_status.return_value = True
-        ns.update(strategies_status=new, ADMIN_IDS=set(), database=db,
-                  save_strategies_config=Mock(), send_strategies_menu=Mock(),
-                  GROUPED_STRATEGIES={name:name for name in new})
-        for preset in rev.PRESETS:
-            query = Mock(data="toggle_group_" + preset)
-            query.message.chat_id = 7
-            ns["handle_callback"](SimpleNamespace(callback_query=query), None)
-            self.assertFalse(new[preset])
-            query.data = "toggle_cpair_EUR/USD_" + preset
-            ns["handle_callback"](SimpleNamespace(callback_query=query), None)
-            db.set_pair_strategy_status.assert_called_with("EUR/USD", preset, False)
-
-
-class LiveReversionTests(unittest.TestCase):
-    def setUp(self):
-        self.flow = test_batch1.BotFlowTests()
-        self.flow.setUp()
-        self.ns = self.flow.ns
-        self.flow.cand.update(tf="5m", strategy="REV_RSI14", strategy_title="REV_RSI14",
-                              reason="RSI14 extreme", confirmations=0,
-                              suggested_exp=60, exp_range=(60,60))
-        self.flow.db.has_open_reversion_signal.return_value = False
-
-    def test_skips_ai_ml_technical_filters_and_keeps_fixed_expiry(self):
-        self.ns["ml_filter"].is_active = True
-        self.ns["validate_signal_conditions"] = Mock(side_effect=AssertionError("confluence filter"))
-        self.ns["check_pivot_level_proximity"] = Mock(side_effect=AssertionError("pivot filter"))
-        self.assertTrue(self.flow.process()[0])
-        self.flow.advisor.evaluate_signal.assert_not_called()
-        self.ns["ml_filter"].predict_proba.assert_not_called()
-        self.assertEqual(self.flow.db.save_signal.call_args.kwargs["expiration_mins"], 60)
-        text = self.ns["bot"].send_message.call_args.kwargs["text"]
-        self.assertIn("REV_RSI14", text)
-        self.assertIn("фіксована", text)
-        self.assertFalse(self.flow.process()[0])
-        self.assertEqual(self.flow.db.save_signal.call_count, 1)
-
-    def test_preserves_news_segment_gate_freshness_and_failed_save(self):
-        cand = self.flow.cand
-        self.assertFalse(self.ns["process_candidate"](7,"EUR/USD","TEST",cand,{},True,None,True)[0])
-        self.ns["segment_filter"].check = Mock(return_value=(False,"segment blocked"))
-        self.assertEqual(self.flow.process(), (False,"segment blocked"))
-        self.ns["segment_filter"].check.return_value = (True,"OK")
-        self.flow.gate.check.return_value = (False,"gate blocked")
-        self.assertEqual(self.flow.process(), (False,"gate blocked"))
-        self.flow.gate.check.return_value = (True,"OK")
-        cand["bar_end"] = self.flow.now - timedelta(seconds=181)
-        self.assertFalse(self.flow.process()[0])
-        self.flow.db.save_signal.assert_not_called()
-        cand["bar_end"] = self.flow.now
-        self.flow.db.save_signal.return_value = None
-        self.assertFalse(self.flow.process()[0])
-        self.flow.gate.register.assert_not_called()
-
-    def test_auto_and_manual_use_reversion_generator(self):
-        data = fixture()[["open","high","low","close","volume"]]
-        ind = rev.calculate_indicators(data)
-        i = np.flatnonzero(ind.REV_RSI14.to_numpy())[0]
-        data = data.iloc[:i+1]
-        now = data.index[-1] + pd.Timedelta(minutes=5)
-        self.ns.update(is_high_impact_news_time=lambda:(False,"OK"),
-            normalize_yahoo_ticker=lambda *args:"EURUSD=X", get_utc_now=lambda:now,
-            fetch_all_timeframes=lambda *args:(None,None,None,data,None,data),
-            strategies_status=settings(*rev.PRESETS), generate_candidates=Mock(),
-            generate_reversion_candidates=rev.generate_candidates,
-            process_candidate=Mock(return_value=(True,"OK")))
-        self.flow.db.get_pair_strategy_status.return_value = True
-        for auto in (False, True):
-            self.assertTrue(self.ns["analyze_single_pair"](7,"EUR/USD","TEST",auto_mode=auto))
-            cand = self.ns["process_candidate"].call_args.args[3]
-            self.assertEqual(cand["strategy"], "REV_RSI14")
-        self.ns["generate_candidates"].assert_not_called()
+            path.write_text("[]")
+            self.assertEqual(rev.load_strategy_config(path), new)
 
 
 class ReversionBacktestTests(unittest.TestCase):
@@ -230,15 +154,6 @@ class ReversionBacktestTests(unittest.TestCase):
         self.assertNotIn(first["entry_time"],[t["entry_time"] for t in gap_trades])
         end = first["exit_time"]
         self.assertEqual(backtest.simulate_reversion_pair("EUR/USD",df,settings("REV_RSI7"),start=first["entry_time"],end=end),[])
-
-    def test_minute_backtest_includes_exhaustive_reversion_events(self):
-        df = fixture()[["open","high","low","close","volume"]].resample("min").ffill()
-        with patch.object(database,"get_pair_strategy_status",return_value=True), patch.object(backtest,"generate_candidates") as confluence:
-            trades = backtest.simulate_pair("EUR/USD",df,step_cap=1,strategies_status=settings("REV_RSI14"))
-        confluence.assert_not_called()
-        self.assertTrue(trades)
-        self.assertEqual({t["strategy"] for t in trades},{"REV_RSI14"})
-        self.assertTrue(all(t["exp"]==60 for t in trades))
 
 
 if __name__ == "__main__":

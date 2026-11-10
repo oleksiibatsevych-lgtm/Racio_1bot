@@ -1,79 +1,51 @@
 # -*- coding: utf-8 -*-
+import csv
 import html
 import io
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv()
-
-import matplotlib
 import pandas as pd
 import requests
 import yfinance as yf
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from telegram.ext import CallbackQueryHandler, CommandHandler, Filters, MessageHandler, Updater
 
-matplotlib.use("Agg")
-from telegram import (
-    Bot,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    Update,
-)
-from telegram.ext import (
-    CallbackQueryHandler,
-    CommandHandler,
-    Filters,
-    MessageHandler,
-    Updater,
-)
-
-from config import FINNHUB_API_KEY, FINNHUB_TOKEN, PAIRS_MAP, YAHOO_PAIRS_MAP
-from charts import create_chart_image
+load_dotenv()
 import database
-from finnhub_ws import get_live_price, get_live_quote, start_finnhub_ws
-from indicators import AdaptiveTechnicalAnalysis
-from ml_model import TradingMLFilter
-from ai_advisor import ai_advisor_instance
-from filters import (
-    check_pivot_level_proximity,
-    validate_signal_conditions,
-    calculate_dynamic_expiration,
-)
-from calendar_filter import is_high_impact_news_time
-from signal_pipeline import generate_candidates, build_closed_frames
-from reversion_engine import (
-    PRESETS, CONFLUENCE_KEYS, ReversionGuard, is_reversion, load_strategy_config,
-    generate_candidates as generate_reversion_candidates,
-)
 import tick_candles
+from ai_advisor import ai_advisor_instance
+from backtest import run_backtest, run_backtest_all_detailed
+from calendar_filter import is_high_impact_news_time
+from config import FINNHUB_API_KEY, FINNHUB_TOKEN, PAIRS_MAP, YAHOO_PAIRS_MAP
+from finnhub_ws import get_live_price, get_live_quote, start_finnhub_ws
 from quality_gate import SignalGate, SegmentFilter
-from timeframe_profiles import PROFILES, ACTIVE_PROFILES
-from backtest import (
-    run_backtest,
-    run_backtest_all_detailed,
-    clean_strategy_name,
-    PERFORMANCE_CACHE_FILE,
-    clear_backtest_cache,
-)
+from reversion_engine import PRESETS, ReversionGuard, is_reversion, load_strategy_config, generate_candidates
+from telegram_views import PERIODS, active_text, history_text, signal_card, settlement_text, stats_text, wr_line
+from trading_sessions import next_daily_report, period_start, session_allowed, utc_datetime
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-ADMIN_IDS = {int(value.strip()) for value in os.environ.get("ADMIN_IDS", "").split(",") if value.strip()}
-if not ADMIN_IDS:
-    logger.warning("ADMIN_IDS не задано: глобальне керування доступне всім користувачам.")
+ADMIN_IDS = {int(v.strip()) for v in os.environ.get("ADMIN_IDS", "").split(",") if v.strip()}
+STRATEGIES_CONFIG_FILE = Path(__file__).with_name("strategies_config.json")
+strategies_status = load_strategy_config(STRATEGIES_CONFIG_FILE)
+GROUPED_STRATEGIES = {name: f"↩️ {name} · {exp} хв" for name, exp in PRESETS.items()}
+GROUPED_STRATEGIES["session_filter"] = "Фільтр сесій (експериментально)"
+AUTO_SCAN_CHATS = set()
+signal_gate = SignalGate()
+reversion_guard = ReversionGuard()
+segment_filter = SegmentFilter(database, break_even=0.54, min_trades=40)
+bot = None
+LAB_PROC = None
 
 
 def require_admin(update):
@@ -82,83 +54,19 @@ def require_admin(update):
     update.effective_message.reply_text("⛔ Ця дія доступна лише адміністратору.")
     return False
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-if not TELEGRAM_TOKEN:
-    logger.error("❌ TELEGRAM_TOKEN не знайдено!")
-    raise ValueError("❌ TELEGRAM_TOKEN не знайдено у змінних оточення!")
-
-bot = Bot(token=TELEGRAM_TOKEN)
-
-analyzer = AdaptiveTechnicalAnalysis()
-ml_filter = TradingMLFilter()
-
-last_sent_signals = {}
-MACRO_CACHE = {}
-CACHE_TTL = 900
-AUTO_SCAN_CHATS = set()
-ML_FILTER_ENABLED = True
-signal_gate = SignalGate()
-reversion_guard = ReversionGuard()
-segment_filter = SegmentFilter(database, break_even=0.54, min_trades=40)
-
-STRATEGIES_CONFIG_FILE = "strategies_config.json"
-
-GROUPED_STRATEGIES = {
-    "trend_multi": "🚀 TREND_IMPULSE (Тренд)",
-    "flat_corridor": "📉 RANGE_CORRIDOR (Флет)",
-    "price_action": "🕯️ PRICE_LEVELS (Price Action)",
-    "oscillators": "⚡ MICRO_BREAKOUT (Пробій)",
-    "REV_RSI14": "↩️ REV_RSI14 (5m → 60 хв)",
-    "REV_BB3": "↩️ REV_BB3 (5m → 60 хв)",
-    "REV_RSI7": "↩️ REV_RSI7 (5m → 45 хв)",
-}
-
-def load_strategies_config():
-    return load_strategy_config(STRATEGIES_CONFIG_FILE)
 
 def save_strategies_config(cfg):
-    try:
-        with open(STRATEGIES_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Помилка збереження конфігу стратегій: {e}")
-
-strategies_status = load_strategies_config()
-
-database.init_db()
-start_finnhub_ws()
+    STRATEGIES_CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def get_utc_now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def make_progress_bar(val_pct):
-    score = max(0, min(10, int(round(val_pct / 10))))
-    filled = "█" * score
-    empty = "░" * (10 - score)
-    return f"[{filled}{empty}]"
-
-
-def clean_ai_html(text_val: str) -> str:
-    if not text_val:
-        return ""
-    txt = html.escape(str(text_val))
-    txt = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', txt)
-    txt = re.sub(r'\*(.*?)\*', r'<i>\1</i>', txt)
-    return txt
-
-
-def parse_dt(dt_val):
-    if isinstance(dt_val, datetime):
-        return dt_val.replace(tzinfo=None)
-    if not dt_val:
+def parse_dt(value):
+    if not value:
         return get_utc_now()
-    dt_str = str(dt_val).split(".")[0].replace("T", " ")
-    try:
-        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return get_utc_now()
+    return utc_datetime(pd.Timestamp(value).to_pydatetime()).replace(tzinfo=None)
 
 
 def normalize_yahoo_ticker(ticker, name=""):
@@ -228,62 +136,6 @@ def resample_candles(df_1m, rule):
     return df_1m.resample(rule).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
 
 
-def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
-    global MACRO_CACHE
-    df_1m = fetch_finnhub_candles(ticker_finnhub, resolution="1", count_candles=1500)
-    if df_1m.empty and ticker_yahoo:
-        df_1m = fetch_yahoo_fallback(ticker_yahoo, interval="1m", range_period="5d")
-    # Yahoo інколи відстає на десятки хвилин — добудовуємо свіжі свічки з живих тиків Finnhub WS
-    try:
-        df_1m = tick_candles.merge_with_history(ticker_finnhub, df_1m)
-    except Exception as e:
-        logger.warning(f"tick_candles merge failed for {ticker_finnhub}: {e}")
-    if df_1m is None or df_1m.empty:
-        return None, None, None, None, None, None
-
-    df_3m = resample_candles(df_1m, "3min")
-    df_5m = resample_candles(df_1m, "5min")
-    df_15m = resample_candles(df_1m, "15min")
-
-    current_time = time.time()
-    cache_key = ticker_finnhub
-    cached_data = MACRO_CACHE.get(cache_key)
-
-    if cached_data and (current_time - cached_data["timestamp"] < CACHE_TTL):
-        df_1h, df_daily = cached_data["1h"], cached_data["1d"]
-    else:
-        df_1h = fetch_finnhub_candles(ticker_finnhub, resolution="60", count_candles=300)
-        if len(df_1h) < 260 and ticker_yahoo:
-            df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="60d")
-        df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
-        if df_daily.empty and ticker_yahoo:
-            df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
-        if not df_1h.empty and not df_daily.empty:
-            MACRO_CACHE[cache_key] = {"timestamp": current_time, "1h": df_1h, "1d": df_daily}
-
-    return df_daily, df_1h, df_15m, df_5m, df_3m, df_1m
-
-
-def get_current_session_info():
-    now_utc = get_utc_now()
-    hour = now_utc.hour
-    sessions = []
-    session_code = 1
-    if 0 <= hour < 8:
-        sessions.append("Азія")
-        session_code = 0
-    if 7 <= hour < 16:
-        sessions.append("Лондон")
-        session_code = 1
-    if 13 <= hour < 21:
-        sessions.append("Нью-Йорк")
-        session_code = 2
-    if 13 <= hour < 16:
-        sessions.append("🔥 Перетин Лондон/Нью-Йорк")
-        session_code = 3
-    return ", ".join(sessions) if sessions else "Тихоокеанська сесія", session_code, hour
-
-
 def get_exit_price(ticker, expires_at, name=""):
     quote = get_live_quote(ticker)
     now = get_utc_now()
@@ -302,96 +154,6 @@ def get_exit_price(ticker, expires_at, name=""):
         if df_yf is not None and not df_yf.empty and minute in df_yf.index and minute + pd.Timedelta(minutes=1) <= now:
             return float(df_yf.loc[minute, "close"])
     return None
-
-
-def process_signal_expiration(sig_id):
-    claimed = False
-    try:
-        sig_data = database.get_signal_by_id(sig_id)
-        if not sig_data or sig_data.get("status") != "PENDING":
-            return
-
-        ticker = sig_data["ticker"]
-        entry_price = float(sig_data["entry_price"])
-        signal_type = sig_data["signal_type"]
-        expiration_mins = int(sig_data.get("expiration_mins", 5))
-
-        created_at = parse_dt(sig_data.get("timestamp_str"))
-        expires_at = parse_dt(sig_data["expires_at"]) if sig_data.get("expires_at") else created_at + timedelta(minutes=expiration_mins)
-        seconds_late = (get_utc_now() - expires_at).total_seconds()
-
-        if seconds_late < 0:
-            timer = threading.Timer(-seconds_late, process_signal_expiration, args=[sig_id])
-            timer.daemon = True
-            timer.start()
-            return
-
-        if not database.claim_signal(sig_id):
-            return  # інший потік уже обробляє цей сигнал
-        claimed = True
-
-        pair_name = next((k for k, v in PAIRS_MAP.items() if v == ticker), "")
-        exit_price = get_exit_price(ticker, expires_at, pair_name)
-        if not exit_price:
-            if seconds_late <= 180:
-                database.release_signal(sig_id)
-                timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
-                timer.daemon = True
-                timer.start()
-                return
-            database.update_signal_result(sig_id, "NEUTRAL", None, 0, status="VOID")
-            bot.send_message(chat_id=sig_data["chat_id"], text=f"➖ Угоду #{sig_id} анульовано: немає котирування на час експірації.")
-            return
-
-        if exit_price == entry_price:
-            result = "NEUTRAL"
-        elif signal_type == "CALL":
-            result = "WIN" if exit_price > entry_price else "LOSS"
-        else:
-            result = "WIN" if exit_price < entry_price else "LOSS"
-
-        multiplier = 1000 if "JPY" in ticker else 100000
-        pips = int(round((exit_price - entry_price) * multiplier if signal_type == "CALL" else (entry_price - exit_price) * multiplier))
-
-        database.update_signal_result(sig_id, result, exit_price, pips)
-        if result in ["WIN", "LOSS"]:
-            stats = database.get_stats()
-            finished = stats.get('wins', 0) + stats.get('losses', 0)
-            if finished >= 10 and finished % 5 == 0:
-                threading.Thread(target=ml_filter.train_model, daemon=True).start()
-
-        res_icon = "✅ WIN" if result == "WIN" else ("❌ LOSS" if result == "LOSS" else "➖ NEUTRAL")
-        pips_str = f"+{pips}" if pips > 0 else f"{pips}"
-        
-        report_str = (
-            f"\n──────────────────────────────────────\n"
-            f"🏁 <b>РЕЗУЛЬТАТ УГОДИ: {res_icon} (<code>{pips_str}</code> пунктів ≈ {pips / 10:+.1f} піпса)</b>\n"
-            f"📍 Вхід: {entry_price:.5f} ➔ 🏁 Закриття: {exit_price:.5f}"
-        )
-        
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔍 Аналіз помилки (ШІ)", callback_data=f"review_{sig_id}")],
-            [InlineKeyboardButton("📊 Статистика пари", callback_data=f"pair_stats_{pair_name}")]
-        ])
-
-        orig_txt = sig_data.get("message_text", "")
-        if orig_txt and "РЕЗУЛЬТАТ УГОДИ" not in orig_txt:
-            try:
-                bot.edit_message_text(chat_id=sig_data["chat_id"], message_id=sig_data["message_id"], text=f"{orig_txt}\n{report_str}", parse_mode="HTML", reply_markup=keyboard)
-            except Exception:
-                try:
-                    bot.send_message(
-                        chat_id=sig_data["chat_id"], 
-                        text=f"🏁 <b>Результат угоди #{sig_id}:</b>\n{res_icon} (<code>{pips_str}</code> пунктів ≈ {pips / 10:+.1f} піпса)", 
-                        parse_mode="HTML", 
-                        reply_markup=keyboard
-                    )
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.exception(f"Помилка таймера {sig_id}: {e}")
-        if claimed:
-            database.release_signal(sig_id)
 
 
 def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
@@ -442,305 +204,6 @@ def start_auto_scanner_loop():
     threading.Thread(target=loop, daemon=True).start()
 
 
-start_background_checker()
-start_auto_scanner_loop()
-
-
-def build_ml_features(cand, session_code, hour):
-    return {
-        "rsi": cand.get("rsi", 50), "adx": cand.get("adx", 20), "bb_width": cand.get("bb_width", 0.001),
-        "session_code": session_code, "hour": hour, "divergence": cand.get("divergence", "NONE"),
-        "dist_pivot": cand.get("dist_pivot", 0.0), "volatility_ratio": cand.get("volatility_ratio", 1.0),
-        "wick_ratio": cand.get("wick_ratio", 0.0), "ema_dist": cand.get("ema_dist", 0.0),
-        "tf_minutes": cand.get("tf_minutes", 1), "confirmations": cand.get("confirmations", 0),
-    }
-
-
-def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mode, status_msg_id, news_is_bad):
-    if news_is_bad:
-        return False, "Пауза через новини"
-    if is_reversion(cand):
-        with reversion_guard.reserve(pair_name, cand["strategy"], ticker_finnhub,
-                                     database.has_open_reversion_signal) as (ok, reason):
-            if not ok:
-                return False, reason
-            return _process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames,
-                                      auto_mode, status_msg_id, news_is_bad)
-    return _process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames,
-                              auto_mode, status_msg_id, news_is_bad)
-
-
-def _process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mode, status_msg_id, news_is_bad):
-    """
-    Проганяє одного кандидата крізь фільтри та, якщо все ок, відправляє сигнал.
-    Повертає (відправлено: bool, причина_відмови: str).
-    """
-    tf = cand["tf"]
-    prof = PROFILES[tf]
-    reversion = is_reversion(cand)
-    if not reversion:
-        is_valid, reason_val = validate_signal_conditions(cand)
-        if not is_valid:
-            return False, reason_val
-
-    session_str, s_code, s_hour = get_current_session_info()
-
-    ok, why = segment_filter.check(ticker_finnhub, tf, cand.get("strategy", "QUANTUM_MATRIX"), s_hour)
-    if not ok:
-        return False, why
-
-    ok, why = signal_gate.check(cand)
-    if not ok:
-        return False, why
-
-    win_probability = 0
-    if not reversion:
-        features = build_ml_features(cand, s_code, s_hour)
-        win_probability = ml_filter.predict_proba(features)
-    if not reversion and ML_FILTER_ENABLED and ml_filter.is_active:
-        min_ml = cand["ml_min_auto"] if auto_mode else cand["ml_min_manual"]
-        if win_probability < min_ml:
-            return False, f"ML оцінила ймовірність у {win_probability:.1f}%"
-
-    if not reversion:
-        is_pivot_ok, pivot_reason = check_pivot_level_proximity(cand)
-        if not is_pivot_ok:
-            return False, pivot_reason
-
-    exp_time = PRESETS[cand["strategy"]] if reversion else cand["suggested_exp"]
-    lo, hi = (exp_time, exp_time) if reversion else cand["exp_range"]
-    regime = cand.get("regime", "RANGE_BOUND")
-
-    payload = {
-        "signal": cand.get("signal"), "strategy": cand.get("strategy", "QUANTUM_MATRIX"),
-        "strategy_title": cand.get("strategy_title", ""), "confluence_count": cand.get("confluence_count", 1),
-        "current_price": cand.get("current_price"), "rsi": cand.get("rsi"), "adx": cand.get("adx"),
-        "reason": cand.get("reason"), "suggested_exp": exp_time, "tf": tf,
-        "confirmations": cand.get("confirmations"),
-        "chart_tfs": ("1h", prof["confirm"], prof["primary"]), "exp_range": (lo, hi),
-    }
-
-    ai_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
-    c_macro = c_mid = c_micro = None
-    if ai_key and not reversion:
-        closed = build_closed_frames(frames, get_utc_now())
-        charts = []
-        for label in payload["chart_tfs"]:
-            chart_df = closed.get(label)
-            charts.append(create_chart_image(chart_df, f"{pair_name} - {label}", tf_label=label) if chart_df is not None and not chart_df.empty else None)
-        c_macro, c_mid, c_micro = charts
-        payload["recent_mistakes"] = database.get_recent_failed_reviews_summary(ticker_finnhub, limit=3)
-    ai_res = (dict(decision="YES", confidence=0, ai_available=False, reason=cand["reason"])
-              if reversion else ai_advisor_instance.evaluate_signal(pair_name, payload, c_macro, c_mid, c_micro))
-
-    if not reversion and (ai_res.get("decision", "YES") != "YES" or ai_res.get("confidence", 6) < (6 if auto_mode else 5)):
-        return False, f"ШІ відхилив: {ai_res.get('reason', '')}"
-
-    age = (get_utc_now() - cand["bar_end"]).total_seconds()
-    if age < 0 or age > (180 if reversion else prof["max_age_sec"] + 30):
-        return False, "Сигнал застарів під час перевірки ШІ"
-    ok, why = signal_gate.check(cand)
-    if not ok:
-        return False, why
-    live_price = get_live_price(ticker_finnhub)
-    if live_price:
-        adverse_move = cand["current_price"] - live_price if cand["signal"] == "CALL" else live_price - cand["current_price"]
-        if adverse_move > 0.5 * cand.get("atr", 0):
-            return False, "Ціна пішла проти сигналу більше ніж на 0.5 ATR"
-
-    # ШІ може коригувати експірацію лише в межах діапазону цього ТФ
-    ai_exp = int(max(lo, min(hi, int(ai_res.get("suggested_expiration", exp_time)))))
-
-    # Ціна входу — реальна ціна в момент відправки, а не ціна закриття свічки
-    entry_price = live_price or cand["current_price"]
-    entry_price = float(entry_price)
-
-    direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if cand["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
-    risk_badge = "🔴 Новинний ризик" if news_is_bad else "🟢 Ринок стабільний"
-    if reversion:
-        ml_badge = "не застосовується (REV)"
-    elif ml_filter.is_active:
-        ml_badge = f"{make_progress_bar(win_probability)} {win_probability:.1f}%"
-    else:
-        ml_badge = "нейтральна (збір даних)"
-    ai_conf = ai_res.get("confidence", 6)
-    if reversion:
-        ai_badge = "не застосовується (фіксований пресет)"
-    elif ai_res.get("ai_available", True):
-        ai_badge = f"{make_progress_bar(ai_conf * 10)} {ai_conf}/10"
-    else:
-        ai_badge = "недоступний (оцінку не застосовано)"
-    conf_txt = ", ".join(cand.get("confirmation_names", []))
-
-    msg_text = (
-        f"🎯 <b>[ {pair_name} ] ─── {direction_icon}</b>\n"
-        f"──────────────────────────────────────\n"
-        f"⏳ Експірація:  ⏱ <b>{ai_exp} хв</b>{' — фіксована' if reversion else ''} (ТФ сигналу: <b>{tf}</b>)\n"
-        f"📍 Ціна входу:  <b>{entry_price:.5f}</b>\n"
-        f"📊 ML-Прогноз:  <b>{ml_badge}</b>\n"
-        f"🤖 Оцінка ШІ:   <b>{ai_badge}</b>\n"
-        f"🌐 Режим ринку: ⚡ <b>{regime}</b>\n"
-        f"✅ Підтверджень: <b>{cand['confirmations']}</b> — <i>{clean_ai_html(conf_txt)}</i>\n"
-        f"──────────────────────────────────────\n"
-        f"📋 Стратегія:   <b>{payload['strategy_title']}</b>\n"
-        f"💡 Причина:      <i>{clean_ai_html(ai_res.get('reason', ''))}</i>\n"
-        f"🌐 Сесія: {session_str} | Статус: {risk_badge}"
-    )
-
-    keyboard_markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton("⚙️ Змінити актив", callback_data="change_pair"),
-        InlineKeyboardButton("📊 Статистика пари", callback_data=f"pair_stats_{pair_name}"),
-    ]])
-
-    signal_time = get_utc_now()
-    expires_at = signal_time + timedelta(minutes=ai_exp)
-    sent_msg_id = status_msg_id
-    if status_msg_id:
-        try:
-            bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup)
-        except Exception:
-            sent_msg_id = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup).message_id
-    else:
-        sent_msg_id = bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML", reply_markup=keyboard_markup).message_id
-
-    sig_id = database.save_signal(
-        chat_id=chat_id, message_id=sent_msg_id, ticker=ticker_finnhub,
-        signal_type=cand["signal"], entry_price=entry_price, primary_tf=tf,
-        score=cand["confirmations"], expiration_mins=ai_exp, message_text=msg_text,
-        timestamp_str=signal_time.strftime("%Y-%m-%d %H:%M:%S"), expires_at=expires_at,
-        rsi=cand.get("rsi"), adx=cand.get("adx"), bb_width=cand.get("bb_width"),
-        session_code=s_code, hour=s_hour, divergence=cand.get("divergence", "NONE"),
-        dist_pivot=cand.get("dist_pivot"), volatility_ratio=cand.get("volatility_ratio"),
-        wick_ratio=cand.get("wick_ratio"), ema_dist=cand.get("ema_dist"),
-        strategy=cand.get("strategy"),
-    )
-    if not sig_id:
-        logger.error(f"Сигнал {pair_name}/{tf} відправлено, але не збережено в БД")
-        bot.send_message(chat_id=chat_id, text="⚠️ Сигнал не збережено в БД; автоматичний результат не відстежується.")
-        return False, "Помилка збереження сигналу"
-    signal_gate.register(cand, ai_exp)
-    if reversion:
-        reversion_guard.register(pair_name, cand["strategy"], ai_exp)
-    schedule_signal_timer(sig_id, signal_time, ai_exp)
-    return True, "OK"
-
-
-def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, status_msg_id=None):
-    try:
-        news_is_bad, news_reason = is_high_impact_news_time()
-        if news_is_bad:
-            if not auto_mode:
-                database.save_filtered_log(chat_id, f"❌ {pair_name}: Пауза через новини ({news_reason})")
-            if status_msg_id:
-                try:
-                    bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id, text=f"⏸ <b><code>{pair_name}</code>: Пауза через новини</b>\n\n💡 <i>{news_reason}</i>", parse_mode="HTML")
-                except Exception:
-                    pass
-            return False
-
-        yahoo_ticker = normalize_yahoo_ticker(ticker_finnhub, pair_name)
-        df_daily, df_1h, df_15m, df_5m, df_3m, df_1m = fetch_all_timeframes(ticker_finnhub, yahoo_ticker)
-
-        def report_no_signal(reason_text):
-            if not auto_mode:
-                database.save_filtered_log(chat_id, f"❌ {pair_name}: {reason_text}")
-            if status_msg_id:
-                try:
-                    bot.edit_message_text(chat_id=chat_id, message_id=status_msg_id, text=f"⏸ <b><code>{pair_name}</code>: Сигнал відсутній</b>\n\n💡 <i>Причина: {clean_ai_html(reason_text)}</i>", parse_mode="HTML")
-                except Exception:
-                    pass
-
-        if df_1m is None or df_1m.empty or len(df_1m) < 30:
-            report_no_signal("Недостатньо даних котирувань.")
-            return False
-
-        frames = {"1d": df_daily, "1h": df_1h, "15m": df_15m, "5m": df_5m, "3m": df_3m, "1m": df_1m}
-        candidates, rejections = [], {}
-        if any(strategies_status.get(key, True) for key in CONFLUENCE_KEYS):
-            candidates, rejections = generate_candidates(
-                pair_name, frames, get_utc_now(), strategies_status=strategies_status,
-                max_age_sec=None if auto_mode else 300,
-            )
-        candidates = generate_reversion_candidates(
-            pair_name, frames, get_utc_now(), strategies_status,
-            pair_enabled=database.get_pair_strategy_status,
-        ) + candidates
-
-        reasons = [f"{tf}: {r}" for tf, r in rejections.items()]
-        sent = 0
-        status_id = status_msg_id
-        for cand in candidates:
-            ok, why = process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mode, status_id, news_is_bad)
-            if ok:
-                sent += 1
-                status_id = None  # перше повідомлення редагує статус, решта — нові
-            else:
-                reasons.append(f"{cand['tf']}: {why}")
-
-        if sent == 0:
-            report_no_signal(" | ".join(reasons) if reasons else "Сигнал відсутній")
-        return sent > 0
-    except Exception as e:
-        logger.exception(f"Помилка аналізу {pair_name}: {e}")
-        if status_msg_id:
-            try:
-                bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=status_msg_id,
-                    text=f"❌ <b>Помилка аналізу <code>{pair_name}</code></b>\n\n💡 <i>Деталі: {str(e)}</i>",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
-        return False
-
-
-def run_mass_analysis(chat_id):
-    bot.send_message(chat_id=chat_id, text="🔍 Запускаю квантовий масовий аналіз усіх пар...")
-    database.clear_filtered_logs(chat_id)
-    
-    found = False
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(analyze_single_pair, chat_id, pair_name, ticker): pair_name
-            for pair_name, ticker in PAIRS_MAP.items()
-        }
-        for f in futures:
-            try:
-                if f.result(timeout=45):
-                    found = True
-            except Exception as ex:
-                logger.error(f"Помилка в масовому аналізі: {ex}")
-
-    bot.send_message(chat_id=chat_id, text="✅ Масовий аналіз завершено!" if found else "✅ Аналіз завершено. Сигналів не знайдено.")
-
-
-def handle_export_command(update, context):
-    """/export — надсилає CSV з усіма завершеними угодами для аналізу."""
-    import csv
-    try:
-        columns, rows = database.export_resolved_signals()
-        if not rows:
-            update.message.reply_text("📭 Завершених угод у базі ще немає.")
-            return
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(columns)
-        writer.writerows(rows)
-        data = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
-        data.name = "signals_export.csv"
-        update.message.reply_document(
-            document=data, filename="signals_export.csv",
-            caption=f"📤 Експорт: {len(rows)} завершених угод.",
-        )
-    except Exception as e:
-        logger.exception(f"Помилка експорту: {e}")
-        update.message.reply_text(f"❌ Помилка експорту: {e}")
-
-
-LAB_PROC = None
-
-
 def handle_lab_run_command(update, context):
     """/lab_run — запускає лабораторію у фоні (скачує 1m-історію і перевіряє ~640 конфігурацій)."""
     global LAB_PROC
@@ -781,369 +244,319 @@ def handle_lab_command(update, context):
             update.message.reply_document(document=f, filename="lab_report.csv", caption="Повний звіт по всіх конфігураціях")
 
 
-def handle_backtest_command(update, context):
-    if not require_admin(update):
-        return
-    chat_id = update.effective_chat.id
-    args = context.args  
-    
-    if args:
-        pair = args[0].upper()
-        if pair == "ALL":
-            run_backtest_all_pairs(chat_id)
+def fetch_5m(ticker, yahoo):
+    minute = fetch_finnhub_candles(ticker, count_candles=1500)
+    if minute.empty:
+        minute = fetch_yahoo_fallback(yahoo)
+    minute = tick_candles.merge_with_history(ticker, minute)
+    return resample_candles(minute, "5min") if minute is not None else pd.DataFrame()
+
+
+def notify_settlement(sig, result, exit_price, pips):
+    report = settlement_text(result, exit_price, pips)
+    markup = None
+    if ai_advisor_instance.api_key and result in ("WIN", "LOSS", "NEUTRAL"):
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Розбір закритої угоди", callback_data=f"review|{sig['id']}")]])
+    try:
+        bot.edit_message_text(chat_id=sig["chat_id"], message_id=sig["message_id"],
+                              text=(sig.get("message_text") or "") + "\n\n" + report,
+                              parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        logger.exception("Не вдалося оновити картку #%s", sig["id"])
+    try:
+        bot.send_message(chat_id=sig["chat_id"], text=f"#{sig['id']} " + report, parse_mode="HTML",
+                         reply_to_message_id=sig["message_id"], allow_sending_without_reply=True)
+    except Exception:
+        logger.exception("Не вдалося надіслати результат #%s", sig["id"])
+
+
+def process_signal_expiration(sig_id):
+    claimed = False
+    try:
+        sig = database.get_signal_by_id(sig_id)
+        if not sig or sig.get("status") != "PENDING":
             return
-        bot.send_message(chat_id=chat_id, text=f"⏳ Запускаю бектест для <code>{pair}</code> (~7 днів)...", parse_mode="HTML")
-        
-        def run_bg():
-            try:
-                report = run_backtest(pair, strategies_status=dict(strategies_status))
-                bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
-            except Exception as e:
-                bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
+        expiry = parse_dt(sig["expires_at"]) if sig.get("expires_at") else parse_dt(sig.get("timestamp_str")) + timedelta(minutes=sig["expiration_mins"])
+        late = (get_utc_now() - expiry).total_seconds()
+        if late < 0:
+            timer = threading.Timer(-late, process_signal_expiration, args=[sig_id])
+            timer.daemon = True
+            timer.start()
+            return
+        if not database.claim_signal(sig_id):
+            return
+        claimed = True
+        pair = next((name for name, ticker in PAIRS_MAP.items() if ticker == sig["ticker"]), "")
+        exit_price = get_exit_price(sig["ticker"], expiry, pair)
+        if not exit_price:
+            if late <= 180:
+                database.release_signal(sig_id)
+                timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
+                timer.daemon = True
+                timer.start()
+                return
+            database.update_signal_result(sig_id, "NEUTRAL", None, 0, status="VOID")
+            notify_settlement(sig, "VOID", None, 0)
+            return
+        entry = float(sig["entry_price"])
+        move = exit_price - entry if sig["signal_type"] == "CALL" else entry - exit_price
+        result = "NEUTRAL" if exit_price == entry else ("WIN" if move > 0 else "LOSS")
+        pips = int(round(move * (1000 if "JPY" in sig["ticker"] else 100000)))
+        database.update_signal_result(sig_id, result, exit_price, pips)
+        notify_settlement(sig, result, exit_price, pips)
+    except Exception:
+        logger.exception("Помилка таймера #%s", sig_id)
+        if claimed:
+            database.release_signal(sig_id)
 
-        threading.Thread(target=run_bg, daemon=True).start()
-    else:
-        buttons = [InlineKeyboardButton(name, callback_data=f"bt_{name}") for name in PAIRS_MAP.keys()]
-        markup_list = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
-        markup_list.insert(0, [InlineKeyboardButton("🌐 Бектест для УСІХ пар одразу", callback_data="bt_ALL")])
-        markup_list.insert(1, [InlineKeyboardButton("🗑 Скинути / Очистити кеш бектесту", callback_data="bt_clear_cache")])
-        markup = InlineKeyboardMarkup(markup_list)
-        update.message.reply_text("📊 <b>Оберіть валютну пару для бектесту або керування кешем:</b>", parse_mode="HTML", reply_markup=markup)
+
+def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames=None, auto_mode=False, status_msg_id=None, news_is_bad=False):
+    if not is_reversion(cand):
+        return False, "Невідомий пресет"
+    if news_is_bad:
+        return False, "Пауза через новини"
+    with reversion_guard.reserve(pair_name, cand["strategy"], ticker_finnhub, database.has_open_reversion_signal) as (ok, reason):
+        if not ok:
+            return False, reason
+        if strategies_status.get("session_filter", False) and not session_allowed(cand["strategy"], cand["bar_end"]):
+            return False, "Сесію відфільтровано"
+        ok, reason = segment_filter.check(ticker_finnhub, "5m", cand["strategy"], get_utc_now().hour)
+        if not ok:
+            return False, reason
+        ok, reason = signal_gate.check(cand)
+        if not ok:
+            return False, reason
+        live = get_live_price(ticker_finnhub)
+        if live:
+            adverse = cand["current_price"] - live if cand["signal"] == "CALL" else live - cand["current_price"]
+            if adverse > .5 * cand["atr"]:
+                return False, "Ціна пішла проти сигналу більше ніж на 0.5 ATR"
+        now = get_utc_now()
+        if not 0 <= (now - cand["bar_end"]).total_seconds() <= 180:
+            return False, "Сигнал застарів"
+        ok, reason = signal_gate.check(cand)
+        if not ok:
+            return False, reason
+        entry = float(live or cand["current_price"])
+        expiration = PRESETS[cand["strategy"]]
+        text = signal_card(pair_name, cand, entry, now)
+        message = bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        sig_id = database.save_signal(chat_id=chat_id, message_id=message.message_id,
+            ticker=ticker_finnhub, signal_type=cand["signal"], entry_price=entry,
+            primary_tf="5m", score=0, expiration_mins=expiration, message_text=text,
+            timestamp_str=now.strftime("%Y-%m-%d %H:%M:%S"), expires_at=now + timedelta(minutes=expiration),
+            rsi=cand["rsi"], hour=now.hour, strategy=cand["strategy"])
+        if not sig_id:
+            bot.send_message(chat_id=chat_id, text="⚠️ Сигнал не збережено в БД; автоматичний результат не відстежується.")
+            return False, "Помилка збереження сигналу"
+        signal_gate.register(cand, expiration)
+        reversion_guard.register(pair_name, cand["strategy"], expiration)
+        schedule_signal_timer(sig_id, now, expiration)
+        return True, "OK"
 
 
-def run_backtest_all_pairs(chat_id):
-    bot.send_message(chat_id=chat_id, text="🌐 <b>Запускаю послідовний бектест усіх пар із поточними стратегіями (~7 днів)...</b>", parse_mode="HTML")
-    
-    def worker():
-        try:
-            reports = run_backtest_all_detailed(strategies_status=dict(strategies_status))
-            for rep in reports:
-                bot.send_message(chat_id=chat_id, text=rep, parse_mode="HTML")
-        except Exception as e:
-            bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
-
-    threading.Thread(target=worker, daemon=True).start()
-
-
-def send_strategies_menu(update_obj, is_callback=False):
-    global strategies_status
-    buttons = []
-    for key, title in GROUPED_STRATEGIES.items():
-        active = strategies_status.get(key, True)
-        status_icon = "🟢 [ВКЛ]" if active else "🔴 [ВИКЛ]"
-        buttons.append([InlineKeyboardButton(f"{status_icon} {title}", callback_data=f"toggle_group_{key}")])
-    
-    buttons.append([InlineKeyboardButton("🎯 Персоналізація по парах", callback_data="custom_pairs_menu")])
-    buttons.append([InlineKeyboardButton("🔙 Головне меню", callback_data="back_to_main_menu")])
-    
-    markup = InlineKeyboardMarkup(buttons)
-    text_msg = (
-        "⚙️ <b>Панель глобального керування стратегіями</b>:\n\n"
-        "Натисніть на групу нижче, щоб увімкнути/вимкнути її глобально, або скористайтеся персоналізацією по парах:"
-    )
-    
-    if is_callback:
-        try:
-            update_obj.edit_message_text(text_msg, parse_mode="HTML", reply_markup=markup)
-        except Exception:
-            pass
-    else:
-        update_obj.message.reply_text(text_msg, parse_mode="HTML", reply_markup=markup)
+def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, status_msg_id=None):
+    try:
+        bad_news, reason = is_high_impact_news_time()
+        if bad_news:
+            return False
+        frame = fetch_5m(ticker_finnhub, normalize_yahoo_ticker(ticker_finnhub, pair_name))
+        candidates = generate_candidates(pair_name, {"5m": frame}, get_utc_now(), dict(strategies_status),
+                                         pair_enabled=database.get_pair_strategy_status)
+        for cand in candidates:
+            ok, reason = process_candidate(chat_id, pair_name, ticker_finnhub, cand, auto_mode=auto_mode)
+            if ok:
+                return True
+        return False
+    except Exception:
+        logger.exception("Помилка аналізу %s", pair_name)
+        return False
 
 
 def main_keyboard(chat_id):
-    ml_txt = "🤖 ML-Модель: ВКЛ" if ML_FILTER_ENABLED else "🤖 ML-Модель: ВИКЛ"
-    
-    keyboard = [
-        [KeyboardButton("⚡ Масовий сканер"), KeyboardButton("🔔 Авто-сканер [ВКЛ]" if chat_id in AUTO_SCAN_CHATS else "🔔 Авто-сканер [ВИКЛ]"), KeyboardButton("💵 Вибір пари")],
-        [KeyboardButton("📈 Статистика"), KeyboardButton("📊 Бектест (~7d)"), KeyboardButton("⚙️ Конфігуратор")],
-        [KeyboardButton("📋 Системні логи"), KeyboardButton(ml_txt)]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("📡 Сигнал зараз"), KeyboardButton("🤖 Автоскан ON" if chat_id in AUTO_SCAN_CHATS else "🤖 Автоскан OFF")],
+        [KeyboardButton("⏳ Активні угоди"), KeyboardButton("📜 Історія")],
+        [KeyboardButton("📊 Статистика"), KeyboardButton("⚙️ Стратегії")],
+    ], resize_keyboard=True)
+
+
+def stats_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton(title, callback_data="stats|" + period)
+                                  for period, title in PERIODS.items()]])
+
+
+def strategy_keyboard(pair=None):
+    if pair:
+        buttons = [[InlineKeyboardButton(("✅ " if database.get_pair_strategy_status(pair, key) else "❌ ") + key,
+                    callback_data=f"pair_toggle|{pair}|{key}")] for key in PRESETS]
+        buttons.append([InlineKeyboardButton("Назад", callback_data="pairs")])
+    else:
+        buttons = [[InlineKeyboardButton(("✅ " if strategies_status.get(key, False) else "❌ ") + title,
+                    callback_data="toggle|" + key)] for key, title in GROUPED_STRATEGIES.items()]
+        buttons.append([InlineKeyboardButton("🎯 По парах", callback_data="pairs")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def start(update, context):
-    user = update.effective_user
-    database.register_user(user.id, user.username)
-    update.message.reply_text(
-        "🤖 <b>Квантовий бот Racio_1bot успішно активовано!</b>\n\n"
-        "Інтерфейс оптимізовано, 4 комплекси стратегій та динамічні пороги працюють у реальному часі.",
-        parse_mode="HTML",
-        reply_markup=main_keyboard(update.effective_chat.id)
-    )
+    database.register_user(update.effective_chat.id, update.effective_user.username)
+    update.effective_message.reply_text("📡 REV 5m · фіксовані експірації. Research WR не гарантує результат.", reply_markup=main_keyboard(update.effective_chat.id))
+
+
+def show_stats(chat_id, period="all"):
+    rows = database.get_chat_signals(chat_id, since=period_start(period, get_utc_now()))
+    return stats_text(rows, period)
 
 
 def handle_message(update, context):
-    text, chat_id = update.message.text, update.effective_chat.id
-    if text == "⚡ Масовий сканер" or text == "📊 Аналіз усіх пар":
-        threading.Thread(target=run_mass_analysis, args=[chat_id], daemon=True).start()
-    elif text in ("📊 Бектест (~7d)", "📊 Бектест (30d)", "📊 Бектест"):
-        handle_backtest_command(update, context)
-    elif text == "⚙️ Конфігуратор" or text == "⚙️ Стратегії":
-        send_strategies_menu(update, is_callback=False)
-    elif "🔔 Авто-сканер" in text:
+    chat_id = update.effective_chat.id
+    message = update.effective_message
+    text = message.text
+    if text == "📡 Сигнал зараз":
+        status = message.reply_text("📡 Перевіряю 21 пару…")
+        def scan():
+            count = sum(analyze_single_pair(chat_id, pair, ticker) for pair, ticker in PAIRS_MAP.items())
+            bot.edit_message_text(chat_id=chat_id, message_id=status.message_id, text=f"📡 Завершено · сигналів: {count}")
+        threading.Thread(target=scan, daemon=True).start()
+    elif text in ("🤖 Автоскан ON", "🤖 Автоскан OFF"):
         if chat_id in AUTO_SCAN_CHATS:
             AUTO_SCAN_CHATS.remove(chat_id)
-            update.message.reply_text("🔴 Авто-сканер ВИМКНЕНО.")
         else:
             AUTO_SCAN_CHATS.add(chat_id)
-            update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО (ТФ: 3m/5m/15m).")
-    elif text in ["🤖 ML-Модель: ВКЛ", "🤖 ML-Модель: ВИКЛ", "🟢 ML-фільтр: ВКЛ", "🔴 ML-фільтр: ВИКЛ"]:
-        global ML_FILTER_ENABLED
-        if not require_admin(update):
-            return
-        ML_FILTER_ENABLED = not ML_FILTER_ENABLED
-        ml_txt = "🤖 ML-Модель: ВКЛ" if ML_FILTER_ENABLED else "🤖 ML-Модель: ВИКЛ"
-        update.message.reply_text(f"⚙️ ML-фільтр {'увімкнено' if ML_FILTER_ENABLED else 'вимкнено'}.", reply_markup=main_keyboard(chat_id))
-    elif text == "💵 Вибір пари" or text == "💵 Пари":
-        buttons = [InlineKeyboardButton(name, callback_data=f"analyze_{name}") for name in PAIRS_MAP.keys()]
-        update.message.reply_text("💵 <b>Оберіть валютну пару для аналізу:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)]))
-    elif text == "📈 Статистика":
-        stats = database.get_stats()
-        finished = stats.get('wins', 0) + stats.get('losses', 0)
-        winrate = (stats.get('wins', 0) / finished * 100) if finished > 0 else 0.0
-        
-        msg = (
-            "📊 <b>ДАШБОРД ЕФЕКТИВНОСТІ МАТРИЦІ</b>\n"
-            "──────────────────────────────────────\n"
-            f"🏆 Загальний вінрейт: <b>{winrate:.1f}%</b>  [{stats.get('wins', 0)} WIN / {stats.get('losses', 0)} LOSS]\n"
-            f"🎯 Угод у базі даних: <b>{stats.get('total', 0)} угод</b>\n"
-            f"⚡ ML-фільтр: <b>{ml_filter.status_line()}</b>\n"
-            "──────────────────────────────────────\n"
-            "Оберіть зріз аналітики для деталізації:"
-        )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💵 По парах", callback_data="dash_pairs"), InlineKeyboardButton("📋 По стратегіях", callback_data="dash_strategies")],
-            [InlineKeyboardButton("🔀 Пара ✖ Стратегія", callback_data="dash_matrix"), InlineKeyboardButton("📊 По годинах/днях", callback_data="strategy_time_stats")],
-            [InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml"), InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
-        ])
-        update.message.reply_text(msg, parse_mode="HTML", reply_markup=keyboard)
-    elif text == "📋 Системні логи" or text == "📋 Логи фільтру":
-        logs = database.get_system_logs(chat_id)
-        update.message.reply_text("📋 <b>Останні логи системи:</b>\n\n" + "\n".join([clean_ai_html(l) for l in logs]) if logs else "📋 Логи порожні.", parse_mode="HTML")
+        message.reply_text("🤖 Автоскан " + ("ON" if chat_id in AUTO_SCAN_CHATS else "OFF"), reply_markup=main_keyboard(chat_id))
+    elif text == "⏳ Активні угоди":
+        reply_report(message, active_text(database.get_chat_signals(chat_id, "active"), get_utc_now()))
+    elif text == "📜 Історія":
+        reply_report(message, history_text(database.get_chat_signals(chat_id, "history")))
+    elif text == "📊 Статистика":
+        message.reply_text(show_stats(chat_id), parse_mode="HTML", reply_markup=stats_keyboard())
+    elif text == "⚙️ Стратегії":
+        if require_admin(update):
+            message.reply_text("⚙️ Пресети та експериментальний фільтр сесій", reply_markup=strategy_keyboard())
+    else:
+        message.reply_text("Оберіть дію з меню.", reply_markup=main_keyboard(chat_id))
+
+
+def reply_report(message, text):
+    block = ""
+    for line in text.splitlines():
+        if len(block) + len(line) > 3500:
+            message.reply_text(block, parse_mode="HTML")
+            block = ""
+        block += line + "\n"
+    if block:
+        message.reply_text(block, parse_mode="HTML")
+
+
+def handle_export_command(update, context):
+    if not require_admin(update):
+        return
+    columns, rows = database.export_resolved_signals()
+    if not rows:
+        update.effective_message.reply_text("Завершених угод немає.")
+        return
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(columns)
+    writer.writerows(rows)
+    update.effective_message.reply_document(document=io.BytesIO(buffer.getvalue().encode("utf-8-sig")), filename="signals_export.csv")
 
 
 def handle_callback(update, context):
     query = update.callback_query
     query.answer()
-    chat_id, data = query.message.chat_id, query.data
-    if (data.startswith(("toggle_group_", "toggle_cpair_", "bt_")) or data in ("retrain_ml", "clear_stats_confirm", "clear_stats_do")) and not require_admin(update):
-        return
-    
-    if data.startswith("analyze_"):
-        pair = data.replace("analyze_", "")
-        if PAIRS_MAP.get(pair):
-            msg = query.edit_message_text(f"🔍 Аналізую {pair}...")
-            threading.Thread(target=analyze_single_pair, args=[chat_id, pair, PAIRS_MAP[pair], False, msg.message_id], daemon=True).start()
-    elif data == "change_pair":
-        buttons = [InlineKeyboardButton(name, callback_data=f"analyze_{name}") for name in PAIRS_MAP.keys()]
-        query.edit_message_text("💵 <b>Оберіть новий актив для аналізу:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)]))
-    elif data.startswith("pair_stats_"):
-        pair = data.replace("pair_stats_", "")
-        rows = database.get_detailed_pair_strategy_stats(ticker_filter=next((v for k, v in PAIRS_MAP.items() if k == pair), pair))
-        lines = [f"📊 <b>СТАТИСТИКА АКТИВУ [ {pair} ]:</b>\n──────────────────────────────────────"]
-        for r in rows:
-            tot = r['total']
-            wins = r['wins']
-            wr = (wins / tot * 100) if tot > 0 else 0
-            ico = "🟢" if wr >= 55 else ("🟡" if wr >= 48 else "🔴")
-            lines.append(f"{ico} <b>{r['strategy']}</b>: {wins}/{tot} WIN ({wr:.1f}% WR)")
-        if len(rows) == 0:
-            lines.append("⚠️ Недостатньо закритих угод для цього активу.")
-        query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до дашборду", callback_data="back_to_stats")]]))
-    elif data in ("dash_pairs", "dash_strategies"):
-        rows = database.get_detailed_pair_strategy_stats()
-        totals = {}
-        for row in rows:
-            key = row["ticker"] if data == "dash_pairs" else row["strategy"]
-            wins, total = totals.get(key, (0, 0))
-            totals[key] = (wins + int(row["wins"]), total + int(row["total"]))
-        lines = ["📊 <b>По парах:</b>" if data == "dash_pairs" else "📊 <b>По стратегіях:</b>"]
-        for key, (wins, total) in sorted(totals.items(), key=lambda item: item[1][0] / item[1][1] if item[1][1] else 0, reverse=True):
-            label = next((pair for pair, ticker in PAIRS_MAP.items() if ticker == key), key) if data == "dash_pairs" else key
-            lines.append(f"{html.escape(label)}: {wins}/{total} ({wins / total * 100 if total else 0:.1f}% WR)")
-        if not totals:
-            lines.append("⚠️ Недостатньо закритих угод.")
-        query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
-    elif data == "dash_matrix":
-        rows = database.get_detailed_pair_strategy_stats()
-        lines = ["🔀 <b>МАТРИЦЯ: ПАРА ✖ СТРАТЕГІЯ</b>\n──────────────────────────────────────"]
-        for r in rows[:15]:
-            tot = r['total']
-            wins = r['wins']
-            wr = (wins / tot * 100) if tot > 0 else 0
-            p_name = next((k for k, v in PAIRS_MAP.items() if v == r['ticker']), r['ticker'])
-            ico = "🟢" if wr >= 55 else ("🟡" if wr >= 48 else "🔴")
-            lines.append(f"{ico} <code>{p_name}</code> | {r['strategy']}: <b>{wr:.1f}%</b> ({wins}/{tot})")
-        if not rows:
-            lines.append("⚠️ База даних угод порожня.")
-        query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до дашборду", callback_data="back_to_stats")]]))
-    elif data == "custom_pairs_menu":
-        buttons = [InlineKeyboardButton(name, callback_data=f"cpair_{name}") for name in PAIRS_MAP.keys()]
-        markup = InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)] + [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_strategies")]])
-        query.edit_message_text("🎯 <b>Оберіть актив для персоналізації стратегій:</b>", parse_mode="HTML", reply_markup=markup)
-    elif data.startswith("cpair_"):
-        pair_name = data.replace("cpair_", "")
-        buttons = []
-        for s_key, s_title in GROUPED_STRATEGIES.items():
-            is_act = database.get_pair_strategy_status(pair_name, s_key)
-            status_ico = "🟢 [ВКЛ]" if is_act else "🔴 [ВИКЛ]"
-            buttons.append([InlineKeyboardButton(f"{status_ico} {s_title}", callback_data=f"toggle_cpair_{pair_name}_{s_key}")])
-        buttons.append([InlineKeyboardButton("🔙 До списку пар", callback_data="custom_pairs_menu")])
-        query.edit_message_text(f"⚙️ <b>Стратегії для активу [ {pair_name} ]:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
-    elif data.startswith("toggle_cpair_"):
-        parts = data.replace("toggle_cpair_", "").split("_", 1)
-        pair_name, s_key = parts[0], parts[1]
-        current_st = database.get_pair_strategy_status(pair_name, s_key)
-        database.set_pair_strategy_status(pair_name, s_key, not current_st)
-        
-        buttons = []
-        for sk, st in GROUPED_STRATEGIES.items():
-            is_act = database.get_pair_strategy_status(pair_name, sk)
-            status_ico = "🟢 [ВКЛ]" if is_act else "🔴 [ВИКЛ]"
-            buttons.append([InlineKeyboardButton(f"{status_ico} {st}", callback_data=f"toggle_cpair_{pair_name}_{sk}")])
-        buttons.append([InlineKeyboardButton("🔙 До списку пар", callback_data="custom_pairs_menu")])
-        try:
-            query.edit_message_text(f"⚙️ <b>Стратегії для активу [ {pair_name} ]:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
-        except Exception:
-            pass
-    elif data == "back_to_strategies":
-        send_strategies_menu(query, is_callback=True)
-    elif data == "bt_ALL":
-        query.edit_message_text("🌐 Запускаю глобальний бектест для усіх пар...", parse_mode="HTML")
-        run_backtest_all_pairs(chat_id)
-    elif data == "bt_clear_cache":
-        success, msg_info = clear_backtest_cache()
-        query.edit_message_text(f"{'✅' if success else '❌'} {msg_info}\n\nТепер бектест працюватиме з новими параметрами стратегій з чистого аркуша.")
-    elif data.startswith("bt_"):
-        pair = data.replace("bt_", "")
-        query.edit_message_text(f"⏳ Запускаю детальний бектест для <code>{pair}</code> (~7 днів)...", parse_mode="HTML")
-        def run_bt():
-            try:
-                report = run_backtest(pair, strategies_status=dict(strategies_status))
-                bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
-            except Exception as e:
-                bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
-        threading.Thread(target=run_bt, daemon=True).start()
-    elif data == "strategy_time_stats":
-        query.edit_message_text("⏳ Формую аналіз за годинами та днями... ⏳")
-        try:
-            time_stats = database.get_strategy_time_stats()
-            hours_data = time_stats.get("hours", [])
-            dow_data = time_stats.get("dow", [])
-
-            if not hours_data and not dow_data:
-                query.edit_message_text(
-                    "⚠️ Недостатньо закритих угод для часового аналізу.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
-                return
-
-            dow_names = {0: "Неділя", 1: "Понеділок", 2: "Вівторок", 3: "Середа", 4: "Четвер", 5: "П'ятниця", 6: "Субота"}
-            report_lines = ["📈 <b>Аналіз ефективності за часом:</b>\n"]
-
-            if hours_data:
-                report_lines.append("🕒 <b>По годинах (UTC):</b>")
-                hour_grouped = {}
-                for row in hours_data:
-                    h = int(row['trade_hour'])
-                    if h not in hour_grouped:
-                        hour_grouped[h] = {"wins": 0, "total": 0}
-                    hour_grouped[h]["wins"] += int(row['wins'])
-                    hour_grouped[h]["total"] += int(row['total'])
-
-                sorted_hours = sorted(hour_grouped.items(), key=lambda x: (x[1]["wins"]/x[1]["total"] if x[1]["total"]>0 else 0), reverse=True)
-                for h, d in sorted_hours[:10]:
-                    tot = d["total"]
-                    wins = d["wins"]
-                    wr = (wins / tot * 100) if tot > 0 else 0
-                    ico = "🟢" if wr >= 53 else ("🟡" if wr >= 48 else "🔴")
-                    report_lines.append(f"{ico} <b>{h:02d}:00 - {h+1:02d}:00</b>: {wins}/{tot} ({wr:.1f}% WR)")
-
-            if dow_data:
-                report_lines.append("\n📅 <b>По днях тижня:</b>")
-                dow_grouped = {}
-                for row in dow_data:
-                    dw = int(row['trade_dow'])
-                    if dw not in dow_grouped:
-                        dow_grouped[dw] = {"wins": 0, "total": 0}
-                    dow_grouped[dw]["wins"] += int(row['wins'])
-                    dow_grouped[dw]["total"] += int(row['total'])
-
-                for dw in range(7):
-                    if dw in dow_grouped:
-                        d = dow_grouped[dw]
-                        tot = d["total"]
-                        wins = d["wins"]
-                        wr = (wins / tot * 100) if tot > 0 else 0
-                        ico = "🟢" if wr >= 53 else ("🟡" if wr >= 48 else "🔴")
-                        d_name = dow_names.get(dw, "День")
-                        report_lines.append(f"{ico} <b>{d_name}</b>: {wins}/{tot} ({wr:.1f}% WR)")
-
-            full_report = "\n".join(report_lines)
-            query.edit_message_text(full_report, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
-        except Exception as e:
-            query.edit_message_text(f"❌ Помилка: {e}", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
-    elif data == "back_to_stats":
-        stats = database.get_stats()
-        finished = stats.get('wins', 0) + stats.get('losses', 0)
-        winrate = (stats.get('wins', 0) / finished * 100) if finished > 0 else 0.0
-        msg = (
-            "📊 <b>ДАШБОРД ЕФЕКТИВНОСТІ МАТРИЦІ</b>\n"
-            "──────────────────────────────────────\n"
-            f"🏆 Загальний вінрейт: <b>{winrate:.1f}%</b>  [{stats.get('wins', 0)} WIN / {stats.get('losses', 0)} LOSS]\n"
-            f"🎯 Угод у базі даних: <b>{stats.get('total', 0)} угод</b>\n"
-            f"⚡ ML-фільтр: <b>{ml_filter.status_line()}</b>\n"
-            "──────────────────────────────────────\n"
-            "Оберіть зріз аналітики для деталізації:"
-        )
-        query.edit_message_text(
-            msg, 
-            parse_mode="HTML", 
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💵 По парах", callback_data="dash_pairs"), InlineKeyboardButton("📋 По стратегіях", callback_data="dash_strategies")],
-                [InlineKeyboardButton("🔀 Пара ✖ Стратегія", callback_data="dash_matrix"), InlineKeyboardButton("📊 По годинах/днях", callback_data="strategy_time_stats")],
-                [InlineKeyboardButton("🤖 Перенавчити ШІ", callback_data="retrain_ml"), InlineKeyboardButton("🗑 Очистити", callback_data="clear_stats_confirm")]
-            ])
-        )
-    elif data == "back_to_main_menu":
-        try:
-            query.message.delete()
-        except Exception:
-            pass
-        query.message.reply_text("🏠 Головне меню активне.", reply_markup=main_keyboard(chat_id))
-    elif data.startswith("toggle_group_"):
-        group_key = data.replace("toggle_group_", "")
-        if group_key in strategies_status:
-            strategies_status[group_key] = not strategies_status[group_key]
-            save_strategies_config(strategies_status)
-        send_strategies_menu(query, is_callback=True)
-    elif data.startswith("review_"):
-        sig_id = int(data.replace("review_", ""))
-        query.edit_message_text("🔍 Формую ретроспективний аналіз... ⏳")
+    chat_id = update.effective_chat.id
+    parts = query.data.split("|")
+    action = parts[0]
+    if action == "stats" and len(parts) == 2 and parts[1] in PERIODS:
+        query.edit_message_text(show_stats(chat_id, parts[1]), parse_mode="HTML", reply_markup=stats_keyboard())
+    elif action in ("toggle", "pairs", "pair", "pair_toggle"):
+        if not require_admin(update):
+            return
+        if action == "toggle" and len(parts) == 2 and parts[1] in GROUPED_STRATEGIES:
+            key = parts[1]
+            changed = dict(strategies_status)
+            changed[key] = not changed[key]
+            save_strategies_config(changed)
+            strategies_status.update(changed)
+            query.edit_message_text("⚙️ Пресети та експериментальний фільтр сесій", reply_markup=strategy_keyboard())
+        elif action == "pairs":
+            query.edit_message_text("🎯 Оберіть пару", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(pair, callback_data="pair|" + pair)] for pair in PAIRS_MAP]))
+        elif action == "pair" and len(parts) == 2 and parts[1] in PAIRS_MAP:
+            query.edit_message_text(parts[1], reply_markup=strategy_keyboard(parts[1]))
+        elif action == "pair_toggle" and len(parts) == 3 and parts[1] in PAIRS_MAP and parts[2] in PRESETS:
+            pair, key = parts[1:]
+            database.set_pair_strategy_status(pair, key, not database.get_pair_strategy_status(pair, key))
+            query.edit_message_text(pair, reply_markup=strategy_keyboard(pair))
+    elif action == "review" and len(parts) == 2 and parts[1].isdigit():
+        sig = database.get_signal_by_id(int(parts[1]))
+        if not sig or sig["chat_id"] != chat_id or sig["status"] != "CLOSED":
+            return
         def review():
-            sig = database.get_signal_by_id(sig_id)
-            rev = ai_advisor_instance.evaluate_closed_trade(sig) if sig else "Не знайдено"
-            database.save_signal_ai_review(sig_id, rev)
-            bot.edit_message_text(chat_id=chat_id, message_id=query.message.message_id, text=f"{sig.get('message_text', '')}\n\n🤖 <b>Розбір ШІ:</b>\n{clean_ai_html(rev)}", parse_mode="HTML")
+            result = ai_advisor_instance.evaluate_closed_trade(sig)
+            database.save_signal_ai_review(sig["id"], result)
+            bot.send_message(chat_id=chat_id, text="🤖 <b>Розбір (не причинний доказ):</b>\n" + html.escape(result[:3000]), parse_mode="HTML")
         threading.Thread(target=review, daemon=True).start()
-    elif data == "clear_stats_confirm":
-        query.edit_message_text("Видалити всю статистику?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚠️ ТАК", callback_data="clear_stats_do")], [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_action")]]))
-    elif data == "clear_stats_do":
-        database.clear_all_stats()
-        query.edit_message_text("✅ Статистику очищено!")
-    elif data == "cancel_action":
-        query.edit_message_text("Дію скасовано.")
-    elif data == "retrain_ml":
-        query.edit_message_text("🤖 Перенавчання ШІ... ⏳")
-        def train():
-            success, info = ml_filter.train_model()
-            bot.send_message(chat_id=chat_id, text=f"{'✅' if success else '❌'} {info}")
-        threading.Thread(target=train, daemon=True).start()
 
 
-if __name__ == "__main__":
+def handle_backtest_command(update, context):
+    pair = context.args[0].upper() if context.args else "ALL"
+    if pair != "ALL" and pair not in PAIRS_MAP:
+        update.effective_message.reply_text("Невідома пара. /backtest EUR/USD або /backtest ALL")
+        return
+    chat_id = update.effective_chat.id
+    update.effective_message.reply_text("📊 REV 5m · порівнюю сесії OFF / ON…")
+    settings = dict(strategies_status)
+    def worker():
+        try:
+            reports = run_backtest_all_detailed(strategies_status=settings) if pair == "ALL" else [run_backtest(pair, strategies_status=settings)]
+            for report in reports:
+                bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
+        except Exception:
+            logger.exception("Помилка бектесту")
+            bot.send_message(chat_id=chat_id, text="❌ Не вдалося виконати бектест.")
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def send_daily_report(now=None):
+    now = now or get_utc_now()
+    for chat_id in list(AUTO_SCAN_CHATS):
+        try:
+            rows = database.get_chat_signals(chat_id, since=period_start("today", now), until=utc_datetime(now).replace(tzinfo=None))
+            lines = ["🌙 <b>Денний звіт · сьогодні (Київ)</b>"]
+            for preset in PRESETS:
+                lines.append(wr_line(preset, [row for row in rows if row["strategy"] == preset]))
+            bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="HTML")
+        except Exception:
+            logger.exception("Помилка денного звіту для %s", chat_id)
+
+
+def start_daily_report_loop():
+    def loop():
+        while True:
+            now = utc_datetime(get_utc_now())
+            target = next_daily_report(now)
+            time.sleep(max(1, (target - now).total_seconds()))
+            send_daily_report()
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def main():
+    global bot
+    token = os.environ.get("TELEGRAM_TOKEN")
+    if not token:
+        raise ValueError("TELEGRAM_TOKEN не задано")
+    if not ADMIN_IDS:
+        logger.warning("ADMIN_IDS не задано: глобальне керування доступне всім користувачам.")
+    bot = Bot(token=token)
+    database.init_db()
+    start_finnhub_ws()
+    start_background_checker()
+    start_auto_scanner_loop()
+    start_daily_report_loop()
     bot.delete_webhook(drop_pending_updates=True)
-    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+    updater = Updater(token=token, use_context=True)
     updater.dispatcher.add_handler(CommandHandler("start", start))
     updater.dispatcher.add_handler(CommandHandler("backtest", handle_backtest_command))
     updater.dispatcher.add_handler(CommandHandler("export", handle_export_command))
@@ -1151,6 +564,9 @@ if __name__ == "__main__":
     updater.dispatcher.add_handler(CommandHandler("lab", handle_lab_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    logger.info("🚀 Квантовий бот із оновленими модулями запущено!")
     updater.start_polling()
     updater.idle()
+
+
+if __name__ == "__main__":
+    main()

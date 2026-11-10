@@ -206,6 +206,34 @@ def get_signal_by_id(signal_id):
         return None
 
 
+def get_chat_signals(chat_id, mode="stats", since=None, until=None):
+    clauses = ["chat_id = %s"]
+    parameters = [chat_id]
+    if mode == "active":
+        clauses.append("status = 'PENDING'")
+    elif mode in ("history", "stats"):
+        clauses.append("status IN ('CLOSED', 'VOID')")
+    else:
+        raise ValueError("Unknown signal view")
+    if since is not None:
+        clauses.append("created_at >= %s")
+        parameters.append(since)
+    if until is not None:
+        clauses.append("created_at < %s")
+        parameters.append(until)
+    query = "SELECT * FROM signals WHERE " + " AND ".join(clauses) + " ORDER BY created_at DESC, id DESC"
+    if mode == "history":
+        query = query.replace(" ORDER BY", " AND (status = 'VOID' OR result IN ('WIN', 'LOSS', 'NEUTRAL')) ORDER BY")
+        query += " LIMIT 15"
+    conn = get_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query, parameters)
+            return cursor.fetchall()
+    finally:
+        conn.close()
+
+
 def has_open_reversion_signal(ticker, strategy):
     conn = get_connection()
     try:

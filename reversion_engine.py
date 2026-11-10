@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from trading_sessions import session_allowed, session_name
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,6 @@ PRESETS = {
     "REV_BB3": 60,
     "REV_RSI7": 45,
 }
-CONFLUENCE_KEYS = ("trend_multi", "flat_corridor", "price_action", "oscillators")
 
 
 def is_reversion(cand):
@@ -23,18 +23,14 @@ def is_reversion(cand):
 
 
 def load_strategy_config(path):
-    defaults = dict.fromkeys(CONFLUENCE_KEYS, False)
-    defaults.update(dict.fromkeys(PRESETS, True))
+    defaults = dict.fromkeys(PRESETS, True)
+    defaults["session_filter"] = False
     if not Path(path).exists():
         return defaults
     try:
         saved = json.loads(Path(path).read_text(encoding="utf-8"))
-        for visible, legacy in (("price_action", "market_levels"), ("oscillators", "volume_volatility")):
-            if visible not in saved and legacy in saved:
-                saved[visible] = saved[legacy]
-        for key in defaults:
-            saved.setdefault(key, True)
-        return saved
+        return {key: saved.get(key, value) if isinstance(saved.get(key, value), bool) else value
+                for key, value in defaults.items()}
     except (OSError, ValueError, TypeError, AttributeError):
         logger.exception("Помилка читання конфігурації стратегій")
         return defaults
@@ -83,6 +79,8 @@ def candidates_from_indicators(pair_name, closed, now, strategies_status=None, p
     for strategy, expiration in PRESETS.items():
         if not status.get(strategy, True) or not last[strategy]:
             continue
+        if status.get("session_filter", False) and not session_allowed(strategy, bar_end):
+            continue
         if pair_enabled is not None and not pair_enabled(pair_name, strategy):
             continue
         return [dict(pair=pair_name, tf="5m", tf_minutes=5, strategy=strategy,
@@ -91,6 +89,7 @@ def candidates_from_indicators(pair_name, closed, now, strategies_status=None, p
                      rsi=float(last["rsi7" if strategy == "REV_RSI7" else "rsi14"]),
                      bar_id=f"{pair_name}|5m|{closed.index[-1]}", bar_end=bar_end,
                      bar_age_sec=age, exp_range=(expiration, expiration), suggested_exp=expiration,
+                     session=session_name(bar_end),
                      confirmations=0, confirmation_names=[], regime="REVERSION",
                      reason=f"{strategy}: відбій 5m, фіксована експірація {expiration} хв")]
     return []
