@@ -181,8 +181,8 @@ class AdaptiveTechnicalAnalysis:
 
         call_score = 0.0
         put_score = 0.0
-        reasons = []
-        active_strategies_hit = []
+        call_reasons, put_reasons = [], []
+        call_hits, put_hits = [], []
 
         rsi_1m = float(last_1m.get('rsi', 50))
         z_score = float(last_1m.get('z_score', 0))
@@ -211,57 +211,58 @@ class AdaptiveTechnicalAnalysis:
                 # Відкат до EMA20 або VWAP під час висхідного тренду
                 if (previous['low'] <= previous_ema * 1.0005 or previous['low'] <= previous_vwap * 1.0005) and current_price > last_1m['open'] and current_price > ema_20_val and rsi_1m > 38 and rsi_1m < upper_rsi:
                     call_score += 2.5 * w_trend
-                    reasons.append("Trend Pullback Continuation (BULLISH EMA/VWAP)")
-                    active_strategies_hit.append("TREND_IMPULSE")
+                    call_reasons.append("Trend Pullback Continuation (BULLISH EMA/VWAP)")
+                    call_hits.append("TREND_IMPULSE")
             elif global_trend == mid_trend == confirm_trend == "BEARISH":
                 # Відкат до EMA20 або VWAP під час спадного тренду
                 if (previous['high'] >= previous_ema * 0.9995 or previous['high'] >= previous_vwap * 0.9995) and current_price < last_1m['open'] and current_price < ema_20_val and rsi_1m < 62 and rsi_1m > lower_rsi:
                     put_score += 2.5 * w_trend
-                    reasons.append("Trend Pullback Continuation (BEARISH EMA/VWAP)")
-                    active_strategies_hit.append("TREND_IMPULSE")
+                    put_reasons.append("Trend Pullback Continuation (BEARISH EMA/VWAP)")
+                    put_hits.append("TREND_IMPULSE")
 
         # 2. КЛАСТЕР: RANGE_CORRIDOR (Флетові коридори + RSI Divergence)
         is_range_active = strategies_status.get("flat_corridor", True) and database.get_pair_strategy_status(pair_name, "flat_corridor")
         if is_range_active and regime in ["RANGE_BOUND", "TREND_EXHAUSTION"]:
             if (last_1m['close'] <= last_1m['bb_lower'] or z_score <= -1.8) and (rsi_1m < lower_rsi or divergence == "BULLISH"):
                 call_score += 2.4 * w_bb
-                reasons.append(f"Range Corridor Bounce (BB Lower / RSI Div: {divergence})")
-                active_strategies_hit.append("RANGE_CORRIDOR")
+                call_reasons.append(f"Range Corridor Bounce (BB Lower / RSI Div: {divergence})")
+                call_hits.append("RANGE_CORRIDOR")
             elif (last_1m['close'] >= last_1m['bb_upper'] or z_score >= 1.8) and (rsi_1m > upper_rsi or divergence == "BEARISH"):
                 put_score += 2.4 * w_bb
-                reasons.append(f"Range Corridor Bounce (BB Upper / RSI Div: {divergence})")
-                active_strategies_hit.append("RANGE_CORRIDOR")
+                put_reasons.append(f"Range Corridor Bounce (BB Upper / RSI Div: {divergence})")
+                put_hits.append("RANGE_CORRIDOR")
 
         # 3. КЛАСТЕР: PRICE_LEVELS (Price Action & Pivot + Liquidity Sweep у CHAOS)
-        is_levels_active = (strategies_status.get("price_action", True) and database.get_pair_strategy_status(pair_name, "price_action")) or \
-                           (strategies_status.get("market_levels", True) and database.get_pair_strategy_status(pair_name, "market_levels"))
+        is_levels_active = strategies_status.get("price_action", strategies_status.get("market_levels", True)) and database.get_pair_strategy_status(pair_name, "price_action")
         if is_levels_active:
             if regime == "CHAOS":
                 # У режимі CHAOS дозволено ВИКЛЮЧНО Liquidity Sweep з довгою тінню
-                if wick_ratio > 0.45:
-                    if last_1m['close'] > last_1m['open']:
+                candle_range = float(last_1m['high'] - last_1m['low'])
+                lower_wick = min(last_1m['open'], last_1m['close']) - last_1m['low']
+                upper_wick = last_1m['high'] - max(last_1m['open'], last_1m['close'])
+                if candle_range > 0:
+                    if last_1m['close'] > last_1m['open'] and lower_wick / candle_range > 0.45:
                         call_score += 2.4
-                        reasons.append(f"CHAOS Liquidity Sweep (Нижня тінь: {wick_ratio:.2f})")
-                        active_strategies_hit.append("PRICE_LEVELS")
-                    else:
+                        call_reasons.append(f"CHAOS Liquidity Sweep (Нижня тінь: {lower_wick / candle_range:.2f})")
+                        call_hits.append("PRICE_LEVELS")
+                    elif last_1m['close'] < last_1m['open'] and upper_wick / candle_range > 0.45:
                         put_score += 2.4
-                        reasons.append(f"CHAOS Liquidity Sweep (Верхня тінь: {wick_ratio:.2f})")
-                        active_strategies_hit.append("PRICE_LEVELS")
+                        put_reasons.append(f"CHAOS Liquidity Sweep (Верхня тінь: {upper_wick / candle_range:.2f})")
+                        put_hits.append("PRICE_LEVELS")
             else:
                 dist_piv = self.get_min_dist_to_pivot_or_round(current_price, pivots)
                 if dist_piv < 0.0003 and wick_ratio > 0.35:
                     if rsi_1m < 48:
                         call_score += 1.8
-                        reasons.append("Pivot Level Reaction + Wick (CALL)")
-                        active_strategies_hit.append("PRICE_LEVELS")
+                        call_reasons.append("Pivot Level Reaction + Wick (CALL)")
+                        call_hits.append("PRICE_LEVELS")
                     elif rsi_1m > 52:
                         put_score += 1.8
-                        reasons.append("Pivot Level Reaction + Wick (PUT)")
-                        active_strategies_hit.append("PRICE_LEVELS")
+                        put_reasons.append("Pivot Level Reaction + Wick (PUT)")
+                        put_hits.append("PRICE_LEVELS")
 
         # 4. КЛАСТЕР: MICRO_BREAKOUT (VWAP Bounce & SQUEEZE з фільтром Candle Close)
-        is_breakout_active = (strategies_status.get("volume_volatility", True) and database.get_pair_strategy_status(pair_name, "volume_volatility")) or \
-                             (strategies_status.get("oscillators", True) and database.get_pair_strategy_status(pair_name, "oscillators"))
+        is_breakout_active = strategies_status.get("oscillators", strategies_status.get("volume_volatility", True)) and database.get_pair_strategy_status(pair_name, "oscillators")
         if is_breakout_active:
             if regime == "SQUEEZE":
                 # Фільтр підтвердження імпульсної свічки поглинання (Candle Close Filter)
@@ -269,50 +270,49 @@ class AdaptiveTechnicalAnalysis:
                 if candle_body > curr_atr * 0.7:
                     if last_1m['close'] > last_1m['bb_upper'] and macd_hist > 0:
                         call_score += 2.2
-                        reasons.append("SQUEEZE Confirmed Breakout (CALL)")
-                        active_strategies_hit.append("MICRO_BREAKOUT")
+                        call_reasons.append("SQUEEZE Confirmed Breakout (CALL)")
+                        call_hits.append("MICRO_BREAKOUT")
                     elif last_1m['close'] < last_1m['bb_lower'] and macd_hist < 0:
                         put_score += 2.2
-                        reasons.append("SQUEEZE Confirmed Breakout (PUT)")
-                        active_strategies_hit.append("MICRO_BREAKOUT")
+                        put_reasons.append("SQUEEZE Confirmed Breakout (PUT)")
+                        put_hits.append("MICRO_BREAKOUT")
             else:
                 # VWAP + Stochastic Micro-bounce
                 if stoch_k < 20 and current_price > vwap_val and macd_hist > 0:
                     call_score += 1.8
-                    reasons.append("VWAP Micro-Bounce (CALL)")
-                    active_strategies_hit.append("MICRO_BREAKOUT")
+                    call_reasons.append("VWAP Micro-Bounce (CALL)")
+                    call_hits.append("MICRO_BREAKOUT")
                 elif stoch_k > 80 and current_price < vwap_val and macd_hist < 0:
                     put_score += 1.8
-                    reasons.append("VWAP Micro-Bounce (PUT)")
-                    active_strategies_hit.append("MICRO_BREAKOUT")
+                    put_reasons.append("VWAP Micro-Bounce (PUT)")
+                    put_hits.append("MICRO_BREAKOUT")
 
         base_suggested_exp = 3 if regime in ["SQUEEZE", "TREND_EXHAUSTION"] else 5
         smart_exp = calculate_smart_expiration(base_suggested_exp, regime, vol_ratio)
-        dominant_strategy = active_strategies_hit[0] if active_strategies_hit else "QUANTUM_MATRIX"
 
         if call_score >= dyn_threshold and call_score > put_score:
             return {
                 'signal': 'CALL',
-                'strategy': dominant_strategy,
+                'strategy': call_hits[0],
                 'strategy_title': f'Квантовий CALL [{regime}]',
-                'signal_type_engine': dominant_strategy,
+                'signal_type_engine': call_hits[0],
                 'confluence_count': int(round(call_score)),
                 'suggested_exp': smart_exp,
                 'regime': regime,
                 'dyn_threshold': dyn_threshold,
-                'reason': " | ".join(reasons)
+                'reason': " | ".join(call_reasons)
             }
         elif put_score >= dyn_threshold and put_score > call_score:
             return {
                 'signal': 'PUT',
-                'strategy': dominant_strategy,
+                'strategy': put_hits[0],
                 'strategy_title': f'Квантовий PUT [{regime}]',
-                'signal_type_engine': dominant_strategy,
+                'signal_type_engine': put_hits[0],
                 'confluence_count': int(round(put_score)),
                 'suggested_exp': smart_exp,
                 'regime': regime,
                 'dyn_threshold': dyn_threshold,
-                'reason': " | ".join(reasons)
+                'reason': " | ".join(put_reasons)
             }
 
         return {

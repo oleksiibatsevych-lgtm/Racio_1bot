@@ -18,8 +18,12 @@ def get_live_price(symbol: str):
     """Отримання поточної ціни з WebSocket."""
     if not symbol:
         return None
-    clean_sym = str(symbol).strip()
-    return live_prices.get(clean_sym)
+    quote = get_live_quote(symbol)
+    return quote[0] if quote else None
+
+
+def get_live_quote(symbol: str):
+    return live_prices.get(str(symbol).strip()) if symbol else None
 
 
 def on_message(ws, message):
@@ -30,7 +34,8 @@ def on_message(ws, message):
                 sym = item.get("s")
                 price = item.get("p")
                 if sym and price:
-                    live_prices[sym] = float(price)
+                    ts = float(item.get("t") or time.time() * 1000) / 1000.0
+                    live_prices[sym] = (float(price), ts)
                     tick_candles.add_tick(sym, price, item.get("t"))
     except Exception as e:
         logger.error(f"⚠️ Помилка обробки WS повідомлення: {e}")

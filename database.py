@@ -72,6 +72,7 @@ def init_db():
 
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(50);")
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_review TEXT;")
+        cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;")
 
         # Таблиця для персоналізації стратегій по конкретних парах (ВКЛ/ВИКЛ)
         cursor.execute(
@@ -146,6 +147,7 @@ def save_signal(
     score=None,
     expiration_mins=None,
     timestamp_str=None,
+    expires_at=None,
     message_text=None,
     rsi=None,
     adx=None,
@@ -169,15 +171,15 @@ def save_signal(
             INSERT INTO signals (
                 chat_id, message_id, ticker, signal_type, entry_price, primary_tf, 
                 score, expiration_mins, timestamp_str, message_text, rsi, adx, bb_width,
-                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy, status
+                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy, status, expires_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id;
             """,
             (
                 chat_id, message_id, ticker, signal_type, entry_price, primary_tf,
                 score, expiration_mins, timestamp_str, message_text, rsi, adx, bb_width,
-                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy, status
+                session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy, status, expires_at
             ),
         )
         signal_id = cursor.fetchone()[0]
@@ -285,7 +287,7 @@ def get_stats():
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses,
                 COUNT(*) FILTER (WHERE status = 'PENDING') as pending
-            FROM signals WHERE status != 'SHADOW';
+            FROM signals WHERE status NOT IN ('SHADOW', 'VOID');
             """
         )
         stats = cursor.fetchone()
@@ -312,7 +314,7 @@ def get_detailed_pair_strategy_stats(ticker_filter=None, strategy_filter=None):
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses
             FROM signals 
-            WHERE result IN ('WIN', 'LOSS')
+            WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
         """
         params = []
         if ticker_filter:
@@ -370,7 +372,7 @@ def get_segment_stats():
                    COUNT(*) AS total,
                    COUNT(*) FILTER (WHERE result = 'WIN') AS wins
             FROM signals
-            WHERE result IN ('WIN', 'LOSS')
+            WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
             GROUP BY ticker, COALESCE(primary_tf, '1m'), COALESCE(strategy, 'QUANTUM_MATRIX');
             """
         )
@@ -488,7 +490,7 @@ def get_strategy_time_stats():
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses
             FROM signals 
-            WHERE result IN ('WIN', 'LOSS')
+            WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
             GROUP BY strategy, trade_hour
             ORDER BY strategy, trade_hour;
         """)
@@ -502,7 +504,7 @@ def get_strategy_time_stats():
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses
             FROM signals 
-            WHERE result IN ('WIN', 'LOSS')
+            WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
             GROUP BY strategy, trade_dow
             ORDER BY strategy, trade_dow;
         """)

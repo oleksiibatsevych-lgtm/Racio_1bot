@@ -143,7 +143,7 @@ class TradingMLFilter:
                        COALESCE(score, 0) AS confirmations,
                        result
                 FROM signals
-                WHERE result IN ('WIN', 'LOSS') AND bb_width IS NOT NULL
+                WHERE result IN ('WIN', 'LOSS') AND status != 'VOID' AND bb_width IS NOT NULL
                 ORDER BY id ASC
             """
             df = pd.read_sql(query, conn)
@@ -179,6 +179,7 @@ class TradingMLFilter:
             if auc < MIN_TEST_AUC:
                 self.model = None
                 self.meta = {"trained": False, "auc": round(auc, 3), "rows": len(df), "version": MODEL_VERSION}
+                self.save_model()
                 return False, (f"⚠️ Модель не пройшла валідацію (AUC на тесті {auc:.3f} < {MIN_TEST_AUC}). "
                                f"Фільтр лишається нейтральним — це чесніше, ніж вдавати прогноз.")
 

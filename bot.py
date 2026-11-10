@@ -40,7 +40,7 @@ from telegram.ext import (
 from config import FINNHUB_API_KEY, FINNHUB_TOKEN, PAIRS_MAP, YAHOO_PAIRS_MAP
 from charts import create_chart_image
 import database
-from finnhub_ws import get_live_price, start_finnhub_ws
+from finnhub_ws import get_live_price, get_live_quote, start_finnhub_ws
 from indicators import AdaptiveTechnicalAnalysis
 from ml_model import TradingMLFilter
 from ai_advisor import ai_advisor_instance
@@ -50,7 +50,7 @@ from filters import (
     calculate_dynamic_expiration,
 )
 from calendar_filter import is_high_impact_news_time
-from signal_pipeline import generate_candidates
+from signal_pipeline import generate_candidates, build_closed_frames
 import tick_candles
 from quality_gate import SignalGate, SegmentFilter
 from timeframe_profiles import PROFILES, ACTIVE_PROFILES
@@ -67,6 +67,16 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+ADMIN_IDS = {int(value.strip()) for value in os.environ.get("ADMIN_IDS", "").split(",") if value.strip()}
+if not ADMIN_IDS:
+    logger.warning("ADMIN_IDS не задано: глобальне керування доступне всім користувачам.")
+
+
+def require_admin(update):
+    if not ADMIN_IDS or update.effective_user.id in ADMIN_IDS:
+        return True
+    update.effective_message.reply_text("⛔ Ця дія доступна лише адміністратору.")
+    return False
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
@@ -101,6 +111,9 @@ def load_strategies_config():
         try:
             with open(STRATEGIES_CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
+                for visible, legacy in (("price_action", "market_levels"), ("oscillators", "volume_volatility")):
+                    if visible not in saved and legacy in saved:
+                        saved[visible] = saved[legacy]
                 for k in default_cfg:
                     if k not in saved:
                         saved[k] = True
@@ -245,9 +258,9 @@ def fetch_all_timeframes(ticker_finnhub, ticker_yahoo=""):
     if cached_data and (current_time - cached_data["timestamp"] < CACHE_TTL):
         df_1h, df_daily = cached_data["1h"], cached_data["1d"]
     else:
-        df_1h = fetch_finnhub_candles(ticker_finnhub, resolution="60", count_candles=200)
-        if df_1h.empty and ticker_yahoo:
-            df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="30d")
+        df_1h = fetch_finnhub_candles(ticker_finnhub, resolution="60", count_candles=300)
+        if len(df_1h) < 260 and ticker_yahoo:
+            df_1h = fetch_yahoo_fallback(ticker_yahoo, interval="1h", range_period="60d")
         df_daily = fetch_finnhub_candles(ticker_finnhub, resolution="D", count_candles=30)
         if df_daily.empty and ticker_yahoo:
             df_daily = fetch_yahoo_fallback(ticker_yahoo, interval="1d", range_period="60d")
@@ -277,21 +290,23 @@ def get_current_session_info():
     return ", ".join(sessions) if sessions else "Тихоокеанська сесія", session_code, hour
 
 
-def get_exit_price(ticker, name=""):
-    price = get_live_price(ticker)
-    if price and float(price) > 0:
-        return float(price)
-    df = fetch_finnhub_candles(ticker, resolution="1", count_candles=5)
-    if df is not None and not df.empty:
-        return float(df["close"].iloc[-1])
+def get_exit_price(ticker, expires_at, name=""):
+    quote = get_live_quote(ticker)
+    now = get_utc_now()
+    if quote:
+        price, ts = quote
+        quote_time = datetime.fromtimestamp(ts, timezone.utc).replace(tzinfo=None)
+        if price > 0 and 0 <= (now - quote_time).total_seconds() <= 20 and abs((quote_time - expires_at).total_seconds()) <= 20:
+            return float(price)
+    minute = pd.Timestamp(expires_at).floor("min")
+    ticks = tick_candles.get_1m(ticker, now_ts=now.replace(tzinfo=timezone.utc).timestamp())
+    if ticks is not None and not ticks.empty and minute in ticks.index and ticks.loc[minute, "volume"] > 0 and minute + pd.Timedelta(minutes=1) <= now:
+        return float(ticks.loc[minute, "close"])
     yahoo_ticker = normalize_yahoo_ticker(ticker, name)
     if yahoo_ticker:
-        price_yf = get_live_price(yahoo_ticker)
-        if price_yf and float(price_yf) > 0:
-            return float(price_yf)
         df_yf = fetch_yahoo_fallback(yahoo_ticker, interval="1m", range_period="1d")
-        if df_yf is not None and not df_yf.empty:
-            return float(df_yf["close"].iloc[-1])
+        if df_yf is not None and not df_yf.empty and minute in df_yf.index and minute + pd.Timedelta(minutes=1) <= now:
+            return float(df_yf.loc[minute, "close"])
     return None
 
 
@@ -308,11 +323,11 @@ def process_signal_expiration(sig_id):
         expiration_mins = int(sig_data.get("expiration_mins", 5))
 
         created_at = parse_dt(sig_data.get("timestamp_str"))
-        elapsed_seconds = (get_utc_now() - created_at).total_seconds()
-        target_seconds = expiration_mins * 60
+        expires_at = parse_dt(sig_data["expires_at"]) if sig_data.get("expires_at") else created_at + timedelta(minutes=expiration_mins)
+        seconds_late = (get_utc_now() - expires_at).total_seconds()
 
-        if 0 <= elapsed_seconds < (target_seconds - 10):
-            timer = threading.Timer(target_seconds - elapsed_seconds, process_signal_expiration, args=[sig_id])
+        if seconds_late < 0:
+            timer = threading.Timer(-seconds_late, process_signal_expiration, args=[sig_id])
             timer.daemon = True
             timer.start()
             return
@@ -322,12 +337,16 @@ def process_signal_expiration(sig_id):
         claimed = True
 
         pair_name = next((k for k, v in PAIRS_MAP.items() if v == ticker), "")
-        exit_price = get_exit_price(ticker, pair_name)
+        exit_price = get_exit_price(ticker, expires_at, pair_name)
         if not exit_price:
-            database.release_signal(sig_id)
-            timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
-            timer.daemon = True
-            timer.start()
+            if seconds_late <= 180:
+                database.release_signal(sig_id)
+                timer = threading.Timer(30, process_signal_expiration, args=[sig_id])
+                timer.daemon = True
+                timer.start()
+                return
+            database.update_signal_result(sig_id, "NEUTRAL", None, 0, status="VOID")
+            bot.send_message(chat_id=sig_data["chat_id"], text=f"➖ Угоду #{sig_id} анульовано: немає котирування на час експірації.")
             return
 
         if exit_price == entry_price:
@@ -397,7 +416,8 @@ def start_background_checker():
         while True:
             try:
                 for row in database.get_pending_signals():
-                    if get_utc_now() >= parse_dt(row["timestamp_str"]) + timedelta(minutes=row["expiration_mins"]):
+                    expiry = parse_dt(row["expires_at"]) if row.get("expires_at") else parse_dt(row["timestamp_str"]) + timedelta(minutes=row["expiration_mins"])
+                    if get_utc_now() >= expiry:
                         process_signal_expiration(row["id"])
             except Exception as e:
                 logger.error(f"Помилка перевірки сигналів: {e}")
@@ -484,26 +504,40 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
         "current_price": cand.get("current_price"), "rsi": cand.get("rsi"), "adx": cand.get("adx"),
         "reason": cand.get("reason"), "suggested_exp": exp_time, "tf": tf,
         "confirmations": cand.get("confirmations"),
+        "chart_tfs": ("1h", prof["confirm"], prof["primary"]), "exp_range": (lo, hi),
     }
 
     ai_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_KEY")
+    c_macro = c_mid = c_micro = None
     if ai_key:
-        c_macro = create_chart_image(frames.get("1h"), f"{pair_name} - 1H", tf_label="1H")
-        c_mid = create_chart_image(frames.get(prof["confirm"]), f"{pair_name} - {prof['confirm']}", tf_label=prof["confirm"])
-        c_micro = create_chart_image(frames.get(prof["primary"]), f"{pair_name} - {tf}", tf_label=tf)
+        closed = build_closed_frames(frames, get_utc_now())
+        charts = []
+        for label in payload["chart_tfs"]:
+            chart_df = closed.get(label)
+            charts.append(create_chart_image(chart_df, f"{pair_name} - {label}", tf_label=label) if chart_df is not None and not chart_df.empty else None)
+        c_macro, c_mid, c_micro = charts
         payload["recent_mistakes"] = database.get_recent_failed_reviews_summary(ticker_finnhub, limit=3)
-        ai_res = ai_advisor_instance.evaluate_signal(pair_name, payload, c_macro, c_mid, c_micro)
-    else:
-        ai_res = {"decision": "YES", "confidence": 7, "suggested_expiration": exp_time, "reason": "ШІ вимкнено"}
+    ai_res = ai_advisor_instance.evaluate_signal(pair_name, payload, c_macro, c_mid, c_micro)
 
     if ai_res.get("decision", "YES") != "YES" or ai_res.get("confidence", 6) < (6 if auto_mode else 5):
         return False, f"ШІ відхилив: {ai_res.get('reason', '')}"
+
+    if (get_utc_now() - cand["bar_end"]).total_seconds() > prof["max_age_sec"] + 30:
+        return False, "Сигнал застарів під час перевірки ШІ"
+    ok, why = signal_gate.check(cand)
+    if not ok:
+        return False, why
+    live_price = get_live_price(ticker_finnhub)
+    if live_price:
+        adverse_move = cand["current_price"] - live_price if cand["signal"] == "CALL" else live_price - cand["current_price"]
+        if adverse_move > 0.5 * cand.get("atr", 0):
+            return False, "Ціна пішла проти сигналу більше ніж на 0.5 ATR"
 
     # ШІ може коригувати експірацію лише в межах діапазону цього ТФ
     ai_exp = int(max(lo, min(hi, int(ai_res.get("suggested_expiration", exp_time)))))
 
     # Ціна входу — реальна ціна в момент відправки, а не ціна закриття свічки
-    entry_price = get_live_price(ticker_finnhub) or cand["current_price"]
+    entry_price = live_price or cand["current_price"]
     entry_price = float(entry_price)
 
     direction_icon = "🟢 CALL (ВХІД ВГОРУ)" if cand["signal"] == "CALL" else "🔴 PUT (ВХІД ВНИЗ)"
@@ -539,6 +573,8 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
         InlineKeyboardButton("📊 Статистика пари", callback_data=f"pair_stats_{pair_name}"),
     ]])
 
+    signal_time = get_utc_now()
+    expires_at = signal_time + timedelta(minutes=ai_exp)
     sent_msg_id = status_msg_id
     if status_msg_id:
         try:
@@ -552,16 +588,19 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames, auto_mod
         chat_id=chat_id, message_id=sent_msg_id, ticker=ticker_finnhub,
         signal_type=cand["signal"], entry_price=entry_price, primary_tf=tf,
         score=cand["confirmations"], expiration_mins=ai_exp, message_text=msg_text,
-        timestamp_str=get_utc_now().strftime("%Y-%m-%d %H:%M:%S"),
+        timestamp_str=signal_time.strftime("%Y-%m-%d %H:%M:%S"), expires_at=expires_at,
         rsi=cand.get("rsi"), adx=cand.get("adx"), bb_width=cand.get("bb_width"),
         session_code=s_code, hour=s_hour, divergence=cand.get("divergence", "NONE"),
         dist_pivot=cand.get("dist_pivot"), volatility_ratio=cand.get("volatility_ratio"),
         wick_ratio=cand.get("wick_ratio"), ema_dist=cand.get("ema_dist"),
         strategy=cand.get("strategy"),
     )
+    if not sig_id:
+        logger.error(f"Сигнал {pair_name}/{tf} відправлено, але не збережено в БД")
+        bot.send_message(chat_id=chat_id, text="⚠️ Сигнал не збережено в БД; автоматичний результат не відстежується.")
+        return False, "Помилка збереження сигналу"
     signal_gate.register(cand, ai_exp)
-    if sig_id:
-        schedule_signal_timer(sig_id, get_utc_now(), ai_exp)
+    schedule_signal_timer(sig_id, signal_time, ai_exp)
     return True, "OK"
 
 
@@ -678,6 +717,8 @@ LAB_PROC = None
 def handle_lab_run_command(update, context):
     """/lab_run — запускає лабораторію у фоні (скачує 1m-історію і перевіряє ~640 конфігурацій)."""
     global LAB_PROC
+    if not require_admin(update):
+        return
     if LAB_PROC is not None and LAB_PROC.poll() is None:
         update.message.reply_text("⏳ Лабораторія вже працює. Результат: /lab")
         return
@@ -693,6 +734,8 @@ def handle_lab_run_command(update, context):
 
 def handle_lab_command(update, context):
     """/lab — надсилає останній звіт лабораторії."""
+    if not require_admin(update):
+        return
     base = os.path.dirname(os.path.abspath(__file__))
     if LAB_PROC is not None and LAB_PROC.poll() is None:
         update.message.reply_text("⏳ Лабораторія ще рахує, спробуйте через хвилину.")
@@ -712,6 +755,8 @@ def handle_lab_command(update, context):
 
 
 def handle_backtest_command(update, context):
+    if not require_admin(update):
+        return
     chat_id = update.effective_chat.id
     args = context.args  
     
@@ -720,11 +765,11 @@ def handle_backtest_command(update, context):
         if pair == "ALL":
             run_backtest_all_pairs(chat_id)
             return
-        bot.send_message(chat_id=chat_id, text=f"⏳ Запускаю бектест для <code>{pair}</code> (30 днів)...", parse_mode="HTML")
+        bot.send_message(chat_id=chat_id, text=f"⏳ Запускаю бектест для <code>{pair}</code> (~7 днів)...", parse_mode="HTML")
         
         def run_bg():
             try:
-                report = run_backtest(pair, "30d")
+                report = run_backtest(pair, strategies_status=dict(strategies_status))
                 bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
             except Exception as e:
                 bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
@@ -740,11 +785,11 @@ def handle_backtest_command(update, context):
 
 
 def run_backtest_all_pairs(chat_id):
-    bot.send_message(chat_id=chat_id, text="🌐 <b>Запускаю паралельний бектест по УСІХ парах та УСІХ стратегіях (30d)...</b>", parse_mode="HTML")
+    bot.send_message(chat_id=chat_id, text="🌐 <b>Запускаю послідовний бектест усіх пар із поточними стратегіями (~7 днів)...</b>", parse_mode="HTML")
     
     def worker():
         try:
-            reports = run_backtest_all_detailed("30d")
+            reports = run_backtest_all_detailed(strategies_status=dict(strategies_status))
             for rep in reports:
                 bot.send_message(chat_id=chat_id, text=rep, parse_mode="HTML")
         except Exception as e:
@@ -779,21 +824,25 @@ def send_strategies_menu(update_obj, is_callback=False):
         update_obj.message.reply_text(text_msg, parse_mode="HTML", reply_markup=markup)
 
 
-def start(update, context):
-    user = update.effective_user
-    database.register_user(user.id, user.username)
+def main_keyboard(chat_id):
     ml_txt = "🤖 ML-Модель: ВКЛ" if ML_FILTER_ENABLED else "🤖 ML-Модель: ВИКЛ"
     
     keyboard = [
-        [KeyboardButton("⚡ Масовий сканер"), KeyboardButton("🔔 Авто-сканер [ВКЛ]" if update.effective_chat.id in AUTO_SCAN_CHATS else "🔔 Авто-сканер [ВИКЛ]"), KeyboardButton("💵 Вибір пари")],
-        [KeyboardButton("📈 Статистика"), KeyboardButton("📊 Бектест (30d)"), KeyboardButton("⚙️ Конфігуратор")],
+        [KeyboardButton("⚡ Масовий сканер"), KeyboardButton("🔔 Авто-сканер [ВКЛ]" if chat_id in AUTO_SCAN_CHATS else "🔔 Авто-сканер [ВИКЛ]"), KeyboardButton("💵 Вибір пари")],
+        [KeyboardButton("📈 Статистика"), KeyboardButton("📊 Бектест (~7d)"), KeyboardButton("⚙️ Конфігуратор")],
         [KeyboardButton("📋 Системні логи"), KeyboardButton(ml_txt)]
     ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def start(update, context):
+    user = update.effective_user
+    database.register_user(user.id, user.username)
     update.message.reply_text(
         "🤖 <b>Квантовий бот Racio_1bot успішно активовано!</b>\n\n"
         "Інтерфейс оптимізовано, 4 комплекси стратегій та динамічні пороги працюють у реальному часі.",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        reply_markup=main_keyboard(update.effective_chat.id)
     )
 
 
@@ -801,7 +850,7 @@ def handle_message(update, context):
     text, chat_id = update.message.text, update.effective_chat.id
     if text == "⚡ Масовий сканер" or text == "📊 Аналіз усіх пар":
         threading.Thread(target=run_mass_analysis, args=[chat_id], daemon=True).start()
-    elif text == "📊 Бектест (30d)" or text == "📊 Бектест":
+    elif text in ("📊 Бектест (~7d)", "📊 Бектест (30d)", "📊 Бектест"):
         handle_backtest_command(update, context)
     elif text == "⚙️ Конфігуратор" or text == "⚙️ Стратегії":
         send_strategies_menu(update, is_callback=False)
@@ -811,17 +860,14 @@ def handle_message(update, context):
             update.message.reply_text("🔴 Авто-сканер ВИМКНЕНО.")
         else:
             AUTO_SCAN_CHATS.add(chat_id)
-            update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО (щохвилини, ТФ: 1m/3m/5m/15m).")
+            update.message.reply_text("🟢 Авто-сканер УВІМКНЕНО (ТФ: 3m/5m/15m).")
     elif text in ["🤖 ML-Модель: ВКЛ", "🤖 ML-Модель: ВИКЛ", "🟢 ML-фільтр: ВКЛ", "🔴 ML-фільтр: ВИКЛ"]:
         global ML_FILTER_ENABLED
+        if not require_admin(update):
+            return
         ML_FILTER_ENABLED = not ML_FILTER_ENABLED
         ml_txt = "🤖 ML-Модель: ВКЛ" if ML_FILTER_ENABLED else "🤖 ML-Модель: ВИКЛ"
-        keyboard = [
-            [KeyboardButton("⚡ Масовий сканер"), KeyboardButton("🔔 Авто-сканер"), KeyboardButton("💵 Вибір пари")],
-            [KeyboardButton("📈 Статистика"), KeyboardButton("📊 Бектест (30d)"), KeyboardButton("⚙️ Конфігуратор")],
-            [KeyboardButton("📋 Системні логи"), KeyboardButton(ml_txt)]
-        ]
-        update.message.reply_text(f"⚙️ ML-фільтр {'увімкнено' if ML_FILTER_ENABLED else 'вимкнено'}.", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        update.message.reply_text(f"⚙️ ML-фільтр {'увімкнено' if ML_FILTER_ENABLED else 'вимкнено'}.", reply_markup=main_keyboard(chat_id))
     elif text == "💵 Вибір пари" or text == "💵 Пари":
         buttons = [InlineKeyboardButton(name, callback_data=f"analyze_{name}") for name in PAIRS_MAP.keys()]
         update.message.reply_text("💵 <b>Оберіть валютну пару для аналізу:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons[i:i+3] for i in range(0, len(buttons), 3)]))
@@ -854,6 +900,8 @@ def handle_callback(update, context):
     query = update.callback_query
     query.answer()
     chat_id, data = query.message.chat_id, query.data
+    if (data.startswith(("toggle_group_", "toggle_cpair_", "bt_")) or data in ("retrain_ml", "clear_stats_confirm", "clear_stats_do")) and not require_admin(update):
+        return
     
     if data.startswith("analyze_"):
         pair = data.replace("analyze_", "")
@@ -876,6 +924,20 @@ def handle_callback(update, context):
         if len(rows) == 0:
             lines.append("⚠️ Недостатньо закритих угод для цього активу.")
         query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад до дашборду", callback_data="back_to_stats")]]))
+    elif data in ("dash_pairs", "dash_strategies"):
+        rows = database.get_detailed_pair_strategy_stats()
+        totals = {}
+        for row in rows:
+            key = row["ticker"] if data == "dash_pairs" else row["strategy"]
+            wins, total = totals.get(key, (0, 0))
+            totals[key] = (wins + int(row["wins"]), total + int(row["total"]))
+        lines = ["📊 <b>По парах:</b>" if data == "dash_pairs" else "📊 <b>По стратегіях:</b>"]
+        for key, (wins, total) in sorted(totals.items(), key=lambda item: item[1][0] / item[1][1] if item[1][1] else 0, reverse=True):
+            label = next((pair for pair, ticker in PAIRS_MAP.items() if ticker == key), key) if data == "dash_pairs" else key
+            lines.append(f"{html.escape(label)}: {wins}/{total} ({wins / total * 100 if total else 0:.1f}% WR)")
+        if not totals:
+            lines.append("⚠️ Недостатньо закритих угод.")
+        query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_stats")]]))
     elif data == "dash_matrix":
         rows = database.get_detailed_pair_strategy_stats()
         lines = ["🔀 <b>МАТРИЦЯ: ПАРА ✖ СТРАТЕГІЯ</b>\n──────────────────────────────────────"]
@@ -928,10 +990,10 @@ def handle_callback(update, context):
         query.edit_message_text(f"{'✅' if success else '❌'} {msg_info}\n\nТепер бектест працюватиме з новими параметрами стратегій з чистого аркуша.")
     elif data.startswith("bt_"):
         pair = data.replace("bt_", "")
-        query.edit_message_text(f"⏳ Запускаю детальний бектест для <code>{pair}</code> (30 днів)...", parse_mode="HTML")
+        query.edit_message_text(f"⏳ Запускаю детальний бектест для <code>{pair}</code> (~7 днів)...", parse_mode="HTML")
         def run_bt():
             try:
-                report = run_backtest(pair, "30d")
+                report = run_backtest(pair, strategies_status=dict(strategies_status))
                 bot.send_message(chat_id=chat_id, text=report, parse_mode="HTML")
             except Exception as e:
                 bot.send_message(chat_id=chat_id, text=f"❌ Помилка бектесту: {e}")
@@ -1021,7 +1083,7 @@ def handle_callback(update, context):
             query.message.delete()
         except Exception:
             pass
-        query.message.reply_text("🏠 Головне меню активне.", reply_markup=query.message.reply_markup)
+        query.message.reply_text("🏠 Головне меню активне.", reply_markup=main_keyboard(chat_id))
     elif data.startswith("toggle_group_"):
         group_key = data.replace("toggle_group_", "")
         if group_key in strategies_status:

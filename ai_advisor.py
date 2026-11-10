@@ -98,50 +98,6 @@ class AIAdvisor:
 
     def evaluate_signal(self, pair_name: str, payload: dict, chart_macro, chart_mid, chart_micro) -> dict:
         suggested_exp = int(payload.get("suggested_exp", 10))
-        if not self.api_key or not HAS_GENAI:
-            return {
-                "decision": "YES", 
-                "confidence": 7, 
-                "suggested_expiration": suggested_exp, 
-                "ai_available": False,
-                "reason": "ШІ вимкнено (відсутній ключ або бібліотека)"
-            }
-
-        system_instruction = (
-            "Ти — професійний головний трейдер та ризик-менеджер, який спеціалізується виключно на **БІНАРНИХ ОПЦІОНАХ (Binary Options)**.\n"
-            "Твоє завдання — оцінити торговий сигнал з погляду точності мікро-входу, відсутності ринкового шуму та адаптивного часу експірації.\n"
-            "Ти аналізуєш три таймфрейми (1H макро-тренд, 15M середній імпульс, 1M мікро-точку входу та свічкові тіні).\n"
-            "Враховуй контекст попередніх помилок по цьому активу, якщо він переданий, щоб уникнути повторних хибних входів.\n"
-            "Базовий адаптивний час експірації вже розрахований системою, але ти можеш скоригувати його в межах від 1 до 60 хвилин з урахуванням поточної волатильності.\n"
-            "Відповідь ти зобов'язаний повернути **ВИКЛЮЧНО у форматі валідного JSON** без жодних додаткових символів чи markdown-обгорток (на кшталт ```json ... ```), у такому форматі:\n"
-            "{\n"
-            '  "decision": "YES" або "NO",\n'
-            '  "confidence": ціле число від 1 до 10,\n'
-            '  "suggested_expiration": рекомендований час експірації в хвилинах (ціле число від 1 до 60),\n'
-            '  "reason": "Коротке обґрунтування українською мовою з акцентом на мікро-імпульс, волатильність та свічкові тіні"\n'
-            "}"
-        )
-
-        prompt = (
-            f"Аналіз активу: {pair_name}\n"
-            f"Сигнал двигуна: {payload.get('signal')} (Стратегія: {payload.get('strategy_title')})\n"
-            f"Робочий таймфрейм сигналу: {payload.get('tf', '1m')} | Незалежних підтверджень: {payload.get('confirmations', 'н/д')}\n"
-            f"Поточна ціна: {payload.get('current_price')}\n"
-            f"RSI (1M): {payload.get('rsi')} | ADX: {payload.get('adx')} | Базовий адаптивний час експірації: {suggested_exp} хв\n"
-            f"Причина від двигуна: {payload.get('reason')}\n"
-            f"Останні невдалі угоди по парі (для саморефлексії): {payload.get('recent_mistakes', 'Немає')}\n\n"
-            "Проаналізуй прикріплені графіки (1H, 15M, 1M) та прийми рішення щодо доцільності входу й оптимального часу експірації для бінарних опціонів."
-        )
-
-        content_parts = [system_instruction, prompt]
-        for chart_io in [chart_macro, chart_mid, chart_micro]:
-            if chart_io:
-                try:
-                    if hasattr(chart_io, "seek"):
-                        chart_io.seek(0)
-                    content_parts.append(Image.open(chart_io))
-                except Exception as e:
-                    logger.warning(f"⚠️ Помилка завантаження графіка для ШІ: {e}")
 
         def unavailable(reason: str) -> dict:
             self.last_status = reason
@@ -153,6 +109,48 @@ class AIAdvisor:
                 "ai_available": False,
                 "reason": f"ШІ недоступний ({reason}) — оцінку ШІ не застосовано",
             }
+
+        if not self.api_key or not HAS_GENAI:
+            return unavailable("відсутній ключ або бібліотека")
+
+        macro_tf, confirm_tf, primary_tf = payload.get("chart_tfs", ("1h", "15m", payload.get("tf", "3m")))
+        exp_lo, exp_hi = payload.get("exp_range", (1, 60))
+
+        system_instruction = (
+            "Ти — професійний головний трейдер та ризик-менеджер, який спеціалізується виключно на **БІНАРНИХ ОПЦІОНАХ (Binary Options)**.\n"
+            "Твоє завдання — оцінити торговий сигнал з погляду точності мікро-входу, відсутності ринкового шуму та адаптивного часу експірації.\n"
+            f"Ти аналізуєш три таймфрейми ({macro_tf} макро-тренд, {confirm_tf} підтвердження, {primary_tf} точка входу та свічкові тіні).\n"
+            "Враховуй контекст попередніх помилок по цьому активу, якщо він переданий, щоб уникнути повторних хибних входів.\n"
+            f"Базовий адаптивний час експірації вже розрахований системою; дозволена корекція лише від {exp_lo} до {exp_hi} хвилин.\n"
+            "Відповідь ти зобов'язаний повернути **ВИКЛЮЧНО у форматі валідного JSON** без жодних додаткових символів чи markdown-обгорток (на кшталт ```json ... ```), у такому форматі:\n"
+            "{\n"
+            '  "decision": "YES" або "NO",\n'
+            '  "confidence": ціле число від 1 до 10,\n'
+            f'  "suggested_expiration": рекомендований час експірації в хвилинах (ціле число від {exp_lo} до {exp_hi}),\n'
+            '  "reason": "Коротке обґрунтування українською мовою з акцентом на мікро-імпульс, волатильність та свічкові тіні"\n'
+            "}"
+        )
+
+        prompt = (
+            f"Аналіз активу: {pair_name}\n"
+            f"Сигнал двигуна: {payload.get('signal')} (Стратегія: {payload.get('strategy_title')})\n"
+            f"Робочий таймфрейм сигналу: {payload.get('tf', '1m')} | Незалежних підтверджень: {payload.get('confirmations', 'н/д')}\n"
+            f"Поточна ціна: {payload.get('current_price')}\n"
+            f"RSI ({primary_tf}): {payload.get('rsi')} | ADX: {payload.get('adx')} | Базовий адаптивний час експірації: {suggested_exp} хв\n"
+            f"Причина від двигуна: {payload.get('reason')}\n"
+            f"Останні невдалі угоди по парі (для саморефлексії): {payload.get('recent_mistakes', 'Немає')}\n\n"
+            f"Проаналізуй прикріплені закриті графіки ({macro_tf}, {confirm_tf}, {primary_tf}) та прийми рішення щодо входу та експірації {exp_lo}–{exp_hi} хв."
+        )
+
+        content_parts = [system_instruction, prompt]
+        for chart_io in [chart_macro, chart_mid, chart_micro]:
+            if chart_io:
+                try:
+                    if hasattr(chart_io, "seek"):
+                        chart_io.seek(0)
+                    content_parts.append(Image.open(chart_io))
+                except Exception as e:
+                    logger.warning(f"⚠️ Помилка завантаження графіка для ШІ: {e}")
 
         if not self.rate.try_acquire():
             return unavailable("перевищено локальний ліміт запитів/хв")
@@ -196,25 +194,25 @@ class AIAdvisor:
                 clean_text = clean_text.split("```")[1].split("```")[0].strip()
 
             parsed = json.loads(clean_text)
+            if not isinstance(parsed, dict) or "decision" not in parsed or "confidence" not in parsed:
+                return unavailable("відсутнє рішення або впевненість")
+            decision = str(parsed["decision"]).strip().upper()
+            confidence = int(parsed["confidence"])
+            if decision not in ("YES", "NO") or not 1 <= confidence <= 10:
+                return unavailable("некоректне рішення або впевненість")
             parsed_exp = int(parsed.get("suggested_expiration", suggested_exp))
-            parsed_exp = max(1, min(60, parsed_exp))
+            parsed_exp = max(exp_lo, min(exp_hi, parsed_exp))
 
             return {
-                "decision": str(parsed.get("decision", "YES")).upper(),
-                "confidence": int(parsed.get("confidence", 7)),
+                "decision": decision,
+                "confidence": confidence,
                 "suggested_expiration": parsed_exp,
                 "ai_available": True,
                 "reason": str(parsed.get("reason", "ШІ підтвердив вхід"))
             }
         except Exception as e:
             logger.error(f"⚠️ Помилка парсингу відповіді ШІ: {e}")
-            return {
-                "decision": "YES",
-                "confidence": 6,
-                "suggested_expiration": suggested_exp,
-                "ai_available": False,
-                "reason": "ШІ відповів у неочікуваному форматі — оцінку не застосовано"
-            }
+            return unavailable("неочікуваний формат відповіді")
 
     def evaluate_closed_trade(self, sig_data: dict) -> str:
         if not self.api_key or not HAS_GENAI or not sig_data:
