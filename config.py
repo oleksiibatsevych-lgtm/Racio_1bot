@@ -18,6 +18,12 @@ PAYOUT = float(os.environ.get("PAYOUT", "0.85"))
 NEWS_BLACKOUT_MINS = int(os.environ.get("NEWS_BLACKOUT_MINS", "15"))
 DISABLE_FINNHUB_CANDLES = os.environ.get("DISABLE_FINNHUB_CANDLES", "false").lower() in ("1", "true", "yes")
 
+AUTO_DISABLE_WR_THRESHOLD = float(os.environ.get("AUTO_DISABLE_WR_THRESHOLD", "0.49"))
+AUTO_DISABLE_MIN_LIVE_PAIR = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_PAIR", "8"))
+AUTO_DISABLE_MIN_LIVE_GLOBAL = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_GLOBAL", "15"))
+AUTO_DISABLE_MIN_BT_PAIR = int(os.environ.get("AUTO_DISABLE_MIN_BT_PAIR", "15"))
+AUTO_DISABLE_MIN_BT_GLOBAL = int(os.environ.get("AUTO_DISABLE_MIN_BT_GLOBAL", "30"))
+
 PAIRS_MAP = {
     "EUR/USD": "OANDA:EUR_USD",
     "GBP/USD": "OANDA:GBP_USD",
@@ -65,3 +71,24 @@ YAHOO_PAIRS_MAP = {
     "AUD/CHF": "AUDCHF=X",
     "CAD/CHF": "CADCHF=X",
 }
+
+REVERSE_PAIRS_MAP = {ticker: name for name, ticker in PAIRS_MAP.items()}
+REVERSE_YAHOO_MAP = {ticker: name for name, ticker in YAHOO_PAIRS_MAP.items()}
+
+
+def normalize_pair_name(ticker: str | None) -> str:
+    if not ticker:
+        return ""
+    raw = str(ticker).strip()
+    if raw in PAIRS_MAP:
+        return raw
+    if raw in REVERSE_PAIRS_MAP:
+        return REVERSE_PAIRS_MAP[raw]
+    if raw in REVERSE_YAHOO_MAP:
+        return REVERSE_YAHOO_MAP[raw]
+    cleaned = raw.replace("OANDA:", "").replace("IC MARKETS:", "").replace("=X", "").strip()
+    if "_" in cleaned:
+        cleaned = cleaned.replace("_", "/")
+    elif "/" not in cleaned and len(cleaned) == 6 and cleaned.isalpha():
+        cleaned = f"{cleaned[:3]}/{cleaned[3:]}"
+    return cleaned
