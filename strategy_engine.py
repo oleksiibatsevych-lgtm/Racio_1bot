@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 
 STRATEGY_CATEGORIES = {
     "REV": "↩️ Базові REV (5m)",
-    "MEAN": "🧲 Mean Reversion (Відбій)",
+    "MEAN": "🧲 Mean Reversion і Канали",
     "TREND": "📈 Trend & MTF Pullback",
-    "VOL": "💥 Volatility & ORB (Пробої)",
+    "VOL": "💥 Волатильність і Сесії",
+    "DIV": "📉 Дивергенції та Осцилятори",
     "SMC": "🏦 ICT / Smart Money",
     "PA": "🕯 Price Action (Свічки)",
 }
@@ -25,13 +26,16 @@ GLOBAL_FILTERS = {
     "session_filter": "🌐 Фільтр торгових сесій",
     "regime_filter": "🧭 Фільтр режиму (CHOP/ADX/ATR)",
     "news_filter": "📰 Карантин макроновин (FF)",
+    "auto_disable_49": "🛡 Авто-вимкнення (<49% WR)",
 }
 
 STRATEGIES_META = {
+    # --- REV (3) ---
     "REV_RSI14": {"title": "REV RSI14", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 60, "htf": None, "regime": "ANY", "priority": 100},
     "REV_BB3": {"title": "REV BB3", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 60, "htf": None, "regime": "ANY", "priority": 99},
     "REV_RSI7": {"title": "REV RSI7", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 45, "htf": None, "regime": "ANY", "priority": 98},
 
+    # --- MEAN (15) ---
     "CRSI_5M": {"title": "Connors RSI 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86},
     "CRSI_1M": {"title": "Connors RSI 1m", "category": "MEAN", "tf": "1m", "tf_min": 1, "exp": 3, "htf": None, "regime": "RANGE", "priority": 72},
     "VALUE_CH_5M": {"title": "Value Chart 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 85},
@@ -43,7 +47,12 @@ STRATEGIES_META = {
     "PIVOT_REV_5M": {"title": "Daily Pivot S/R 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 83},
     "EXH_STRK_1M": {"title": "Streak Exhaustion 1m", "category": "MEAN", "tf": "1m", "tf_min": 1, "exp": 3, "htf": None, "regime": "RANGE", "priority": 70},
     "EXH_STRK_3M": {"title": "Streak Exhaustion 3m", "category": "MEAN", "tf": "3m", "tf_min": 3, "exp": 6, "htf": None, "regime": "RANGE", "priority": 76},
+    "STARC_5M": {"title": "STARC Bands 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86},
+    "STARC_15M": {"title": "STARC Bands 15m", "category": "MEAN", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "RANGE", "priority": 90},
+    "LINREG_5M": {"title": "LinReg Channel 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 85},
+    "HUBBA_5M": {"title": "Hubba Reversal 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 84},
 
+    # --- TREND (14) ---
     "MTF_PB_1M_15": {"title": "MTF Pullback 1m/15m", "category": "TREND", "tf": "1m", "tf_min": 1, "exp": 5, "htf": 15, "regime": "TREND", "priority": 75},
     "MTF_PB_3M_15": {"title": "MTF Pullback 3m/15m", "category": "TREND", "tf": "3m", "tf_min": 3, "exp": 10, "htf": 15, "regime": "TREND", "priority": 81},
     "MTF_PB_5M_60": {"title": "MTF Pullback 5m/60m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": 60, "regime": "TREND", "priority": 90},
@@ -53,21 +62,44 @@ STRATEGIES_META = {
     "MACD_ADX_15M": {"title": "MACD+ADX Trend 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 91},
     "ST_MOM_3M": {"title": "Dual Supertrend 3m", "category": "TREND", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "TREND", "priority": 79},
     "ST_MOM_5M": {"title": "Dual Supertrend 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 86},
+    "PSAR_EMA_5M": {"title": "PSAR+EMA200 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 86},
+    "PSAR_EMA_15M": {"title": "PSAR+EMA200 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 90},
+    "ICHI_TK_5M": {"title": "Ichimoku Kumo+TK 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 88},
+    "ICHI_TK_15M": {"title": "Ichimoku Kumo+TK 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 92},
+    "HA_EMA_5M": {"title": "Heikin Ashi+EMA50 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 83},
 
+    # --- VOL (6) ---
     "TTM_SQZ_5M": {"title": "TTM Squeeze 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 92},
     "TTM_SQZ_15M": {"title": "TTM Squeeze 15m", "category": "VOL", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "BREAKOUT", "priority": 94},
     "ORB_LON_5M": {"title": "ORB London 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 93},
     "ORB_NY_5M": {"title": "ORB New York 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 93},
     "DONCH_BRK_5M": {"title": "Donchian Breakout 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 82},
+    "JUDAS_LON_5M": {"title": "London Judas Swing 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 91},
 
+    # --- DIV (10) ---
+    "DIV_RSI_5M": {"title": "RSI Divergence 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 91},
+    "DIV_RSI_15M": {"title": "RSI Divergence 15m", "category": "DIV", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "PA", "priority": 94},
+    "DIV_MACD_5M": {"title": "MACD Divergence 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 90},
+    "DIV_MACD_15M": {"title": "MACD Divergence 15m", "category": "DIV", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "PA", "priority": 93},
+    "AO_TWIN_5M": {"title": "AO Twin Peaks 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 87},
+    "AO_ZERO_3M": {"title": "AO Zero Cross 3m", "category": "DIV", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "TREND", "priority": 80},
+    "CCI_WPR_5M": {"title": "CCI + Williams %R 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 87},
+    "CCI_WPR_3M": {"title": "CCI + Williams %R 3m", "category": "DIV", "tf": "3m", "tf_min": 3, "exp": 6, "htf": None, "regime": "RANGE", "priority": 79},
+    "DEM_BB_5M": {"title": "DeMarker + BB 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86},
+    "WT_CROSS_5M": {"title": "WaveTrend Cross 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 88},
+
+    # --- SMC (4) ---
     "LIQ_SWP_3M": {"title": "ICT Liquidity Sweep 3m", "category": "SMC", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "SMC", "priority": 80},
     "LIQ_SWP_5M": {"title": "ICT Liquidity Sweep 5m", "category": "SMC", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "SMC", "priority": 88},
     "FVG_IMP_3M": {"title": "ICT Fair Value Gap 3m", "category": "SMC", "tf": "3m", "tf_min": 3, "exp": 9, "htf": 15, "regime": "SMC", "priority": 80},
     "FVG_IMP_5M": {"title": "ICT Fair Value Gap 5m", "category": "SMC", "tf": "5m", "tf_min": 5, "exp": 15, "htf": 60, "regime": "SMC", "priority": 89},
 
+    # --- PA (5) ---
     "PA_PIN_BB_5M": {"title": "PA Pin Bar + BB 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 84},
     "PA_ENG_SR_5M": {"title": "PA Engulfing S/R 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 85},
     "PA_FAKEY_5M": {"title": "PA Fakey Trap 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 88},
+    "PA_MHI_1M": {"title": "MHI 1m Minority", "category": "PA", "tf": "1m", "tf_min": 1, "exp": 1, "htf": None, "regime": "RANGE", "priority": 68},
+    "PA_3LS_5M": {"title": "Three Line Strike 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 85},
 }
 
 ALL_STRATEGY_KEYS = list(STRATEGIES_META.keys())
@@ -89,6 +121,7 @@ def load_all_strategy_config(path) -> dict:
     defaults["session_filter"] = True
     defaults["regime_filter"] = True
     defaults["news_filter"] = True
+    defaults["auto_disable_49"] = True
     p = Path(path)
     if not p.exists():
         return defaults
@@ -134,7 +167,7 @@ def compute_choppiness(df: pd.DataFrame, tr: pd.Series, length: int = 14) -> pd.
     span = (hh - ll).replace(0.0, np.nan)
     ratio = (sum_tr / span).clip(lower=1e-9)
     chop = 100.0 * np.log10(ratio) / np.log10(float(length))
-    return chop.clip(0.0, 100.0)
+    return chop.fillna(50.0).clip(0.0, 100.0)
 
 
 def compute_adx_di(df: pd.DataFrame, tr: pd.Series, length: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
@@ -153,7 +186,6 @@ def compute_adx_di(df: pd.DataFrame, tr: pd.Series, length: int = 14) -> tuple[p
 
 def compute_connors_rsi(close: pd.Series, rsi_len: int = 3, streak_len: int = 2, rank_len: int = 100) -> pd.Series:
     rsi_price = wilder_rsi(close, rsi_len)
-
     diff = close.diff().to_numpy()
     streak = np.zeros(len(close), dtype=float)
     for i in range(1, len(close)):
@@ -176,7 +208,6 @@ def compute_connors_rsi(close: pd.Series, rsi_len: int = 3, streak_len: int = 2,
         valid_mask = (~np.isnan(curr[:, 0])) & (cnt_valid >= rank_len // 2)
         ranks = np.where(cnt_valid > 0, (cnt_less / np.maximum(cnt_valid, 1)) * 100.0, np.nan)
         pct_rank[rank_len:] = np.where(valid_mask, ranks, np.nan)
-
     return (rsi_price + rsi_streak + pd.Series(pct_rank, index=close.index)) / 3.0
 
 
@@ -253,6 +284,111 @@ def compute_ttm_squeeze(df: pd.DataFrame, tr: pd.Series, length: int = 20, bb_mu
     return sqz_on, pd.Series(mom, index=df.index)
 
 
+def compute_psar_dir(high: np.ndarray, low: np.ndarray, af_step: float = 0.02, af_max: float = 0.20) -> np.ndarray:
+    n = len(high)
+    dirs = np.zeros(n, dtype=np.int8)
+    if n < 3:
+        return dirs
+    bull = True
+    sar = low[0]
+    ep = high[0]
+    af = af_step
+    dirs[0] = 1
+    for i in range(1, n):
+        sar = sar + af * (ep - sar)
+        if bull:
+            if i >= 2:
+                sar = min(sar, low[i - 1], low[i - 2])
+            else:
+                sar = min(sar, low[i - 1])
+            if low[i] < sar:
+                bull = False
+                sar = ep
+                ep = low[i]
+                af = af_step
+            else:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + af_step, af_max)
+        else:
+            if i >= 2:
+                sar = max(sar, high[i - 1], high[i - 2])
+            else:
+                sar = max(sar, high[i - 1])
+            if high[i] > sar:
+                bull = True
+                sar = ep
+                ep = high[i]
+                af = af_step
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + af_step, af_max)
+        dirs[i] = 1 if bull else -1
+    return dirs
+
+
+def compute_linreg_channel(close: np.ndarray, atr: np.ndarray, length: int = 50) -> tuple[np.ndarray, np.ndarray]:
+    n = len(close)
+    z = np.full(n, np.nan, dtype=float)
+    slope_norm = np.full(n, np.nan, dtype=float)
+    if n < length:
+        return z, slope_norm
+    x = np.arange(length, dtype=float)
+    x_mean = x.mean()
+    dx = x - x_mean
+    dx_ss = float(np.sum(dx ** 2))
+    win = sliding_window_view(close, length)
+    y_mean = win.mean(axis=1, keepdims=True)
+    slope = np.sum((win - y_mean) * dx, axis=1) / dx_ss
+    intercept = y_mean[:, 0] - slope * x_mean
+    fitted = slope[:, None] * x[None, :] + intercept[:, None]
+    std_res = np.std(win - fitted, axis=1, ddof=0)
+    z[length - 1:] = (win[:, -1] - fitted[:, -1]) / (std_res + 1e-12)
+    slope_norm[length - 1:] = (slope * length) / (atr[length - 1:] + 1e-12)
+    return z, slope_norm
+
+
+def compute_cci(df: pd.DataFrame, length: int = 20) -> np.ndarray:
+    tp = ((df["high"] + df["low"] + df["close"]) / 3.0).to_numpy(dtype=float)
+    n = len(tp)
+    cci = np.full(n, np.nan, dtype=float)
+    if n < length:
+        return cci
+    win = sliding_window_view(tp, length)
+    sma = win.mean(axis=1)
+    mad = np.mean(np.abs(win - sma[:, None]), axis=1)
+    cci[length - 1:] = (tp[length - 1:] - sma) / (0.015 * mad + 1e-12)
+    return cci
+
+
+def compute_demarker(df: pd.DataFrame, length: int = 14) -> np.ndarray:
+    dh = df["high"].diff().clip(lower=0.0)
+    dl = (-df["low"].diff()).clip(lower=0.0)
+    num = dh.rolling(length, min_periods=length).mean()
+    den = num + dl.rolling(length, min_periods=length).mean()
+    return (num / (den + 1e-12)).to_numpy(dtype=float)
+
+
+def compute_wavetrend(df: pd.DataFrame, n1: int = 10, n2: int = 21) -> tuple[np.ndarray, np.ndarray]:
+    ap = (df["high"] + df["low"] + df["close"]) / 3.0
+    esa = ap.ewm(span=n1, adjust=False).mean()
+    d = (ap - esa).abs().ewm(span=n1, adjust=False).mean()
+    ci = (ap - esa) / (0.015 * d + 1e-12)
+    wt1 = ci.ewm(span=n2, adjust=False).mean()
+    wt2 = wt1.rolling(4, min_periods=4).mean()
+    return wt1.to_numpy(dtype=float), wt2.to_numpy(dtype=float)
+
+
+def compute_heikin_ashi(o: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    ha_c = (o + h + l + c) / 4.0
+    ha_o = np.empty_like(ha_c)
+    ha_o[0] = (o[0] + c[0]) / 2.0
+    for i in range(1, len(ha_c)):
+        ha_o[i] = (ha_o[i - 1] + ha_c[i - 1]) / 2.0
+    return ha_o, ha_c
+
+
 def compute_daily_pivots(df: pd.DataFrame) -> dict[str, np.ndarray]:
     idx = pd.DatetimeIndex(df.index)
     if idx.tz is not None:
@@ -283,8 +419,13 @@ def compute_base_indicators(df: pd.DataFrame) -> dict:
     ema21 = close.ewm(span=21, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     ema50 = close.ewm(span=50, adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
+
+    sma6 = close.rolling(6, min_periods=6).mean()
     sma20 = close.rolling(20, min_periods=20).mean()
     std20 = close.rolling(20, min_periods=20).std(ddof=0)
+    sma24 = close.rolling(24, min_periods=24).mean()
+    std24 = close.rolling(24, min_periods=24).std(ddof=0)
     sma30 = close.rolling(30, min_periods=30).mean()
     std30 = close.rolling(30, min_periods=30).std(ddof=0)
 
@@ -303,25 +444,52 @@ def compute_base_indicators(df: pd.DataFrame) -> dict:
     hi14 = df["high"].rolling(14, min_periods=14).max()
     stoch_k = (100.0 * (close - lo14) / ((hi14 - lo14) + 1e-12)).rolling(3).mean()
     stoch_d = stoch_k.rolling(3).mean()
+    wpr14 = -100.0 * (hi14 - close) / ((hi14 - lo14) + 1e-12)
+
+    lo3 = df["low"].rolling(3, min_periods=3).min()
+    hi3 = df["high"].rolling(3, min_periods=3).max()
+    stoch3_k = (100.0 * (close - lo3) / ((hi3 - lo3) + 1e-12)).rolling(3).mean()
+    stoch3_d = stoch3_k.rolling(3).mean()
+
+    hl2 = (df["high"] + df["low"]) / 2.0
+    ao = hl2.rolling(5, min_periods=5).mean() - hl2.rolling(34, min_periods=34).mean()
+
+    tenkan = (df["high"].rolling(9, min_periods=9).max() + df["low"].rolling(9, min_periods=9).min()) / 2.0
+    kijun = (df["high"].rolling(26, min_periods=26).max() + df["low"].rolling(26, min_periods=26).min()) / 2.0
+    senkou_a = ((tenkan + kijun) / 2.0).shift(26)
+    senkou_b = ((df["high"].rolling(52, min_periods=52).max() + df["low"].rolling(52, min_periods=52).min()) / 2.0).shift(26)
+
+    o_np = df["open"].to_numpy(dtype=float)
+    h_np = df["high"].to_numpy(dtype=float)
+    l_np = df["low"].to_numpy(dtype=float)
+    c_np = close.to_numpy(dtype=float)
+    atr14_np = atr14.to_numpy(dtype=float)
 
     st_fast = compute_supertrend(df, tr, 7, 2.0)
     st_slow = compute_supertrend(df, tr, 10, 3.0)
     sqz_on, sqz_mom = compute_ttm_squeeze(df, tr, 20, 2.0, 1.5)
+    psar_dir = compute_psar_dir(h_np, l_np)
+    lr_z, lr_slope = compute_linreg_channel(c_np, atr14_np, 50)
+    cci20 = compute_cci(df, 20)
+    dem14 = compute_demarker(df, 14)
+    wt1, wt2 = compute_wavetrend(df, 10, 21)
+    ha_o, ha_c = compute_heikin_ashi(o_np, h_np, l_np, c_np)
     pivots = compute_daily_pivots(df)
 
     return {
-        "o": df["open"].to_numpy(dtype=float),
-        "h": df["high"].to_numpy(dtype=float),
-        "l": df["low"].to_numpy(dtype=float),
-        "c": close.to_numpy(dtype=float),
-        "atr14": atr14.to_numpy(dtype=float),
+        "o": o_np, "h": h_np, "l": l_np, "c": c_np,
+        "atr14": atr14_np,
         "atr20": atr20.to_numpy(dtype=float),
         "vol_ratio": vol_ratio.to_numpy(dtype=float),
         "ema8": ema8.to_numpy(dtype=float),
         "ema21": ema21.to_numpy(dtype=float),
         "ema50": ema50.to_numpy(dtype=float),
+        "ema200": ema200.to_numpy(dtype=float),
+        "sma6": sma6.to_numpy(dtype=float),
         "sma20": sma20.to_numpy(dtype=float),
         "std20": std20.to_numpy(dtype=float),
+        "sma24": sma24.to_numpy(dtype=float),
+        "std24": std24.to_numpy(dtype=float),
         "z30": ((close - sma30) / (std30 + 1e-12)).to_numpy(dtype=float),
         "kc_up_20": (ema21 + 2.0 * atr20).to_numpy(dtype=float),
         "kc_lo_20": (ema21 - 2.0 * atr20).to_numpy(dtype=float),
@@ -338,8 +506,25 @@ def compute_base_indicators(df: pd.DataFrame) -> dict:
         "minus_di": minus_di.to_numpy(dtype=float),
         "stoch_k": stoch_k.to_numpy(dtype=float),
         "stoch_d": stoch_d.to_numpy(dtype=float),
+        "stoch3_k": stoch3_k.to_numpy(dtype=float),
+        "stoch3_d": stoch3_d.to_numpy(dtype=float),
+        "wpr14": wpr14.to_numpy(dtype=float),
+        "ao": ao.to_numpy(dtype=float),
+        "tenkan": tenkan.to_numpy(dtype=float),
+        "kijun": kijun.to_numpy(dtype=float),
+        "cloud_top": np.maximum(senkou_a.to_numpy(dtype=float), senkou_b.to_numpy(dtype=float)),
+        "cloud_bot": np.minimum(senkou_a.to_numpy(dtype=float), senkou_b.to_numpy(dtype=float)),
         "st_fast": st_fast,
         "st_slow": st_slow,
+        "psar_dir": psar_dir,
+        "lr_z": lr_z,
+        "lr_slope": lr_slope,
+        "cci20": cci20,
+        "dem14": dem14,
+        "wt1": wt1,
+        "wt2": wt2,
+        "ha_o": ha_o,
+        "ha_c": ha_c,
         "sqz_on": sqz_on.fillna(False).to_numpy(dtype=bool),
         "sqz_mom": sqz_mom.to_numpy(dtype=float),
         "pivots": pivots,
@@ -399,25 +584,138 @@ def _sig_array(call_mask: np.ndarray, put_mask: np.ndarray) -> np.ndarray:
     return out
 
 
-def _orb_series(ind: dict, zone, start_h: int, start_m: int, end_h: int) -> np.ndarray:
-    idx = pd.DatetimeIndex(ind["index"])
-    if idx.tz is None:
-        idx_utc = idx.tz_localize("UTC")
-    else:
-        idx_utc = idx.tz_convert("UTC")
-    local = idx_utc.tz_convert(zone)
-    dates = local.date
-    hours = local.hour
-    mins = local.minute
+def _non_repainting_divergence(
+    ind: dict,
+    osc: np.ndarray,
+    bull_max_osc: float | None = None,
+    bear_min_osc: float | None = None,
+    zero_split: bool = False,
+    left: int = 5,
+    right: int = 2,
+) -> np.ndarray:
+    """
+    Строго каузальна (без перемальовування) дивергенція:
+    півот на барі p = i - right підтверджується лише на закритті бара i.
+    """
+    h, l, o, c = ind["h"], ind["l"], ind["o"], ind["c"]
+    n = len(c)
+    out = np.zeros(n, dtype=np.int8)
+    low_pivots = []
+    high_pivots = []
 
-    c = ind["c"]
-    o = ind["o"]
-    h = ind["h"]
-    l = ind["l"]
-    atr = ind["atr14"]
+    for i in range(left + right, n):
+        p = i - right
+        if np.isnan(osc[p]) or np.isnan(osc[i]) or np.isnan(osc[i - 1]):
+            continue
+
+        wl = l[p - left : p + right + 1]
+        if l[p] == np.min(wl) and np.sum(wl == l[p]) == 1:
+            low_pivots.append((p, l[p], osc[p]))
+            if len(low_pivots) >= 2:
+                pp, pl, po = low_pivots[-2]
+                if 5 <= (p - pp) <= 45 and l[p] < pl and osc[p] > po:
+                    ok_zone = True
+                    if bull_max_osc is not None and (osc[p] > bull_max_osc or po > bull_max_osc):
+                        ok_zone = False
+                    if zero_split and (osc[p] >= 0.0 or po >= 0.0):
+                        ok_zone = False
+                    if ok_zone and osc[i] > osc[i - 1] and c[i] > o[i]:
+                        out[i] = 1
+
+        wh = h[p - left : p + right + 1]
+        if h[p] == np.max(wh) and np.sum(wh == h[p]) == 1:
+            high_pivots.append((p, h[p], osc[p]))
+            if len(high_pivots) >= 2:
+                pp, ph, po = high_pivots[-2]
+                if 5 <= (p - pp) <= 45 and h[p] > ph and osc[p] < po:
+                    ok_zone = True
+                    if bear_min_osc is not None and (osc[p] < bear_min_osc or po < bear_min_osc):
+                        ok_zone = False
+                    if zero_split and (osc[p] <= 0.0 or po <= 0.0):
+                        ok_zone = False
+                    if ok_zone and osc[i] < osc[i - 1] and c[i] < o[i]:
+                        if out[i] == 0:
+                            out[i] = -1
+    return out
+
+
+def _ao_twin_peaks(ind: dict) -> np.ndarray:
+    ao, o, c = ind["ao"], ind["o"], ind["c"]
+    n = len(c)
+    out = np.zeros(n, dtype=np.int8)
+    troughs = []
+    peaks = []
+    for i in range(40, n):
+        p = i - 1
+        if np.isnan(ao[i]) or np.isnan(ao[p]) or np.isnan(ao[i - 2]):
+            continue
+        if ao[p] < ao[i - 2] and ao[p] < ao[i] and ao[p] < 0.0:
+            troughs.append((p, ao[p]))
+            if len(troughs) >= 2:
+                pp, pv = troughs[-2]
+                if 5 <= (p - pp) <= 35 and ao[p] > pv and np.all(ao[pp : i + 1] < 0.0) and c[i] > o[i]:
+                    out[i] = 1
+        if ao[p] > ao[i - 2] and ao[p] > ao[i] and ao[p] > 0.0:
+            peaks.append((p, ao[p]))
+            if len(peaks) >= 2:
+                pp, pv = peaks[-2]
+                if 5 <= (p - pp) <= 35 and ao[p] < pv and np.all(ao[pp : i + 1] > 0.0) and c[i] < o[i]:
+                    if out[i] == 0:
+                        out[i] = -1
+    return out
+
+
+def _judas_london_series(ind: dict) -> np.ndarray:
+    idx = pd.DatetimeIndex(ind["index"])
+    idx_utc = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    dates = idx_utc.date
+    hours = idx_utc.hour
+    o, h, l, c, atr = ind["o"], ind["h"], ind["l"], ind["c"], ind["atr14"]
     n = len(c)
     out = np.zeros(n, dtype=np.int8)
 
+    asia = {}
+    for i in range(n):
+        if 0 <= hours[i] < 7:
+            d = dates[i]
+            cur = asia.get(d)
+            if cur is None:
+                asia[d] = [h[i], l[i], 1]
+            else:
+                cur[0] = max(cur[0], h[i])
+                cur[1] = min(cur[1], l[i])
+                cur[2] += 1
+
+    triggered = set()
+    for i in range(1, n):
+        if not (7 <= hours[i] < 10):
+            continue
+        d = dates[i]
+        rng = asia.get(d)
+        if not rng or rng[2] < 12:
+            continue
+        ah, al, _ = rng
+        width = ah - al
+        if np.isnan(atr[i]) or atr[i] <= 0 or not (0.8 * atr[i] <= width <= 8.0 * atr[i]):
+            continue
+        if (d, 1) not in triggered and l[i] < al and c[i] > al and c[i] > o[i]:
+            out[i] = 1
+            triggered.add((d, 1))
+        elif (d, -1) not in triggered and h[i] > ah and c[i] < ah and c[i] < o[i]:
+            out[i] = -1
+            triggered.add((d, -1))
+    return out
+
+
+def _orb_series(ind: dict, zone, start_h: int, start_m: int, end_h: int) -> np.ndarray:
+    idx = pd.DatetimeIndex(ind["index"])
+    idx_utc = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+    local = idx_utc.tz_convert(zone)
+    dates, hours, mins = local.date, local.hour, local.minute
+
+    c, o, h, l, atr = ind["c"], ind["o"], ind["h"], ind["l"], ind["atr14"]
+    n = len(c)
+    out = np.zeros(n, dtype=np.int8)
     or_end_m = start_m + 15
     ranges = {}
     for i in range(n):
@@ -470,16 +768,41 @@ def _fvg_series(ind: dict, htf_trend: np.ndarray) -> np.ndarray:
                 continue
             gap_bull = l[m] - h[m - 2]
             if gap_bull >= 0.25 * atr[m - 1] and htf_trend[i] >= 0:
-                if np.all(c[m + 1:i] >= h[m - 2]):
-                    if l[i] <= l[m] and c[i] > h[m - 2] and c[i] > o[i]:
-                        out[i] = 1
-                        break
+                if np.all(c[m + 1 : i] >= h[m - 2]) and l[i] <= l[m] and c[i] > h[m - 2] and c[i] > o[i]:
+                    out[i] = 1
+                    break
             gap_bear = l[m - 2] - h[m]
             if gap_bear >= 0.25 * atr[m - 1] and htf_trend[i] <= 0:
-                if np.all(c[m + 1:i] <= l[m - 2]):
-                    if h[i] >= h[m] and c[i] < l[m - 2] and c[i] < o[i]:
-                        out[i] = -1
-                        break
+                if np.all(c[m + 1 : i] <= l[m - 2]) and h[i] >= h[m] and c[i] < l[m - 2] and c[i] < o[i]:
+                    out[i] = -1
+                    break
+    return out
+
+
+def _mhi_1m_series(ind: dict) -> np.ndarray:
+    idx = pd.DatetimeIndex(ind["index"])
+    end_mins = (idx + pd.Timedelta(minutes=1)).minute
+    o, c, atr = ind["o"], ind["c"], ind["atr14"]
+    n = len(c)
+    out = np.zeros(n, dtype=np.int8)
+    for i in range(10, n):
+        if end_mins[i] % 5 != 0 or np.isnan(atr[i]) or atr[i] <= 0:
+            continue
+        if (idx[i] - idx[i - 2]) != pd.Timedelta(minutes=2):
+            continue
+        greens = 0
+        reds = 0
+        for j in (i - 2, i - 1, i):
+            diff = c[j] - o[j]
+            if abs(diff) < 0.05 * atr[i]:
+                continue
+            if diff > 0:
+                greens += 1
+            else:
+                reds += 1
+        if greens + reds < 2 or greens == reds:
+            continue
+        out[i] = 1 if reds > greens else -1
     return out
 
 
@@ -514,26 +837,23 @@ def evaluate_strategy_series(
 
     htf_trend = htf_ctx["trend"] if htf_ctx is not None else np.zeros(n, dtype=np.int8)
     htf_rsi = htf_ctx["rsi"] if htf_ctx is not None else np.full(n, 50.0)
-
     raw = np.zeros(n, dtype=np.int8)
 
+    # --- MEAN & CHANNELS ---
     if strategy_key in ("CRSI_5M", "CRSI_1M"):
         crsi = ind["crsi"]
         raw = _sig_array((crsi < 10.0) & (c > o), (crsi > 90.0) & (c < o))
 
     elif strategy_key in ("VALUE_CH_5M", "VALUE_CH_1M"):
-        raw = _sig_array(
-            (ind["vc_l"] <= -8.0) & (ind["vc_c"] <= -6.0),
-            (ind["vc_h"] >= 8.0) & (ind["vc_c"] >= 6.0),
-        )
+        raw = _sig_array((ind["vc_l"] <= -8.0) & (ind["vc_c"] <= -6.0), (ind["vc_h"] >= 8.0) & (ind["vc_c"] >= 6.0))
 
     elif strategy_key in ("OSC_CONS_5M", "OSC_CONS_3M"):
         k, d = ind["stoch_k"], ind["stoch_d"]
         pk, pd_ = _prev(k), _prev(d)
-        not_squeezed = ~ind["sqz_on"]
+        not_sqz = ~ind["sqz_on"]
         raw = _sig_array(
-            not_squeezed & (c < bb_lo20) & (rsi7 < 25.0) & (k < 25.0) & (k > d) & (pk <= pd_),
-            not_squeezed & (c > bb_up20) & (rsi7 > 75.0) & (k > 75.0) & (k < d) & (pk >= pd_),
+            not_sqz & (c < bb_lo20) & (rsi7 < 25.0) & (k < 25.0) & (k > d) & (pk <= pd_),
+            not_sqz & (c > bb_up20) & (rsi7 > 75.0) & (k > 75.0) & (k < d) & (pk >= pd_),
         )
 
     elif strategy_key in ("BB_KC_REV_5M", "BB_KC_REV_15M"):
@@ -549,17 +869,43 @@ def evaluate_strategy_series(
         piv = ind["pivots"]
         s1, s2, r1, r2 = piv["S1"], piv["S2"], piv["R1"], piv["R2"]
         tol = 0.15 * atr14
-        bull_s1 = (~np.isnan(s1)) & (l <= s1 + tol) & (c > s1) & (c > o) & (rsi14 < 38.0)
-        bull_s2 = (~np.isnan(s2)) & (l <= s2 + tol) & (c > s2) & (c > o) & (rsi14 < 38.0)
-        bear_r1 = (~np.isnan(r1)) & (h >= r1 - tol) & (c < r1) & (c < o) & (rsi14 > 62.0)
-        bear_r2 = (~np.isnan(r2)) & (h >= r2 - tol) & (c < r2) & (c < o) & (rsi14 > 62.0)
-        raw = _sig_array(bull_s1 | bull_s2, bear_r1 | bear_r2)
+        bull = ((~np.isnan(s1)) & (l <= s1 + tol) & (c > s1) & (c > o) & (rsi14 < 38.0)) | \
+               ((~np.isnan(s2)) & (l <= s2 + tol) & (c > s2) & (c > o) & (rsi14 < 38.0))
+        bear = ((~np.isnan(r1)) & (h >= r1 - tol) & (c < r1) & (c < o) & (rsi14 > 62.0)) | \
+               ((~np.isnan(r2)) & (h >= r2 - tol) & (c < r2) & (c < o) & (rsi14 > 62.0))
+        raw = _sig_array(bull, bear)
 
     elif strategy_key in ("EXH_STRK_1M", "EXH_STRK_3M"):
         g = pd.Series((c > o).astype(int)).rolling(4).sum().to_numpy() == 4
         r = pd.Series((c < o).astype(int)).rolling(4).sum().to_numpy() == 4
         raw = _sig_array(r & (c < bb_lo20) & (rsi7 < 20.0), g & (c > bb_up20) & (rsi7 > 80.0))
 
+    elif strategy_key in ("STARC_5M", "STARC_15M"):
+        starc_up = ind["sma6"] + 2.0 * atr14
+        starc_lo = ind["sma6"] - 2.0 * atr14
+        raw = _sig_array(
+            (l < starc_lo) & (c > starc_lo) & (c > o) & (rsi14 < 38.0),
+            (h > starc_up) & (c < starc_up) & (c < o) & (rsi14 > 62.0),
+        )
+
+    elif strategy_key == "LINREG_5M":
+        flat_ch = np.abs(ind["lr_slope"]) < 2.5
+        raw = _sig_array(
+            flat_ch & (ind["lr_z"] < -2.0) & (rsi14 < 38.0) & (c > o),
+            flat_ch & (ind["lr_z"] > 2.0) & (rsi14 > 62.0) & (c < o),
+        )
+
+    elif strategy_key == "HUBBA_5M":
+        bb_up24 = ind["sma24"] + 1.5 * ind["std24"]
+        bb_lo24 = ind["sma24"] - 1.5 * ind["std24"]
+        sk, sd = ind["stoch3_k"], ind["stoch3_d"]
+        psk, psd = _prev(sk), _prev(sd)
+        raw = _sig_array(
+            (c < bb_lo24) & (ind["vc_l"] <= -7.5) & (sk > sd) & (psk <= psd) & (sk < 35.0),
+            (c > bb_up24) & (ind["vc_h"] >= 7.5) & (sk < sd) & (psk >= psd) & (sk > 65.0),
+        )
+
+    # --- TREND & MTF ---
     elif strategy_key in ("MTF_PB_1M_15", "MTF_PB_3M_15", "MTF_PB_5M_60"):
         e21, e50 = ind["ema21"], ind["ema50"]
         raw = _sig_array(
@@ -569,17 +915,14 @@ def evaluate_strategy_series(
 
     elif strategy_key in ("EMA_RIB_3M", "EMA_RIB_5M"):
         e8, e21, e50 = ind["ema8"], ind["ema21"], ind["ema50"]
-        pc = _prev(c)
-        pe8 = _prev(e8)
+        pc, pe8 = _prev(c), _prev(e8)
         raw = _sig_array(
             (e8 > e21) & (e21 > e50) & (l <= e8) & (c > e50) & (c > e8) & (pc <= pe8),
             (e8 < e21) & (e21 < e50) & (h >= e8) & (c < e50) & (c < e8) & (pc >= pe8),
         )
 
     elif strategy_key in ("MACD_ADX_5M", "MACD_ADX_15M"):
-        hist = ind["macd_hist"]
-        ph = _prev(hist)
-        e50 = ind["ema50"]
+        hist, ph, e50 = ind["macd_hist"], _prev(ind["macd_hist"]), ind["ema50"]
         raw = _sig_array(
             (c > e50) & (adx > 22.0) & (ind["plus_di"] > ind["minus_di"]) & (hist > 0.0) & (ph <= 0.0),
             (c < e50) & (adx > 22.0) & (ind["minus_di"] > ind["plus_di"]) & (hist < 0.0) & (ph >= 0.0),
@@ -588,15 +931,37 @@ def evaluate_strategy_series(
     elif strategy_key in ("ST_MOM_3M", "ST_MOM_5M"):
         stf, sts = ind["st_fast"], ind["st_slow"]
         pstf = _prev(stf.astype(float))
+        raw = _sig_array((sts == 1) & (stf == 1) & (pstf == -1), (sts == -1) & (stf == -1) & (pstf == 1))
+
+    elif strategy_key in ("PSAR_EMA_5M", "PSAR_EMA_15M"):
+        psar, ppsar = ind["psar_dir"], _prev(ind["psar_dir"].astype(float))
+        hist, ph = ind["macd_hist"], _prev(ind["macd_hist"])
+        e200 = ind["ema200"]
+        psar_flip_bull = (psar == 1) & ((ppsar == -1) | ((hist > 0.0) & (ph <= 0.0)))
+        psar_flip_bear = (psar == -1) & ((ppsar == 1) | ((hist < 0.0) & (ph >= 0.0)))
+        raw = _sig_array((c > e200) & psar_flip_bull, (c < e200) & psar_flip_bear)
+
+    elif strategy_key in ("ICHI_TK_5M", "ICHI_TK_15M"):
+        tk, kj = ind["tenkan"], ind["kijun"]
+        ptk, pkj = _prev(tk), _prev(kj)
+        c26 = _prev(c, 26)
         raw = _sig_array(
-            (sts == 1) & (stf == 1) & (pstf == -1),
-            (sts == -1) & (stf == -1) & (pstf == 1),
+            (c > ind["cloud_top"]) & (tk > kj) & (ptk <= pkj) & (c > c26),
+            (c < ind["cloud_bot"]) & (tk < kj) & (ptk >= pkj) & (c < c26),
         )
 
+    elif strategy_key == "HA_EMA_5M":
+        hac, hao = ind["ha_c"], ind["ha_o"]
+        phac, phao = _prev(hac), _prev(hao)
+        sk, sd = ind["stoch_k"], ind["stoch_d"]
+        raw = _sig_array(
+            (hac > hao) & (phac <= phao) & (c > ind["ema50"]) & (sk > sd) & (sk < 75.0) & (c > o),
+            (hac < hao) & (phac >= phao) & (c < ind["ema50"]) & (sk < sd) & (sk > 25.0) & (c < o),
+        )
+
+    # --- VOL & SESSIONS ---
     elif strategy_key in ("TTM_SQZ_5M", "TTM_SQZ_15M"):
-        sqz = ind["sqz_on"]
-        mom = ind["sqz_mom"]
-        pmom = _prev(mom)
+        sqz, mom, pmom = ind["sqz_on"], ind["sqz_mom"], _prev(ind["sqz_mom"])
         was_sqz = pd.Series(sqz.astype(int)).shift(1).rolling(3).sum().to_numpy() == 3
         released = was_sqz & (~sqz)
         raw = _sig_array(released & (mom > 0.0) & (mom > pmom), released & (mom < 0.0) & (mom < pmom))
@@ -616,18 +981,66 @@ def evaluate_strategy_series(
             (c < ind["donch_lo20"]) & (pc >= ind["donch_lo20"]) & (body >= 0.55 * rng),
         )
 
+    elif strategy_key == "JUDAS_LON_5M":
+        raw = _judas_london_series(ind)
+
+    # --- DIV & OSCILLATORS ---
+    elif strategy_key in ("DIV_RSI_5M", "DIV_RSI_15M"):
+        raw = _non_repainting_divergence(ind, rsi14, bull_max_osc=40.0, bear_min_osc=60.0)
+
+    elif strategy_key in ("DIV_MACD_5M", "DIV_MACD_15M"):
+        raw = _non_repainting_divergence(ind, ind["macd_hist"], zero_split=True)
+
+    elif strategy_key == "AO_TWIN_5M":
+        raw = _ao_twin_peaks(ind)
+
+    elif strategy_key == "AO_ZERO_3M":
+        ao, pao = ind["ao"], _prev(ind["ao"])
+        raw = _sig_array(
+            (ao > 0.0) & (pao <= 0.0) & (c > ind["ema50"]),
+            (ao < 0.0) & (pao >= 0.0) & (c < ind["ema50"]),
+        )
+
+    elif strategy_key in ("CCI_WPR_5M", "CCI_WPR_3M"):
+        cci, pcci = ind["cci20"], _prev(ind["cci20"])
+        wpr, pwpr = ind["wpr14"], _prev(ind["wpr14"])
+        raw = _sig_array(
+            (pcci < -100.0) & (cci >= -100.0) & (pwpr < -80.0) & (wpr > pwpr) & (c > o),
+            (pcci > 100.0) & (cci <= 100.0) & (pwpr > -20.0) & (wpr < pwpr) & (c < o),
+        )
+
+    elif strategy_key == "DEM_BB_5M":
+        dem = ind["dem14"]
+        pl, ph_ = _prev(l), _prev(h)
+        pbb_l, pbb_u = _prev(bb_lo20), _prev(bb_up20)
+        raw = _sig_array(
+            (dem < 0.30) & ((l <= bb_lo20) | (pl <= pbb_l)) & (c > bb_lo20) & (c > o),
+            (dem > 0.70) & ((h >= bb_up20) | (ph_ >= pbb_u)) & (c < bb_up20) & (c < o),
+        )
+
+    elif strategy_key == "WT_CROSS_5M":
+        wt1, wt2 = ind["wt1"], ind["wt2"]
+        pwt1, pwt2 = _prev(wt1), _prev(wt2)
+        raw = _sig_array(
+            (pwt1 <= pwt2) & (wt1 > wt2) & (wt1 < -53.0) & (c > o),
+            (pwt1 >= pwt2) & (wt1 < wt2) & (wt1 > 53.0) & (c < o),
+        )
+
+    # --- SMC ---
     elif strategy_key in ("LIQ_SWP_3M", "LIQ_SWP_5M"):
         rng = np.maximum(h - l, 1e-12)
         lw = np.minimum(o, c) - l
         uw = h - np.maximum(o, c)
         sh, sl = ind["swing_hi20"], ind["swing_lo20"]
-        bull_swp = (l < sl) & (c > sl) & ((sl - l) >= 0.1 * atr14) & ((sl - l) <= 2.0 * atr14) & ((c > o) | (lw >= 0.45 * rng))
-        bear_swp = (h > sh) & (c < sh) & ((h - sh) >= 0.1 * atr14) & ((h - sh) <= 2.0 * atr14) & ((c < o) | (uw >= 0.45 * rng))
-        raw = _sig_array(bull_swp, bear_swp)
+        raw = _sig_array(
+            (l < sl) & (c > sl) & ((sl - l) >= 0.1 * atr14) & ((sl - l) <= 2.0 * atr14) & ((c > o) | (lw >= 0.45 * rng)),
+            (h > sh) & (c < sh) & ((h - sh) >= 0.1 * atr14) & ((h - sh) <= 2.0 * atr14) & ((c < o) | (uw >= 0.45 * rng)),
+        )
 
     elif strategy_key in ("FVG_IMP_3M", "FVG_IMP_5M"):
         raw = _fvg_series(ind, htf_trend)
 
+    # --- PA ---
     elif strategy_key == "PA_PIN_BB_5M":
         rng = np.maximum(h - l, 1e-12)
         body = np.abs(c - o)
@@ -641,21 +1054,33 @@ def evaluate_strategy_series(
     elif strategy_key == "PA_ENG_SR_5M":
         po, pc = _prev(o), _prev(c)
         body = np.abs(c - o)
-        bull_eng = (pc < po) & (c > o) & (c >= po) & (o <= pc) & (body >= 0.5 * atr14) & ((l <= bb_lo20) | (l <= ind["swing_lo20"] + 0.15 * atr14))
-        bear_eng = (pc > po) & (c < o) & (c <= po) & (o >= pc) & (body >= 0.5 * atr14) & ((h >= bb_up20) | (h >= ind["swing_hi20"] - 0.15 * atr14))
-        raw = _sig_array(bull_eng, bear_eng)
+        raw = _sig_array(
+            (pc < po) & (c > o) & (c >= po) & (o <= pc) & (body >= 0.5 * atr14) & ((l <= bb_lo20) | (l <= ind["swing_lo20"] + 0.15 * atr14)),
+            (pc > po) & (c < o) & (c <= po) & (o >= pc) & (body >= 0.5 * atr14) & ((h >= bb_up20) | (h >= ind["swing_hi20"] - 0.15 * atr14)),
+        )
 
     elif strategy_key == "PA_FAKEY_5M":
         mh, ml = _prev(h, 2), _prev(l, 2)
         ih, il = _prev(h, 1), _prev(l, 1)
         inside = (ih <= mh) & (il >= ml)
+        raw = _sig_array(inside & (l < ml) & (c > il) & (c > o), inside & (h > mh) & (c < ih) & (c < o))
+
+    elif strategy_key == "PA_MHI_1M":
+        raw = _mhi_1m_series(ind)
+
+    elif strategy_key == "PA_3LS_5M":
+        o1, c1 = _prev(o, 1), _prev(c, 1)
+        o2, c2 = _prev(o, 2), _prev(c, 2)
+        o3, c3 = _prev(o, 3), _prev(c, 3)
+        three_red = (c3 < o3) & (c2 < o2) & (c1 < o1) & (c2 < c3) & (c1 < c2)
+        three_grn = (c3 > o3) & (c2 > o2) & (c1 > o1) & (c2 > c3) & (c1 > c2)
         raw = _sig_array(
-            inside & (l < ml) & (c > il) & (c > o),
-            inside & (h > mh) & (c < ih) & (c < o),
+            three_red & (c > o) & (c > o3) & (rsi14 < 55.0),
+            three_grn & (c < o) & (c < o3) & (rsi14 > 45.0),
         )
 
     if len(raw):
-        warmup = min(120, n - 1)
+        warmup = min(200 if strategy_key.startswith("PSAR_EMA") else 120, n - 1)
         raw[:warmup] = 0
 
     if not regime_filter:
@@ -670,10 +1095,7 @@ def evaluate_strategy_series(
     elif reg_type == "TREND":
         reg_ok = liq_ok & (chop <= 50.0) & (adx >= 18.0)
     elif reg_type == "BREAKOUT":
-        if strategy_key.startswith("TTM_SQZ"):
-            reg_ok = liq_ok
-        else:
-            reg_ok = liq_ok & (chop <= 55.0)
+        reg_ok = liq_ok if strategy_key.startswith("TTM_SQZ") else (liq_ok & (chop <= 55.0))
     elif reg_type == "SMC":
         if strategy_key.startswith("LIQ_SWP"):
             kz = np.array([is_killzone(ts) for ts in ind["index"]], dtype=bool)
@@ -744,7 +1166,7 @@ def generate_all_candidates(
         tf_name = meta["tf"]
         tf_min = meta["tf_min"]
         closed = closed_by_tf.get(tf_name)
-        min_bars = 201 if tf_min == 5 else 120
+        min_bars = 201 if (tf_min == 5 or strategy_key.startswith("PSAR_EMA")) else 120
         if closed is None or len(closed) < min_bars:
             continue
 
@@ -768,8 +1190,7 @@ def generate_all_candidates(
         if htf_min:
             htf_key = (tf_name, htf_min)
             if htf_key not in htf_cache:
-                htf_df = closed_by_tf.get(f"{htf_min}m")
-                htf_cache[htf_key] = htf_alignment(closed, htf_df, tf_min, htf_min)
+                htf_cache[htf_key] = htf_alignment(closed, closed_by_tf.get(f"{htf_min}m"), tf_min, htf_min)
             htf_ctx = htf_cache[htf_key]
 
         sig_series = evaluate_strategy_series(
@@ -787,7 +1208,6 @@ def generate_all_candidates(
         adx_val = float(ind["adx"][-1]) if not np.isnan(ind["adx"][-1]) else 20.0
         vr_val = float(ind["vol_ratio"][-1]) if not np.isnan(ind["vol_ratio"][-1]) else 1.0
         exp = int(meta["exp"])
-        sess = session_name(bar_end)
 
         candidates.append({
             "pair": pair_name,
@@ -808,7 +1228,7 @@ def generate_all_candidates(
             "bar_age_sec": age,
             "exp_range": (exp, exp),
             "suggested_exp": exp,
-            "session": sess,
+            "session": session_name(bar_end),
             "confirmations": 1 if htf_ctx is not None else 0,
             "confirmation_names": [f"HTF_{htf_min}m"] if htf_min else [],
             "regime": meta["regime"],
@@ -824,3 +1244,41 @@ def generate_all_candidates(
         reverse=True,
     )
     return candidates
+
+
+def diagnose_pair_market(pair_name: str, frames: dict[str, pd.DataFrame], now, strategies_status: dict, pair_enabled=None) -> dict:
+    now_ts = pd.Timestamp(now)
+    if now_ts.tzinfo is not None:
+        now_ts = now_ts.tz_convert("UTC").tz_localize(None)
+    df_5m = _normalize_frame(frames.get("5m"))
+    closed_5m = df_5m.loc[df_5m.index + pd.Timedelta(minutes=5) <= now_ts] if not df_5m.empty else pd.DataFrame()
+    chop = adx = rsi14 = None
+    sess = session_name(now_ts)
+    if len(closed_5m) >= 60:
+        ind = compute_base_indicators(closed_5m)
+        chop = float(ind["chop"][-1])
+        adx = float(ind["adx"][-1])
+        rsi14 = float(ind["rsi14"][-1])
+        sess = session_name(closed_5m.index[-1] + pd.Timedelta(minutes=5))
+
+    checked = off_global = off_pair = off_session = 0
+    for key in STRATEGIES_META:
+        if not strategies_status.get(key, False):
+            off_global += 1
+        elif pair_enabled is not None and not pair_enabled(pair_name, key):
+            off_pair += 1
+        elif strategies_status.get("session_filter", False) and not session_allowed(key, now_ts):
+            off_session += 1
+        else:
+            checked += 1
+    return {
+        "pair": pair_name,
+        "session": sess,
+        "chop": chop,
+        "adx": adx,
+        "rsi14": rsi14,
+        "checked": checked,
+        "off_global": off_global,
+        "off_pair": off_pair,
+        "off_session": off_session,
+    }
