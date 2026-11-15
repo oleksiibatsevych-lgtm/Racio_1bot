@@ -105,8 +105,7 @@ def is_high_impact_news_time(
     blackout_mins: int | None = None,
 ) -> tuple[bool, str]:
     """
-    Перевіряє, чи перебуває зараз ринок у вікні важливих макроекономічних новин (±blackout_mins).
-    Джерело: тижневий JSON-фід ForexFactory з кешем 1 год і резервним блоком п'ятниці NFP.
+    Перевіряє, чи перебуває пара у вікні важливих макроекономічних новин (±blackout_mins).
     """
     try:
         now_utc = now or datetime.now(timezone.utc)
