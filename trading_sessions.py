@@ -13,39 +13,65 @@ ALLOWED_SESSIONS = {
     "REV_RSI7": {"London", "NY", "Overlap", "Other"},
 }
 
+ACTIVE_FLOW = {"London", "Overlap", "NY"}
+ALL_EXCEPT_DEAD = {"London", "Overlap", "NY", "Other"}
+ANY_SESSION = {"London", "Overlap", "NY", "Asia", "Other"}
+
 STRATEGY_SESSIONS = {
+    "CRSI_5M": ALL_EXCEPT_DEAD,
+    "CRSI_1M": ACTIVE_FLOW,
+    "VALUE_CH_5M": ALL_EXCEPT_DEAD,
+    "VALUE_CH_1M": ACTIVE_FLOW,
+    "OSC_CONS_5M": ALL_EXCEPT_DEAD,
+    "OSC_CONS_3M": ACTIVE_FLOW,
+    "BB_KC_REV_5M": ALL_EXCEPT_DEAD,
+    "BB_KC_REV_15M": ALL_EXCEPT_DEAD,
+    "PIVOT_REV_5M": ALL_EXCEPT_DEAD,
+    "EXH_STRK_1M": ACTIVE_FLOW,
+    "EXH_STRK_3M": ALL_EXCEPT_DEAD,
+    "STARC_5M": ALL_EXCEPT_DEAD,
+    "STARC_15M": ALL_EXCEPT_DEAD,
+    "LINREG_5M": ALL_EXCEPT_DEAD,
+    "HUBBA_5M": ALL_EXCEPT_DEAD,
+    "MTF_PB_1M_15": ACTIVE_FLOW,
+    "MTF_PB_3M_15": ACTIVE_FLOW,
+    "MTF_PB_5M_60": ACTIVE_FLOW,
+    "EMA_RIB_3M": ACTIVE_FLOW,
+    "EMA_RIB_5M": ACTIVE_FLOW,
+    "MACD_ADX_5M": ACTIVE_FLOW,
+    "MACD_ADX_15M": ACTIVE_FLOW,
+    "ST_MOM_3M": ACTIVE_FLOW,
+    "ST_MOM_5M": ACTIVE_FLOW,
+    "PSAR_EMA_5M": ACTIVE_FLOW,
+    "PSAR_EMA_15M": ACTIVE_FLOW,
+    "ICHI_TK_5M": ACTIVE_FLOW,
+    "ICHI_TK_15M": ACTIVE_FLOW,
+    "HA_EMA_5M": ACTIVE_FLOW,
+    "TTM_SQZ_5M": ACTIVE_FLOW,
+    "TTM_SQZ_15M": ACTIVE_FLOW,
     "ORB_LON_5M": {"London", "Overlap"},
     "ORB_NY_5M": {"Overlap", "NY"},
-    "LIQ_SWP_3M": {"London", "Overlap", "NY"},
-    "LIQ_SWP_5M": {"London", "Overlap", "NY"},
-    "FVG_IMP_3M": {"London", "Overlap", "NY"},
-    "FVG_IMP_5M": {"London", "Overlap", "NY"},
-    "TTM_SQZ_5M": {"London", "Overlap", "NY"},
-    "TTM_SQZ_15M": {"London", "Overlap", "NY"},
-    "DONCH_BRK_5M": {"London", "Overlap", "NY"},
-    "MTF_PB_1M_15": {"London", "Overlap", "NY"},
-    "MTF_PB_3M_15": {"London", "Overlap", "NY"},
-    "MTF_PB_5M_60": {"London", "Overlap", "NY"},
-    "EMA_RIB_3M": {"London", "Overlap", "NY"},
-    "EMA_RIB_5M": {"London", "Overlap", "NY"},
-    "MACD_ADX_5M": {"London", "Overlap", "NY"},
-    "MACD_ADX_15M": {"London", "Overlap", "NY"},
-    "ST_MOM_3M": {"London", "Overlap", "NY"},
-    "ST_MOM_5M": {"London", "Overlap", "NY"},
-    "PA_PIN_BB_5M": {"London", "Overlap", "NY", "Other"},
-    "PA_ENG_SR_5M": {"London", "Overlap", "NY", "Other"},
-    "PA_FAKEY_5M": {"London", "Overlap", "NY"},
-    "CRSI_1M": {"London", "Overlap", "NY", "Other"},
-    "CRSI_5M": {"London", "Overlap", "NY", "Other"},
-    "VALUE_CH_1M": {"London", "Overlap", "NY", "Other"},
-    "VALUE_CH_5M": {"London", "Overlap", "NY", "Other"},
-    "OSC_CONS_3M": {"London", "Overlap", "NY", "Other"},
-    "OSC_CONS_5M": {"London", "Overlap", "NY", "Other"},
-    "BB_KC_REV_5M": {"London", "Overlap", "NY", "Other"},
-    "BB_KC_REV_15M": {"London", "Overlap", "NY", "Other"},
-    "PIVOT_REV_5M": {"London", "Overlap", "NY", "Other"},
-    "EXH_STRK_1M": {"London", "Overlap", "NY", "Other"},
-    "EXH_STRK_3M": {"London", "Overlap", "NY", "Other"},
+    "DONCH_BRK_5M": ACTIVE_FLOW,
+    "JUDAS_LON_5M": {"London", "Other"},
+    "DIV_RSI_5M": ALL_EXCEPT_DEAD,
+    "DIV_RSI_15M": ALL_EXCEPT_DEAD,
+    "DIV_MACD_5M": ALL_EXCEPT_DEAD,
+    "DIV_MACD_15M": ALL_EXCEPT_DEAD,
+    "AO_TWIN_5M": ALL_EXCEPT_DEAD,
+    "AO_ZERO_3M": ACTIVE_FLOW,
+    "CCI_WPR_5M": ALL_EXCEPT_DEAD,
+    "CCI_WPR_3M": ACTIVE_FLOW,
+    "DEM_BB_5M": ALL_EXCEPT_DEAD,
+    "WT_CROSS_5M": ALL_EXCEPT_DEAD,
+    "LIQ_SWP_3M": ACTIVE_FLOW,
+    "LIQ_SWP_5M": ACTIVE_FLOW,
+    "FVG_IMP_3M": ACTIVE_FLOW,
+    "FVG_IMP_5M": ACTIVE_FLOW,
+    "PA_PIN_BB_5M": ALL_EXCEPT_DEAD,
+    "PA_ENG_SR_5M": ALL_EXCEPT_DEAD,
+    "PA_FAKEY_5M": ACTIVE_FLOW,
+    "PA_MHI_1M": ANY_SESSION,
+    "PA_3LS_5M": ALL_EXCEPT_DEAD,
 }
 
 
@@ -75,14 +101,13 @@ def session_name(value):
 
 
 def is_killzone(value):
-    return session_name(value) in {"London", "Overlap", "NY"}
+    return session_name(value) in ACTIVE_FLOW
 
 
 def session_allowed(preset, value):
     if preset in ALLOWED_SESSIONS:
         return session_name(value) in ALLOWED_SESSIONS[preset]
-    allowed = STRATEGY_SESSIONS.get(preset, {"London", "Overlap", "NY"})
-    return session_name(value) in allowed
+    return session_name(value) in STRATEGY_SESSIONS.get(preset, ACTIVE_FLOW)
 
 
 def next_daily_report(now):
