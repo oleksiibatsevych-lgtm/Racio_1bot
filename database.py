@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-import os
 import logging
+import os
+import threading
 import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -8,6 +9,11 @@ from psycopg2.extras import RealDictCursor
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+_STATUS_LOCK = threading.Lock()
+_STATUS_CACHE = {}
+_BULK_CACHE_TS = 0.0
+_STATUS_TTL_SEC = 60
 
 
 def get_connection():
@@ -30,10 +36,12 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 username VARCHAR(255),
+                auto_scan BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
+        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_scan BOOLEAN DEFAULT FALSE;")
 
         cursor.execute(
             """
@@ -65,6 +73,7 @@ def init_db():
                 ema_dist NUMERIC,
                 strategy VARCHAR(50),
                 ai_review TEXT,
+                expires_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """
@@ -74,7 +83,6 @@ def init_db():
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_review TEXT;")
         cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;")
 
-        # Таблиця для персоналізації стратегій по конкретних парах (ВКЛ/ВИКЛ)
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS pair_strategy_settings (
@@ -106,13 +114,12 @@ def init_db():
             """
         )
 
-        # після аварійного перезапуску повертаємо «зависші» сигнали в чергу
         cursor.execute("UPDATE signals SET status = 'PENDING' WHERE status = 'PROCESSING';")
 
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано з урахуванням матриці персоналізації та Shadow Mode.")
+        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано.")
     except Exception as e:
         logger.error(f"⚠️ Помилка ініціалізації БД: {e}")
 
@@ -125,8 +132,8 @@ def register_user(user_id, username=None):
             """
             INSERT INTO users (user_id, username)
             VALUES (%s, %s)
-            ON CONFLICT (user_id) DO UPDATE 
-            SET username = EXCLUDED.username;
+            ON CONFLICT (user_id) DO UPDATE
+            SET username = COALESCE(EXCLUDED.username, users.username);
             """,
             (user_id, username),
         )
@@ -135,6 +142,40 @@ def register_user(user_id, username=None):
         conn.close()
     except Exception as e:
         logger.error(f"⚠️ Помилка реєстрації користувача: {e}")
+
+
+def set_user_autoscan(user_id, enabled: bool):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO users (user_id, auto_scan)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+            SET auto_scan = EXCLUDED.auto_scan;
+            """,
+            (user_id, bool(enabled)),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка збереження стану автоскану: {e}")
+
+
+def get_autoscan_chats() -> set[int]:
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users WHERE auto_scan = TRUE;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return {int(r[0]) for r in rows}
+    except Exception as e:
+        logger.error(f"⚠️ Помилка завантаження чатів автоскану: {e}")
+        return set()
 
 
 def save_signal(
@@ -169,7 +210,7 @@ def save_signal(
         cursor.execute(
             """
             INSERT INTO signals (
-                chat_id, message_id, ticker, signal_type, entry_price, primary_tf, 
+                chat_id, message_id, ticker, signal_type, entry_price, primary_tf,
                 score, expiration_mins, timestamp_str, message_text, rsi, adx, bb_width,
                 session_code, hour, divergence, dist_pivot, volatility_ratio, wick_ratio, ema_dist, strategy, status, expires_at
             )
@@ -240,7 +281,8 @@ def has_open_reversion_signal(ticker, strategy):
         with conn.cursor() as cursor:
             cursor.execute(
                 "SELECT EXISTS (SELECT 1 FROM signals WHERE ticker = %s AND strategy = %s "
-                "AND status IN ('PENDING', 'PROCESSING'));", (ticker, strategy)
+                "AND status IN ('PENDING', 'PROCESSING'));",
+                (ticker, strategy),
             )
             return bool(cursor.fetchone()[0])
     finally:
@@ -267,7 +309,7 @@ def update_signal_result(signal_id, result, exit_price, pips=0, status="CLOSED")
         cursor = conn.cursor()
         cursor.execute(
             """
-            UPDATE signals 
+            UPDATE signals
             SET status = %s, result = %s, exit_price = %s, pips = %s
             WHERE id = %s;
             """,
@@ -298,21 +340,20 @@ def get_recent_failed_reviews_summary(ticker: str, limit=3) -> str:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT ai_review, signal_type, strategy FROM signals 
-            WHERE ticker = %s AND result = 'LOSS' AND ai_review IS NOT NULL 
+            SELECT ai_review, signal_type, strategy FROM signals
+            WHERE ticker = %s AND result = 'LOSS' AND ai_review IS NOT NULL
             ORDER BY id DESC LIMIT %s;
             """,
-            (ticker, limit)
+            (ticker, limit),
         )
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
         if not rows:
             return "Немає попередніх помилок для аналізу."
-        lines = []
-        for r in rows:
-            lines.append(f"- Стратегія [{r['strategy']} ({r['signal_type']})]: {r['ai_review']}")
-        return "\n".join(lines)
+        return "\n".join(
+            f"- Стратегія [{r['strategy']} ({r['signal_type']})]: {r['ai_review']}" for r in rows
+        )
     except Exception:
         return "Помилка завантаження історії помилок."
 
@@ -323,7 +364,7 @@ def get_stats():
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
-            SELECT 
+            SELECT
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses,
@@ -340,21 +381,17 @@ def get_stats():
 
 
 def get_detailed_pair_strategy_stats(ticker_filter=None, strategy_filter=None):
-    """
-    Повертає деталізовану статистику зрізу: Валютна пара ✖ Стратегія (включно з Shadow Mode).
-    """
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
         query = """
-            SELECT 
+            SELECT
                 ticker,
                 COALESCE(strategy, 'QUANTUM_MATRIX') as strategy,
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses
-            FROM signals 
+            FROM signals
             WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
         """
         params = []
@@ -364,9 +401,7 @@ def get_detailed_pair_strategy_stats(ticker_filter=None, strategy_filter=None):
         if strategy_filter:
             query += " AND strategy = %s"
             params.append(strategy_filter)
-            
         query += " GROUP BY ticker, strategy ORDER BY ticker ASC, wins DESC;"
-        
         cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
         cursor.close()
@@ -385,7 +420,6 @@ EXPORT_COLUMNS = [
 
 
 def export_resolved_signals():
-    """Усі завершені угоди (без важких текстових полів) для зовнішнього аналізу."""
     conn = get_connection()
     try:
         cursor = conn.cursor()
@@ -401,20 +435,19 @@ def export_resolved_signals():
 
 
 def get_segment_stats():
-    """Статистика сегментів «пара × ТФ × стратегія» для SegmentFilter."""
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute(
             """
             SELECT ticker,
-                   COALESCE(primary_tf, '1m') AS tf,
+                   COALESCE(primary_tf, '5m') AS tf,
                    COALESCE(strategy, 'QUANTUM_MATRIX') AS strategy,
                    COUNT(*) AS total,
                    COUNT(*) FILTER (WHERE result = 'WIN') AS wins
             FROM signals
             WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
-            GROUP BY ticker, COALESCE(primary_tf, '1m'), COALESCE(strategy, 'QUANTUM_MATRIX');
+            GROUP BY ticker, COALESCE(primary_tf, '5m'), COALESCE(strategy, 'QUANTUM_MATRIX');
             """
         )
         rows = cursor.fetchall()
@@ -427,10 +460,6 @@ def get_segment_stats():
 
 
 def claim_signal(signal_id) -> bool:
-    """
-    Атомарно переводить PENDING -> PROCESSING. Повертає True лише одному викликачу,
-    тож таймер і фоновий checker не оброблять один сигнал двічі.
-    """
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -449,7 +478,6 @@ def claim_signal(signal_id) -> bool:
 
 
 def release_signal(signal_id):
-    """Повертає PROCESSING -> PENDING (якщо ціну закриття отримати не вдалося)."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -461,43 +489,34 @@ def release_signal(signal_id):
         logger.error(f"⚠️ Помилка release_signal: {e}")
 
 
-_STATUS_CACHE = {}
-_STATUS_TTL_SEC = 60
+def _refresh_pair_strategy_cache():
+    global _BULK_CACHE_TS
+    now = time.time()
+    with _STATUS_LOCK:
+        if now - _BULK_CACHE_TS < _STATUS_TTL_SEC:
+            return
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT pair_name, strategy_key, is_active FROM pair_strategy_settings;")
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            _STATUS_CACHE.clear()
+            for pair_name, strategy_key, is_active in rows:
+                _STATUS_CACHE[(pair_name, strategy_key)] = bool(is_active)
+            _BULK_CACHE_TS = time.time()
+        except Exception:
+            _BULK_CACHE_TS = time.time()
 
 
 def get_pair_strategy_status(pair_name: str, strategy_key: str) -> bool:
-    """
-    Перевіряє, чи активна конкретна стратегія для конкретної пари. За замовчуванням True.
-    Результат кешується на 60 с: рушій викликає це багато разів на хвилину, а кожен виклик
-    без кешу відкривав нове з'єднання з БД.
-    """
-    key = (pair_name, strategy_key)
-    hit = _STATUS_CACHE.get(key)
-    if hit and time.time() - hit[0] < _STATUS_TTL_SEC:
-        return hit[1]
-    value = True
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT is_active FROM pair_strategy_settings WHERE pair_name = %s AND strategy_key = %s;",
-            (pair_name, strategy_key)
-        )
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        if row is not None:
-            value = bool(row[0])
-    except Exception:
-        value = True
-    _STATUS_CACHE[key] = (time.time(), value)
-    return value
+    _refresh_pair_strategy_cache()
+    with _STATUS_LOCK:
+        return _STATUS_CACHE.get((pair_name, strategy_key), True)
 
 
 def set_pair_strategy_status(pair_name: str, strategy_key: str, is_active: bool):
-    """
-    Зберігає стан стратегії для конкретної пари.
-    """
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -505,12 +524,13 @@ def set_pair_strategy_status(pair_name: str, strategy_key: str, is_active: bool)
             """
             INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
             VALUES (%s, %s, %s)
-            ON CONFLICT (pair_name, strategy_key) DO UPDATE 
+            ON CONFLICT (pair_name, strategy_key) DO UPDATE
             SET is_active = EXCLUDED.is_active;
             """,
-            (pair_name, strategy_key, is_active)
+            (pair_name, strategy_key, is_active),
         )
-        _STATUS_CACHE[(pair_name, strategy_key)] = (time.time(), bool(is_active))
+        with _STATUS_LOCK:
+            _STATUS_CACHE[(pair_name, strategy_key)] = bool(is_active)
         conn.commit()
         cursor.close()
         conn.close()
@@ -522,35 +542,38 @@ def get_strategy_time_stats():
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cursor.execute("""
-            SELECT 
+        cursor.execute(
+            """
+            SELECT
                 COALESCE(strategy, 'MATRIX') as strategy,
                 EXTRACT(HOUR FROM created_at) as trade_hour,
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses
-            FROM signals 
+            FROM signals
             WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
             GROUP BY strategy, trade_hour
             ORDER BY strategy, trade_hour;
-        """)
+            """
+        )
         hour_rows = cursor.fetchall()
 
-        cursor.execute("""
-            SELECT 
+        cursor.execute(
+            """
+            SELECT
                 COALESCE(strategy, 'MATRIX') as strategy,
                 EXTRACT(DOW FROM created_at) as trade_dow,
                 COUNT(*) as total,
                 COUNT(*) FILTER (WHERE result = 'WIN') as wins,
                 COUNT(*) FILTER (WHERE result = 'LOSS') as losses
-            FROM signals 
+            FROM signals
             WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
             GROUP BY strategy, trade_dow
             ORDER BY strategy, trade_dow;
-        """)
+            """
+        )
         dow_rows = cursor.fetchall()
-        
+
         cursor.close()
         conn.close()
         return {"hours": hour_rows, "dow": dow_rows}
@@ -602,6 +625,8 @@ def clear_all_stats():
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("TRUNCATE TABLE signals, filtered_logs, pair_strategy_settings RESTART IDENTITY;")
+        with _STATUS_LOCK:
+            _STATUS_CACHE.clear()
         conn.commit()
         cursor.close()
         conn.close()
