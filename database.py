@@ -6,6 +6,15 @@ import time
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from config import (
+    AUTO_DISABLE_MIN_BT_GLOBAL,
+    AUTO_DISABLE_MIN_BT_PAIR,
+    AUTO_DISABLE_MIN_LIVE_GLOBAL,
+    AUTO_DISABLE_MIN_LIVE_PAIR,
+    AUTO_DISABLE_WR_THRESHOLD,
+    normalize_pair_name,
+)
+
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -89,6 +98,40 @@ def init_db():
                 pair_name VARCHAR(50),
                 strategy_key VARCHAR(50),
                 is_active BOOLEAN DEFAULT TRUE,
+                PRIMARY KEY (pair_name, strategy_key)
+            );
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_auto_status (
+                scope_type VARCHAR(10) NOT NULL,
+                pair_name VARCHAR(50) NOT NULL,
+                strategy_key VARCHAR(50) NOT NULL,
+                is_auto_disabled BOOLEAN DEFAULT FALSE,
+                source VARCHAR(20),
+                wins INT DEFAULT 0,
+                total INT DEFAULT 0,
+                win_rate NUMERIC DEFAULT 0,
+                reason TEXT,
+                reset_after_signal_id BIGINT DEFAULT 0,
+                manual_override BOOLEAN DEFAULT FALSE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (scope_type, pair_name, strategy_key)
+            );
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backtest_results (
+                pair_name VARCHAR(50) NOT NULL,
+                strategy_key VARCHAR(50) NOT NULL,
+                wins INT NOT NULL DEFAULT 0,
+                total INT NOT NULL DEFAULT 0,
+                win_rate NUMERIC NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (pair_name, strategy_key)
             );
             """
@@ -538,6 +581,379 @@ def set_pair_strategy_status(pair_name: str, strategy_key: str, is_active: bool)
         logger.error(f"⚠️ Помилка збереження налаштування пари та стратегії: {e}")
 
 
+def set_pair_bulk_strategy_status(pair_name: str, strategy_keys: list[str], is_active: bool):
+    if not strategy_keys:
+        return
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        for key in strategy_keys:
+            cursor.execute(
+                """
+                INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (pair_name, strategy_key) DO UPDATE
+                SET is_active = EXCLUDED.is_active;
+                """,
+                (pair_name, key, bool(is_active)),
+            )
+            with _STATUS_LOCK:
+                _STATUS_CACHE[(pair_name, key)] = bool(is_active)
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка групового збереження налаштувань пари: {e}")
+
+
+def upsert_backtest_results(rows: list[dict]):
+    if not rows:
+        return
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        for r in rows:
+            pair = normalize_pair_name(r["pair"])
+            strategy = r["strategy"]
+            wins = int(r["wins"])
+            total = int(r["total"])
+            wr = float(wins / total) if total > 0 else 0.0
+            cursor.execute(
+                """
+                INSERT INTO backtest_results (pair_name, strategy_key, wins, total, win_rate, updated_at)
+                VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (pair_name, strategy_key) DO UPDATE
+                SET wins = EXCLUDED.wins,
+                    total = EXCLUDED.total,
+                    win_rate = EXCLUDED.win_rate,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                (pair, strategy, wins, total, wr),
+            )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка збереження результатів бектесту: {e}")
+
+
+def get_backtest_results(pair_filter: str | None = None) -> list[dict]:
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        if pair_filter:
+            cursor.execute(
+                "SELECT * FROM backtest_results WHERE pair_name = %s ORDER BY win_rate DESC, total DESC;",
+                (normalize_pair_name(pair_filter),),
+            )
+        else:
+            cursor.execute("SELECT * FROM backtest_results ORDER BY pair_name ASC, win_rate DESC;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"⚠️ Помилка читання результатів бектесту: {e}")
+        return []
+
+
+def get_auto_disabled_items() -> list[dict]:
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            """
+            SELECT scope_type, pair_name, strategy_key, is_auto_disabled, source,
+                   wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at
+            FROM strategy_auto_status
+            WHERE is_auto_disabled = TRUE
+            ORDER BY scope_type ASC, pair_name ASC, win_rate ASC;
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        logger.error(f"⚠️ Помилка читання авто-вимкнених стратегій: {e}")
+        return []
+
+
+def get_auto_disabled_map() -> dict[tuple[str, str, str], dict]:
+    rows = get_auto_disabled_items()
+    return {(r["scope_type"], r["pair_name"], r["strategy_key"]): r for r in rows}
+
+
+def _get_auto_status_record(cursor, scope_type: str, pair_name: str, strategy_key: str) -> dict | None:
+    cursor.execute(
+        """
+        SELECT scope_type, pair_name, strategy_key, is_auto_disabled, source,
+               wins, total, win_rate, reset_after_signal_id, manual_override
+        FROM strategy_auto_status
+        WHERE scope_type = %s AND pair_name = %s AND strategy_key = %s;
+        """,
+        (scope_type, pair_name, strategy_key),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    if isinstance(row, dict):
+        return row
+    cols = (
+        "scope_type", "pair_name", "strategy_key", "is_auto_disabled", "source",
+        "wins", "total", "win_rate", "reset_after_signal_id", "manual_override",
+    )
+    return dict(zip(cols, row))
+
+
+def mark_strategy_manual_enable(scope_type: str, pair_name: str, strategy_key: str):
+    norm_pair = "*" if scope_type == "GLOBAL" else normalize_pair_name(pair_name)
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COALESCE(MAX(id), 0) FROM signals;")
+        max_row = cursor.fetchone()
+        max_sig_id = int(max_row[0]) if max_row and max_row[0] is not None else 0
+        cursor.execute(
+            """
+            INSERT INTO strategy_auto_status (
+                scope_type, pair_name, strategy_key, is_auto_disabled, source,
+                wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at
+            )
+            VALUES (%s, %s, %s, FALSE, 'MANUAL', 0, 0, 0, 'Ввімкнено вручну', %s, TRUE, CURRENT_TIMESTAMP)
+            ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
+            SET is_auto_disabled = FALSE,
+                manual_override = TRUE,
+                reset_after_signal_id = GREATEST(strategy_auto_status.reset_after_signal_id, EXCLUDED.reset_after_signal_id),
+                reason = 'Ввімкнено вручну',
+                updated_at = CURRENT_TIMESTAMP;
+            """,
+            (scope_type, norm_pair, strategy_key, max_sig_id),
+        )
+        if scope_type == "PAIR":
+            cursor.execute(
+                """
+                INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
+                VALUES (%s, %s, TRUE)
+                ON CONFLICT (pair_name, strategy_key) DO UPDATE
+                SET is_active = TRUE;
+                """,
+                (norm_pair, strategy_key),
+            )
+            with _STATUS_LOCK:
+                _STATUS_CACHE[(norm_pair, strategy_key)] = True
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка ручного ввімкнення стратегії {strategy_key}: {e}")
+
+
+def evaluate_and_apply_auto_disable(
+    source: str = "LIVE",
+    pair_filter: str | None = None,
+    strategy_filter: str | None = None,
+    threshold: float = AUTO_DISABLE_WR_THRESHOLD,
+    min_pair: int | None = None,
+    min_global: int | None = None,
+) -> dict[str, list[dict]]:
+    """
+    Перевіряє результати (LIVE або BACKTEST) і автоматично вимикає стратегії
+    (по парі та/або глобально), якщо вінрейт < threshold при достатній вибірці.
+    """
+    src = source.upper()
+    req_pair = min_pair if min_pair is not None else (
+        AUTO_DISABLE_MIN_BT_PAIR if src == "BACKTEST" else AUTO_DISABLE_MIN_LIVE_PAIR
+    )
+    req_global = min_global if min_global is not None else (
+        AUTO_DISABLE_MIN_BT_GLOBAL if src == "BACKTEST" else AUTO_DISABLE_MIN_LIVE_GLOBAL
+    )
+    events = {"disabled_global": [], "disabled_pair": []}
+    norm_filter = normalize_pair_name(pair_filter) if pair_filter else None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        if src == "BACKTEST":
+            cursor.execute("SELECT pair_name, strategy_key, wins, total FROM backtest_results;")
+            bt_rows = cursor.fetchall()
+            pair_agg = {}
+            global_agg = {}
+            for r in bt_rows:
+                p = normalize_pair_name(r["pair_name"])
+                s = r["strategy_key"]
+                w, t = int(r["wins"]), int(r["total"])
+                pair_agg[(p, s)] = [w, t]
+                g = global_agg.setdefault(s, [0, 0])
+                g[0] += w
+                g[1] += t
+
+            for (p, s), (w, t) in pair_agg.items():
+                if norm_filter and p != norm_filter:
+                    continue
+                if strategy_filter and s != strategy_filter:
+                    continue
+                if t < req_pair or (w / t) >= threshold:
+                    continue
+                rec = _get_auto_status_record(cursor, "PAIR", p, s)
+                if rec and (rec.get("manual_override") or rec.get("is_auto_disabled")):
+                    continue
+                wr = w / t
+                reason = f"Бектест {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"
+                cursor.execute(
+                    """
+                    INSERT INTO strategy_auto_status (
+                        scope_type, pair_name, strategy_key, is_auto_disabled, source,
+                        wins, total, win_rate, reason, manual_override, updated_at
+                    )
+                    VALUES ('PAIR', %s, %s, TRUE, 'BACKTEST', %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP)
+                    ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
+                    SET is_auto_disabled = TRUE, source = 'BACKTEST',
+                        wins = EXCLUDED.wins, total = EXCLUDED.total,
+                        win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason,
+                        manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;
+                    """,
+                    (p, s, w, t, wr, reason),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
+                    VALUES (%s, %s, FALSE)
+                    ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = FALSE;
+                    """,
+                    (p, s),
+                )
+                with _STATUS_LOCK:
+                    _STATUS_CACHE[(p, s)] = False
+                events["disabled_pair"].append({"pair": p, "strategy": s, "wins": w, "total": t, "wr": wr, "source": "BACKTEST"})
+
+            if not norm_filter:
+                for s, (w, t) in global_agg.items():
+                    if strategy_filter and s != strategy_filter:
+                        continue
+                    if t < req_global or (w / t) >= threshold:
+                        continue
+                    rec = _get_auto_status_record(cursor, "GLOBAL", "*", s)
+                    if rec and (rec.get("manual_override") or rec.get("is_auto_disabled")):
+                        continue
+                    wr = w / t
+                    reason = f"Бектест {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"
+                    cursor.execute(
+                        """
+                        INSERT INTO strategy_auto_status (
+                            scope_type, pair_name, strategy_key, is_auto_disabled, source,
+                            wins, total, win_rate, reason, manual_override, updated_at
+                        )
+                        VALUES ('GLOBAL', '*', %s, TRUE, 'BACKTEST', %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP)
+                        ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
+                        SET is_auto_disabled = TRUE, source = 'BACKTEST',
+                            wins = EXCLUDED.wins, total = EXCLUDED.total,
+                            win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason,
+                            manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;
+                        """,
+                        (s, w, t, wr, reason),
+                    )
+                    events["disabled_global"].append({"strategy": s, "wins": w, "total": t, "wr": wr, "source": "BACKTEST"})
+
+        else:
+            cursor.execute(
+                """
+                SELECT id, ticker, COALESCE(strategy, 'QUANTUM_MATRIX') AS strategy, result
+                FROM signals
+                WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
+                ORDER BY id ASC;
+                """
+            )
+            sig_rows = cursor.fetchall()
+
+            strategies_seen = {r["strategy"] for r in sig_rows}
+            pairs_seen = {(normalize_pair_name(r["ticker"]), r["strategy"]) for r in sig_rows}
+
+            for p, s in pairs_seen:
+                if norm_filter and p != norm_filter:
+                    continue
+                if strategy_filter and s != strategy_filter:
+                    continue
+                rec = _get_auto_status_record(cursor, "PAIR", p, s)
+                if rec and rec.get("is_auto_disabled"):
+                    continue
+                reset_id = int(rec["reset_after_signal_id"]) if rec and rec.get("reset_after_signal_id") else 0
+                sub = [r for r in sig_rows if normalize_pair_name(r["ticker"]) == p and r["strategy"] == s and int(r["id"]) > reset_id]
+                t = len(sub)
+                if t < req_pair:
+                    continue
+                w = sum(1 for r in sub if r["result"] == "WIN")
+                wr = w / t
+                if wr < threshold:
+                    reason = f"Живі угоди {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"
+                    cursor.execute(
+                        """
+                        INSERT INTO strategy_auto_status (
+                            scope_type, pair_name, strategy_key, is_auto_disabled, source,
+                            wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at
+                        )
+                        VALUES ('PAIR', %s, %s, TRUE, 'LIVE', %s, %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP)
+                        ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
+                        SET is_auto_disabled = TRUE, source = 'LIVE',
+                            wins = EXCLUDED.wins, total = EXCLUDED.total,
+                            win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason,
+                            manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;
+                        """,
+                        (p, s, w, t, wr, reason, reset_id),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
+                        VALUES (%s, %s, FALSE)
+                        ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = FALSE;
+                        """,
+                        (p, s),
+                    )
+                    with _STATUS_LOCK:
+                        _STATUS_CACHE[(p, s)] = False
+                    events["disabled_pair"].append({"pair": p, "strategy": s, "wins": w, "total": t, "wr": wr, "source": "LIVE"})
+
+            for s in strategies_seen:
+                if strategy_filter and s != strategy_filter:
+                    continue
+                rec = _get_auto_status_record(cursor, "GLOBAL", "*", s)
+                if rec and rec.get("is_auto_disabled"):
+                    continue
+                reset_id = int(rec["reset_after_signal_id"]) if rec and rec.get("reset_after_signal_id") else 0
+                sub = [r for r in sig_rows if r["strategy"] == s and int(r["id"]) > reset_id]
+                t = len(sub)
+                if t < req_global:
+                    continue
+                w = sum(1 for r in sub if r["result"] == "WIN")
+                wr = w / t
+                if wr < threshold:
+                    reason = f"Живі угоди {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"
+                    cursor.execute(
+                        """
+                        INSERT INTO strategy_auto_status (
+                            scope_type, pair_name, strategy_key, is_auto_disabled, source,
+                            wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at
+                        )
+                        VALUES ('GLOBAL', '*', %s, TRUE, 'LIVE', %s, %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP)
+                        ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
+                        SET is_auto_disabled = TRUE, source = 'LIVE',
+                            wins = EXCLUDED.wins, total = EXCLUDED.total,
+                            win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason,
+                            manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;
+                        """,
+                        (s, w, t, wr, reason, reset_id),
+                    )
+                    events["disabled_global"].append({"strategy": s, "wins": w, "total": t, "wr": wr, "source": "LIVE"})
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"⚠️ Помилка оцінки авто-вимкнення ({src}): {e}")
+    return events
+
+
 def get_strategy_time_stats():
     try:
         conn = get_connection()
@@ -624,12 +1040,11 @@ def clear_all_stats():
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("TRUNCATE TABLE signals, filtered_logs, pair_strategy_settings RESTART IDENTITY;")
-        with _STATUS_LOCK:
-            _STATUS_CACHE.clear()
+        cursor.execute("TRUNCATE TABLE signals, filtered_logs, backtest_results, strategy_auto_status RESTART IDENTITY;")
         conn.commit()
         cursor.close()
         conn.close()
         return True
-    except Exception:
+    except Exception as e:
+        logger.error(f"⚠️ Помилка очищення статистики: {e}")
         return False
