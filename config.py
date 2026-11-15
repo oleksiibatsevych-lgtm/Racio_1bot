@@ -14,6 +14,10 @@ if raw_db_url.startswith("postgres://"):
 
 DATABASE_URL = raw_db_url.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
 
+PAYOUT = float(os.environ.get("PAYOUT", "0.85"))
+NEWS_BLACKOUT_MINS = int(os.environ.get("NEWS_BLACKOUT_MINS", "15"))
+DISABLE_FINNHUB_CANDLES = os.environ.get("DISABLE_FINNHUB_CANDLES", "false").lower() in ("1", "true", "yes")
+
 PAIRS_MAP = {
     "EUR/USD": "OANDA:EUR_USD",
     "GBP/USD": "OANDA:GBP_USD",
@@ -35,7 +39,7 @@ PAIRS_MAP = {
     "GBP/CHF": "OANDA:GBP_CHF",
     "AUD/CAD": "OANDA:AUD_CAD",
     "AUD/CHF": "OANDA:AUD_CHF",
-    "CAD/CHF": "OANDA:CAD_CHF"
+    "CAD/CHF": "OANDA:CAD_CHF",
 }
 
 YAHOO_PAIRS_MAP = {
@@ -59,5 +63,5 @@ YAHOO_PAIRS_MAP = {
     "GBP/CHF": "GBPCHF=X",
     "AUD/CAD": "AUDCAD=X",
     "AUD/CHF": "AUDCHF=X",
-    "CAD/CHF": "CADCHF=X"
+    "CAD/CHF": "CADCHF=X",
 }
