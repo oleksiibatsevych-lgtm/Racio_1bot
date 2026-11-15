@@ -1,23 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Strategy Lab — чесна перевірка: чи існує конфігурація (стратегія × таймфрейм × експірація),
-яка справді перемагає беззбитковість бінарних опціонів.
-
-Принципи (щоб не обманювати себе):
-  1. Сигнал на ЗАКРИТІЙ свічці, вхід — по open наступної 1-хв свічки, вихід — по open через `exp` хв.
-  2. Угоди не перекриваються (на парі не відкривається нова, поки не завершилась попередня).
-  3. Історія ділиться ЗА ЧАСОМ: 60% — «пошук» (discovery), 40% — «підтвердження» (confirmation).
-     Конфігурації обираються ТІЛЬКИ за першою частиною; друга частина їх не бачила.
-  4. Статистична значущість рахується з кластерною похибкою (угоди в один і той самий час
-     на різних парах корельовані) і з поправкою на кількість обраних кандидатів (Bonferroni).
-  5. Контрольні «стратегії» (випадковий напрямок) показують, наскільки високо шум може підняти вінрейт.
-  6. PASS лише якщо: вінрейт у підтвердженні > беззбитку, n ≥ 200, p < 0.05/K.
-     Беззбиток = 1/(1+payout), для 85% це 54.05%. Це поріг прибутковості, а не «65%».
-
-Запуск:
-  python3 lab.py --download        # скачати/дописати 1m-історію з Yahoo (накопичується у lab_data/)
-  python3 lab.py                   # аналіз вже накопиченого
-Результати: lab_summary.txt, lab_report.csv, lab_validated.json
+Strategy Lab — чесна walk-forward перевірка всіх стратегій (класичних та нових):
+  1. Сигнал на ЗАКРИТІЙ свічці, вхід — по open наступної 1m-свічки, вихід — по open через `exp` хв.
+  2. Неперекривні угоди по кожній парі та конфігурації.
+  3. Хронологічний поділ 60% пошук (discovery) / 40% підтвердження (confirmation).
+  4. Кластерна похибка (30 хв, усі пари разом) і поправка Бонферроні (p < 0.05 / TOP_K).
+  5. 5 контрольних випадкових стратегій (CTRL_random_*) для відсіювання шуму.
+  6. PASS лише якщо: conf_n >= 200, conf_wr > break_even (54.05% при 85%), p < 0.05 / TOP_K.
 """
 import argparse
 import json
@@ -29,19 +18,28 @@ import time
 import numpy as np
 import pandas as pd
 
-PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "EUR/JPY", "GBP/JPY",
-         "AUD/JPY", "CAD/JPY", "CHF/JPY", "EUR/GBP", "EUR/AUD", "EUR/CAD", "EUR/CHF", "GBP/AUD",
-         "GBP/CAD", "GBP/CHF", "AUD/CAD", "AUD/CHF", "CAD/CHF"]
+import reversion_engine as rev
+from strategy_engine import (
+    STRATEGIES_META,
+    compute_base_indicators,
+    evaluate_strategy_series,
+    htf_alignment,
+)
+
+PAIRS = [
+    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "EUR/JPY", "GBP/JPY",
+    "AUD/JPY", "CAD/JPY", "CHF/JPY", "EUR/GBP", "EUR/AUD", "EUR/CAD", "EUR/CHF", "GBP/AUD",
+    "GBP/CAD", "GBP/CHF", "AUD/CAD", "AUD/CHF", "CAD/CHF",
+]
 TIMEFRAMES = [1, 3, 5, 15]
 EXPIRATIONS = [1, 2, 3, 5, 10, 15, 30]
 SPLIT_FRACTION = 0.60
-TOP_K = 15
+TOP_K = 20
 MIN_DISC_TRADES = 150
 MIN_CONF_TRADES = 200
 CLUSTER_MINUTES = 30
 
 
-# ───────────────────────────── дані ─────────────────────────────
 def yahoo_symbol(pair: str) -> str:
     return pair.replace("/", "") + "=X"
 
@@ -82,14 +80,12 @@ def minutes_of(index) -> np.ndarray:
     return index.values.astype("datetime64[m]").astype(np.int64)
 
 
-# ───────────────────────────── індикатори ─────────────────────────────
 class Feat:
-    """Кеш індикаторів для одного (пара, ТФ). Усі значення на барі i використовують дані ≤ i."""
     def __init__(self, df):
         self.o, self.h, self.l, self.c = (df[k].values.astype(float) for k in ("open", "high", "low", "close"))
         self.s = pd.Series(self.c)
         self._cache = {}
-        self.htf = {}   # htf_minutes -> dict(trend=int8[], rsi=float[]) вирівняні на бари цього ТФ без заглядання вперед
+        self.htf = {}
 
     def _get(self, key, fn):
         if key not in self._cache:
@@ -114,7 +110,6 @@ class Feat:
         return self._get(("std", n), lambda: self.s.rolling(n).std().values)
 
     def vol_ratio(self):
-        """ATR(14) / медіана ATR за останні 200 барів (лише минуле): >1 — волатильність вища за звичну."""
         def f():
             tr = np.maximum(self.h - self.l, np.maximum(np.abs(self.h - _prev(self.c)), np.abs(self.l - _prev(self.c))))
             atr = pd.Series(tr).ewm(alpha=1 / 14, adjust=False).mean()
@@ -137,7 +132,6 @@ def _sig(call, put):
     return out
 
 
-# ───────────────────────────── стратегії ─────────────────────────────
 def s_rsi_rev(F, n, lo, hi):
     r = F.rsi(n)
     return _sig(r < lo, r > hi)
@@ -212,15 +206,20 @@ def s_zscore(F, th):
 
 
 STRATEGIES = []
-for n_, lo_, hi_ in ((7, 30, 70), (7, 20, 80), (14, 30, 70), (14, 25, 75)):
+for n_, lo_, hi_ in ((7, 30, 70), (7, 20, 80), (7, 15, 85), (14, 30, 70), (14, 25, 75), (14, 20, 80)):
     STRATEGIES.append((f"rsi_rev(n={n_},{lo_}/{hi_})", s_rsi_rev, dict(n=n_, lo=lo_, hi=hi_)))
-for k_ in (2.0, 2.5):
+for k_ in (2.0, 2.5, 3.0):
     STRATEGIES.append((f"bb_fade(k={k_})", s_bb, dict(k=k_, mode="fade")))
     STRATEGIES.append((f"bb_break(k={k_})", s_bb, dict(k=k_, mode="cont")))
 for a_, b_ in ((9, 21), (5, 13)):
     STRATEGIES.append((f"ema_cross({a_},{b_})", s_ema_cross, dict(a=a_, b=b_)))
-STRATEGIES += [("trend_pullback", s_pullback, {}), ("macd_flip", s_macd, {}),
-               ("stoch_rev", s_stoch, {}), ("engulfing_rev", s_engulf, {}), ("pin_bar_rev", s_pin, {})]
+STRATEGIES += [
+    ("trend_pullback", s_pullback, {}),
+    ("macd_flip", s_macd, {}),
+    ("stoch_rev", s_stoch, {}),
+    ("engulfing_rev", s_engulf, {}),
+    ("pin_bar_rev", s_pin, {}),
+]
 for n_ in (20, 10):
     STRATEGIES.append((f"donchian_break({n_})", s_donchian, dict(n=n_)))
 for n_ in (3, 4):
@@ -230,7 +229,6 @@ for th_ in (2.0, 2.5):
     STRATEGIES.append((f"zscore_fade({th_})", s_zscore, dict(th=th_)))
 
 
-# ───────────── мультитаймфреймові стратегії (старший ТФ як фільтр, молодший як тригер) ─────────────
 def _htf(F, h):
     d = F.htf.get(h)
     if d is None:
@@ -275,12 +273,12 @@ HTFS = (15, 60)
 
 
 def attach_htf(F, df1, tf, end_min):
-    """Додає у F тренд/RSI старших ТФ, вирівняні так, щоб бар використовував лише ЗАКРИТІ свічки старшого ТФ."""
     for h in HTFS:
         if h <= tf:
             continue
         dh = df1.resample(f"{h}min", label="left", closed="left").agg(
-            {"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+            {"open": "first", "high": "max", "low": "min", "close": "last"}
+        ).dropna()
         if len(dh) < 60:
             continue
         sh = pd.Series(dh["close"].values.astype(float))
@@ -292,10 +290,11 @@ def attach_htf(F, df1, tf, end_min):
         dn = (-d_.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
         rsi = (100 - 100 / (1 + up / (dn + 1e-12))).values
         h_end = minutes_of(dh.index) + h
-        j = np.searchsorted(h_end, end_min, side="right") - 1   # остання закрита свічка старшого ТФ на момент закриття бару
+        j = np.searchsorted(h_end, end_min, side="right") - 1
         ok = j >= 0
         jc = np.maximum(j, 0)
         F.htf[h] = dict(trend=np.where(ok, trend[jc], 0).astype(np.int8), rsi=np.where(ok, rsi[jc], 50.0))
+
 
 N_CONTROLS = 5
 
@@ -307,26 +306,18 @@ def control_signal(n_bars, seed, density=0.04):
     return np.where(mask, dirs, 0).astype(np.int8)
 
 
-# ───────────────────────────── угоди ─────────────────────────────
 def dynamic_exp(F, tf, rule):
-    """
-    Динамічна експірація (хв) на кожен бар за волатильністю ринку:
-      dyn_vol     — висока волатильність (верхні 25%) → коротше (1 бар ТФ), низька (нижні 25%) → довше (3 бари);
-      dyn_vol_inv — навпаки.
-    """
     vr = pd.Series(F.vol_ratio())
-    # пороги — перцентилі власної недавньої історії волатильності (лише минуле), тож розподіл ~25% / 50% / 25%
     hi = vr.rolling(500, min_periods=100).quantile(0.75).values
     lo = vr.rolling(500, min_periods=100).quantile(0.25).values
     v = vr.values
-    bars = np.where(v > hi, 1, np.where(v < lo, 3, 2))   # NaN-порівняння дають False → 2 бари
+    bars = np.where(v > hi, 1, np.where(v < lo, 3, 2))
     if rule == "dyn_vol_inv":
         bars = 4 - bars
     return (bars * tf).astype(np.int64)
 
 
 def extract_trades(sig, end_min, m1_min, m1_open, exp, delay=0):
-    """Повертає (entry_minute[], win[]) для неперекривних угод. exp — число або масив (на кожен бар)."""
     idx = np.flatnonzero(sig)
     if idx.size == 0:
         return np.empty(0, np.int64), np.empty(0, np.int8)
@@ -353,13 +344,11 @@ def extract_trades(sig, end_min, m1_min, m1_open, exp, delay=0):
     return em, win.astype(np.int8)
 
 
-# ───────────────────────────── статистика ─────────────────────────────
 def norm_sf(z):
     return 0.5 * math.erfc(z / math.sqrt(2))
 
 
 def cluster_stats(win, em, breakeven):
-    """Вінрейт, кластерна SE (кластер = 30 хв, усі пари разом), z і p (односторонній) проти беззбитку."""
     n = len(win)
     if n == 0:
         return dict(n=0, wr=float("nan"), se=float("nan"), z=float("nan"), p=1.0, lo=float("nan"))
@@ -375,34 +364,74 @@ def cluster_stats(win, em, breakeven):
     return dict(n=n, wr=p, se=se, z=z, p=norm_sf(z), lo=p - 1.645 * se)
 
 
-# ───────────────────────────── основний цикл ─────────────────────────────
 def collect(data, delay=0, verbose=True):
-    """Повертає dict[config] -> (em[], win[]) по всіх парах."""
     store = {}
     t0 = time.time()
     for pi, (pair, df1) in enumerate(data.items()):
         m1_min, m1_open = minutes_of(df1.index), df1["open"].values.astype(float)
+        htf_frames = {}
+        for h in (15, 60):
+            dh = df1.resample(f"{h}min", label="left", closed="left").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last"}
+            ).dropna()
+            if len(dh) >= 60:
+                htf_frames[h] = dh
+
         for tf in TIMEFRAMES:
             if tf == 1:
                 dft = df1
             else:
                 dft = df1.resample(f"{tf}min", label="left", closed="left").agg(
-                    {"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+                    {"open": "first", "high": "max", "low": "min", "close": "last"}
+                ).dropna()
             if len(dft) < 120:
                 continue
             end_min = minutes_of(dft.index) + tf
             F = Feat(dft)
             attach_htf(F, df1, tf, end_min)
-            exp_variants = [(str(e), e) for e in EXPIRATIONS] + [(r, dynamic_exp(F, tf, r)) for r in ("dyn_vol", "dyn_vol_inv")]
+            exp_variants = [(str(e), e) for e in EXPIRATIONS] + [
+                (r, dynamic_exp(F, tf, r)) for r in ("dyn_vol", "dyn_vol_inv")
+            ]
+
             sigs = [(name, fn(F, **kw)) for name, fn, kw in STRATEGIES]
-            sigs += [(f"CTRL_random_{k + 1}", control_signal(len(dft), seed=1000 * pi + 10 * tf + k)) for k in range(N_CONTROLS)]
+
+            base_ind = compute_base_indicators(dft)
+            for s_key, meta in STRATEGIES_META.items():
+                if meta["tf_min"] != tf:
+                    continue
+                if s_key in rev.PRESETS:
+                    sg = evaluate_strategy_series(dft, s_key)
+                    sigs.append((f"BOT_{s_key}", sg))
+                    continue
+                htf_m = meta.get("htf")
+                htf_ctx = htf_alignment(dft, htf_frames.get(htf_m), tf, htf_m) if htf_m else None
+                for reg_on in (True, False):
+                    label = f"BOT_{s_key}{'_REG' if reg_on else '_RAW'}"
+                    sg = evaluate_strategy_series(dft, s_key, ind=base_ind, htf_ctx=htf_ctx, regime_filter=reg_on)
+                    sigs.append((label, sg))
+
+            sigs += [
+                (f"CTRL_random_{k + 1}", control_signal(len(dft), seed=1000 * pi + 10 * tf + k))
+                for k in range(N_CONTROLS)
+            ]
+
             for name, sg in sigs:
-                for exp_label, exp in exp_variants:
+                if name.startswith("BOT_") and name[4:].split("_REG")[0].split("_RAW")[0] in STRATEGIES_META:
+                    key_name = name[4:].replace("_REG", "").replace("_RAW", "")
+                    exp_set = list(exp_variants)
+                    fixed_exp = int(STRATEGIES_META[key_name]["exp"])
+                    if str(fixed_exp) not in {lbl for lbl, _ in exp_set}:
+                        exp_set.append((str(fixed_exp), fixed_exp))
+                else:
+                    exp_set = exp_variants
+
+                for exp_label, exp in exp_set:
                     em, win = extract_trades(sg, end_min, m1_min, m1_open, exp, delay)
                     if len(em):
                         store.setdefault((name, tf, exp_label), []).append((em, win))
         if verbose:
             print(f"  [{pi + 1}/{len(data)}] {pair} готово ({time.time() - t0:.0f}с)", flush=True)
+
     merged = {}
     for k, parts in store.items():
         em = np.concatenate([p[0] for p in parts])
@@ -421,9 +450,11 @@ def analyze(merged, payout):
         d, c = em < split, em >= split
         sd = cluster_stats(win[d], em[d], breakeven)
         sc = cluster_stats(win[c], em[c], breakeven)
-        rows.append(dict(strategy=name, tf=tf, exp=exp, control=name.startswith("CTRL"),
-                         d_n=sd["n"], d_wr=sd["wr"], d_z=sd["z"],
-                         c_n=sc["n"], c_wr=sc["wr"], c_z=sc["z"], c_p=sc["p"], c_lo=sc["lo"]))
+        rows.append(dict(
+            strategy=name, tf=tf, exp=exp, control=name.startswith("CTRL"),
+            d_n=sd["n"], d_wr=sd["wr"], d_z=sd["z"],
+            c_n=sc["n"], c_wr=sc["wr"], c_z=sc["z"], c_p=sc["p"], c_lo=sc["lo"],
+        ))
     rep = pd.DataFrame(rows)
     return rep, split, breakeven
 
@@ -437,21 +468,22 @@ def build_summary(rep, split, breakeven, payout, data_info):
     top["PASS"] = (top.c_n >= MIN_CONF_TRADES) & (top.c_wr > breakeven) & (top.c_p < alpha)
     lines = []
     A = lines.append
-    A("🧪 ЛАБОРАТОРІЯ СТРАТЕГІЙ")
+    A("🧪 ЛАБОРАТОРІЯ СТРАТЕГІЙ (РОЗШИРЕНА)")
     A(f"Дані: {data_info}")
-    A(f"Беззбиток при виплаті {payout * 100:.0f}%: {breakeven * 100:.2f}%  (це поріг прибутку, не 65%)")
-    A(f"Перевірено конфігурацій: {n_configs} (стратегія × ТФ × експірація; включно з мультитаймфреймовими і динамічною експірацією)")
-    A(f"Поділ за часом: перші {int(SPLIT_FRACTION * 100)}% — пошук, решта — підтвердження (їх вибір не бачив)")
+    A(f"Беззбиток при виплаті {payout * 100:.0f}%: {breakeven * 100:.2f}%")
+    A(f"Перевірено конфігурацій: {n_configs}")
+    A(f"Поділ за часом: перші {int(SPLIT_FRACTION * 100)}% — пошук, решта — підтвердження")
     A("")
     if len(ctrl):
         A("Контроль (випадковий напрямок):")
-        A(f"  найкращий у пошуку: {ctrl.d_wr.max() * 100:.1f}%  → той самий у підтвердженні: "
+        A(f"  найкращий у пошуку: {ctrl.d_wr.max() * 100:.1f}% → у підтвердженні: "
           f"{ctrl.loc[ctrl.d_wr.idxmax(), 'c_wr'] * 100:.1f}%")
         A(f"  середній вінрейт контролю: пошук {ctrl.d_wr.mean() * 100:.1f}%, підтвердження {ctrl.c_wr.mean() * 100:.1f}%")
-    A(f"Найкращий вінрейт серед ВСІХ реальних конфігурацій у пошуку (наївний вибір): {real.d_wr.max() * 100:.1f}%")
-    A(f"Середній вінрейт усіх реальних конфігурацій у підтвердженні: {real.c_wr.mean() * 100:.2f}%")
+    if len(real):
+        A(f"Найкращий вінрейт у пошуку: {real.d_wr.max() * 100:.1f}%")
+        A(f"Середній вінрейт усіх стратегій у підтвердженні: {real.c_wr.mean() * 100:.2f}%")
     A("")
-    A(f"ТОП-{TOP_K} за пошуком → що з ними на нових даних:")
+    A(f"ТОП-{TOP_K} за пошуком → позавибіркове підтвердження:")
     A("стратегія | ТФ | exp | пошук n/WR | підтвердж. n/WR | p | вердикт")
     for _, r in top.iterrows():
         exp_txt = f"{r.exp}хв" if str(r.exp).isdigit() else f"динамічна:{r.exp}"
@@ -461,9 +493,9 @@ def build_summary(rep, split, breakeven, payout, data_info):
     A("")
     A(f"ПІДСУМОК: пройшли перевірку {n_pass} з {len(top)}.")
     if n_pass == 0:
-        A("Жодна конфігурація не показала стійкої переваги над беззбитком на нових даних.")
+        A("Жодна конфігурація не показала статистично значущої переваги на нових даних.")
     else:
-        A("Це кандидати, а не гарантія: потрібне ще підтвердження на живих угодах (демо).")
+        A("Кандидати пройшли позавибіркову перевірку; перевірте на демо/мінімальному обсязі.")
     return "\n".join(lines), top[top.PASS]
 
 
@@ -499,8 +531,13 @@ def main():
     with open(os.path.join(args.out, "lab_summary.txt"), "w", encoding="utf-8") as f:
         f.write(summary + "\n")
     with open(os.path.join(args.out, "lab_validated.json"), "w", encoding="utf-8") as f:
-        json.dump([dict(strategy=r.strategy, tf=int(r.tf), exp=str(r.exp), conf_wr=float(r.c_wr), conf_n=int(r.c_n))
-                   for _, r in passed.iterrows()], f, ensure_ascii=False, indent=2)
+        json.dump(
+            [dict(strategy=r.strategy, tf=int(r.tf), exp=str(r.exp), conf_wr=float(r.c_wr), conf_n=int(r.c_n))
+             for _, r in passed.iterrows()],
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
     print("\n" + summary)
 
 
