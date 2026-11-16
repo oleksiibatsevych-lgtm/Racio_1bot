@@ -24,6 +24,13 @@ AUTO_DISABLE_MIN_LIVE_GLOBAL = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_GLOBAL"
 AUTO_DISABLE_MIN_BT_PAIR = int(os.environ.get("AUTO_DISABLE_MIN_BT_PAIR", "15"))
 AUTO_DISABLE_MIN_BT_GLOBAL = int(os.environ.get("AUTO_DISABLE_MIN_BT_GLOBAL", "30"))
 
+CONFLUENCE_MODE = os.environ.get("CONFLUENCE_MODE", "CONC").upper()
+CONFLUENCE_THRESHOLD = float(os.environ.get("CONFLUENCE_THRESHOLD", "1.0"))
+EXPIRY_MODE = os.environ.get("EXPIRY_MODE", "DYN").upper()
+DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "Europe/Kyiv")
+DEFAULT_DEPOSIT = float(os.environ.get("DEFAULT_DEPOSIT", "1000.0"))
+DEFAULT_RISK_PCT = float(os.environ.get("DEFAULT_RISK_PCT", "2.0"))
+
 PAIRS_MAP = {
     "EUR/USD": "OANDA:EUR_USD",
     "GBP/USD": "OANDA:GBP_USD",
