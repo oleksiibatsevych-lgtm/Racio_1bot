@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -10,7 +11,8 @@ from config import NEWS_BLACKOUT_MINS
 
 logger = logging.getLogger(__name__)
 
-CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+PRIMARY_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+FALLBACK_CALENDAR_URL = os.environ.get("FALLBACK_CALENDAR_URL", "").strip()
 CACHE_TTL_SEC = 3600
 FAIL_RETRY_SEC = 300
 
@@ -19,12 +21,23 @@ _CACHE = {
     "ts": 0.0,
     "fail_ts": 0.0,
     "events": [],
+    "source": "none",
 }
 
 GLOBAL_USD_KEYWORDS = (
     "FOMC", "NON-FARM", "NONFARM", "NFP", "CPI", "CORE CPI",
-    "FEDERAL FUNDS", "POWELL", "GDP", "PPI", "RETAIL SALES",
+    "FEDERAL FUNDS", "POWELL", "GDP", "PPI", "RETAIL SALES", "PCE",
 )
+
+CURRENCY_MAP = {
+    "US": "USD", "USA": "USD", "USD": "USD",
+    "EU": "EUR", "EUR": "EUR", "DE": "EUR", "FR": "EUR", "EMU": "EUR",
+    "UK": "GBP", "GB": "GBP", "GBP": "GBP",
+    "JP": "JPY", "JPY": "JPY",
+    "AU": "AUD", "AUD": "AUD",
+    "CA": "CAD", "CAD": "CAD",
+    "CH": "CHF", "CHF": "CHF",
+}
 
 
 def _extract_currencies(pair_name: str | None) -> set[str]:
@@ -42,27 +55,37 @@ def _extract_currencies(pair_name: str | None) -> set[str]:
     return {"USD"}
 
 
-def _parse_events(raw_items: list) -> list[dict]:
+def _parse_dt(date_str: str | None) -> datetime | None:
+    if not date_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _parse_generic_events(raw_payload) -> list[dict]:
+    items = raw_payload if isinstance(raw_payload, list) else (
+        raw_payload.get("events") or raw_payload.get("data") or [] if isinstance(raw_payload, dict) else []
+    )
     parsed = []
-    for item in raw_items or []:
+    for item in items:
         if not isinstance(item, dict):
             continue
-        if str(item.get("impact", "")).strip().lower() != "high":
+        imp = str(item.get("impact") or item.get("importance") or "").strip().lower()
+        if imp not in ("high", "3", "critical"):
             continue
-        date_str = item.get("date")
-        if not date_str:
+        dt = _parse_dt(item.get("date") or item.get("datetime") or item.get("timestamp"))
+        if dt is None:
             continue
-        try:
-            dt = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            else:
-                dt = dt.astimezone(timezone.utc)
-        except Exception:
+        raw_c = str(item.get("country") or item.get("currency") or "").strip().upper()
+        ccy = CURRENCY_MAP.get(raw_c, raw_c)
+        if not ccy:
             continue
         parsed.append({
-            "country": str(item.get("country", "")).strip().upper(),
-            "title": str(item.get("title", "High Impact News")).strip(),
+            "country": ccy,
+            "title": str(item.get("title") or item.get("event") or "High Impact News").strip(),
             "dt": dt,
         })
     return parsed
@@ -76,23 +99,26 @@ def _get_events() -> tuple[list[dict], bool]:
         if _CACHE["fail_ts"] and (now_ts - _CACHE["fail_ts"]) < FAIL_RETRY_SEC:
             return _CACHE["events"], bool(_CACHE["events"])
 
-    try:
-        resp = requests.get(
-            CALENDAR_URL,
-            timeout=6,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; RacioBot/1.0)"},
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list):
-                events = _parse_events(data)
-                with _LOCK:
-                    _CACHE["events"] = events
-                    _CACHE["ts"] = time.time()
-                    _CACHE["fail_ts"] = 0.0
-                return events, True
-    except Exception as e:
-        logger.warning(f"Не вдалося завантажити календар ForexFactory: {e}")
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; RacioBot/2.0)"}
+
+    urls = [("primary", PRIMARY_CALENDAR_URL)]
+    if FALLBACK_CALENDAR_URL:
+        urls.append(("fallback", FALLBACK_CALENDAR_URL))
+
+    for src_name, url in urls:
+        try:
+            resp = requests.get(url, timeout=6, headers=headers)
+            if resp.status_code == 200:
+                events = _parse_generic_events(resp.json())
+                if events or src_name == "primary":
+                    with _LOCK:
+                        _CACHE["events"] = events
+                        _CACHE["ts"] = time.time()
+                        _CACHE["fail_ts"] = 0.0
+                        _CACHE["source"] = src_name
+                    return events, True
+        except Exception as e:
+            logger.warning(f"Календар {src_name} недоступний: {e}")
 
     with _LOCK:
         _CACHE["fail_ts"] = time.time()
@@ -104,15 +130,9 @@ def is_high_impact_news_time(
     now: datetime | None = None,
     blackout_mins: int | None = None,
 ) -> tuple[bool, str]:
-    """
-    Перевіряє, чи перебуває пара у вікні важливих макроекономічних новин (±blackout_mins).
-    """
     try:
         now_utc = now or datetime.now(timezone.utc)
-        if now_utc.tzinfo is None:
-            now_utc = now_utc.replace(tzinfo=timezone.utc)
-        else:
-            now_utc = now_utc.astimezone(timezone.utc)
+        now_utc = now_utc.replace(tzinfo=timezone.utc) if now_utc.tzinfo is None else now_utc.astimezone(timezone.utc)
 
         window_sec = max(5, int(blackout_mins if blackout_mins is not None else NEWS_BLACKOUT_MINS)) * 60
         currencies = _extract_currencies(pair_name)
@@ -130,8 +150,10 @@ def is_high_impact_news_time(
                     return True, f"Новина ({country}): {ev['title']} о {ev['dt']:%H:%M} UTC"
             return False, "OK"
 
-        if now_utc.weekday() == 4 and 12 <= now_utc.hour <= 15:
-            return True, "Резервний фільтр новин у п'ятницю (Nonfarm Payrolls)"
+        if now_utc.weekday() == 4 and 1 <= now_utc.day <= 7 and 12 <= now_utc.hour <= 15:
+            return True, "Резервний захист від NFP (перша п'ятниця місяця)"
+        if now_utc.weekday() == 2 and now_utc.hour in (18, 19):
+            return True, "Резервний захист від можливого засідання FOMC"
         return False, "OK"
     except Exception as e:
         logger.error(f"Помилка перевірки календаря новин: {e}")
@@ -141,10 +163,7 @@ def is_high_impact_news_time(
 def get_upcoming_news(pair_name: str | None = None, now: datetime | None = None, hours: int = 12) -> list[dict]:
     try:
         now_utc = now or datetime.now(timezone.utc)
-        if now_utc.tzinfo is None:
-            now_utc = now_utc.replace(tzinfo=timezone.utc)
-        else:
-            now_utc = now_utc.astimezone(timezone.utc)
+        now_utc = now_utc.replace(tzinfo=timezone.utc) if now_utc.tzinfo is None else now_utc.astimezone(timezone.utc)
         currencies = _extract_currencies(pair_name)
         events, ok = _get_events()
         if not ok:
