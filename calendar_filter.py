@@ -136,3 +136,26 @@ def is_high_impact_news_time(
     except Exception as e:
         logger.error(f"Помилка перевірки календаря новин: {e}")
         return False, "OK"
+
+
+def get_upcoming_news(pair_name: str | None = None, now: datetime | None = None, hours: int = 12) -> list[dict]:
+    try:
+        now_utc = now or datetime.now(timezone.utc)
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        else:
+            now_utc = now_utc.astimezone(timezone.utc)
+        currencies = _extract_currencies(pair_name)
+        events, ok = _get_events()
+        if not ok:
+            return []
+        upcoming = []
+        for ev in events:
+            diff_sec = (ev["dt"] - now_utc).total_seconds()
+            if -900 <= diff_sec <= hours * 3600:
+                if ev["country"] in currencies or ev["country"] == "USD":
+                    upcoming.append(ev)
+        upcoming.sort(key=lambda e: e["dt"])
+        return upcoming[:5]
+    except Exception:
+        return []
