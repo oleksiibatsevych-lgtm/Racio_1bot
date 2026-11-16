@@ -1,12 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Strategy Lab — чесна walk-forward перевірка всіх 57 стратегій (та контрольних шумів):
-  1. Сигнал на ЗАКРИТІЙ свічці, вхід — по open наступної 1m-свічки, вихід — по open через `exp` хв.
-  2. Неперекривні угоди по кожній парі та конфігурації.
-  3. Хронологічний поділ 60% пошук (discovery) / 40% підтвердження (confirmation).
-  4. Кластерна похибка (30 хв, усі пари разом) і поправка Бонферроні (p < 0.05 / TOP_K).
-  5. 5 контрольних випадкових стратегій (CTRL_random_*) для відсіювання випадкового шуму.
-  6. PASS лише якщо: conf_n >= 200, conf_wr > break_even (54.05% при 85%), p < 0.05 / TOP_K.
+Strategy Lab — чесна walk-forward перевірка наявних 57 стратегій + 26 нових каузальних стратегій.
 """
 import argparse
 import json
@@ -54,7 +48,10 @@ def download_and_merge(pairs, data_dir):
             if df is None or df.empty:
                 print(f"  {p}: порожньо")
                 continue
-            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close"})[["open", "high", "low", "close"]]
+            cols = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
+            df = df[cols].rename(columns=str.lower)
+            if "volume" not in df.columns:
+                df["volume"] = 0.0
             if df.index.tz is not None:
                 df.index = df.index.tz_convert("UTC").tz_localize(None)
             if os.path.exists(path):
@@ -72,7 +69,10 @@ def load_pair(pair, data_dir):
     if not os.path.exists(path):
         return None
     df = pd.read_csv(path, index_col=0, parse_dates=True).sort_index()
-    df = df[~df.index.duplicated(keep="last")].dropna()
+    df = df.rename(columns=str.lower)
+    if "volume" not in df.columns:
+        df["volume"] = 0.0
+    df = df[~df.index.duplicated(keep="last")].dropna(subset=["open", "high", "low", "close"])
     return df if len(df) > 500 else None
 
 
@@ -80,9 +80,27 @@ def minutes_of(index) -> np.ndarray:
     return index.values.astype("datetime64[m]").astype(np.int64)
 
 
+def _prev(a, k=1):
+    out = np.empty_like(a, dtype=float)
+    out[:k] = np.nan
+    out[k:] = a[:-k]
+    return out
+
+
+def _sig(call, put):
+    out = np.zeros(len(call), dtype=np.int8)
+    out[call] = 1
+    out[put & ~call] = -1
+    return out
+
+
 class Feat:
-    def __init__(self, df):
+    def __init__(self, df, pair_name: str = ""):
+        self.pair = pair_name
+        self.is_jpy = "JPY" in pair_name
+        self.index = df.index
         self.o, self.h, self.l, self.c = (df[k].values.astype(float) for k in ("open", "high", "low", "close"))
+        self.v = df["volume"].values.astype(float) if "volume" in df.columns else np.zeros(len(df), dtype=float)
         self.s = pd.Series(self.c)
         self._cache = {}
         self.htf = {}
@@ -109,27 +127,65 @@ class Feat:
     def std(self, n):
         return self._get(("std", n), lambda: self.s.rolling(n).std().values)
 
+    def atr(self, n=14):
+        def f():
+            pc = _prev(self.c)
+            tr = np.maximum(self.h - self.l, np.maximum(np.abs(self.h - pc), np.abs(self.l - pc)))
+            return pd.Series(tr).ewm(alpha=1 / n, adjust=False).mean().values
+        return self._get(("atr", n), f)
+
     def vol_ratio(self):
         def f():
-            tr = np.maximum(self.h - self.l, np.maximum(np.abs(self.h - _prev(self.c)), np.abs(self.l - _prev(self.c))))
-            atr = pd.Series(tr).ewm(alpha=1 / 14, adjust=False).mean()
+            atr = pd.Series(self.atr(14))
             med = atr.rolling(200, min_periods=50).median()
             return (atr / (med + 1e-12)).values
         return self._get(("vr",), f)
 
+    def chop(self, n=14):
+        def f():
+            pc = _prev(self.c)
+            tr = pd.Series(np.maximum(self.h - self.l, np.maximum(np.abs(self.h - pc), np.abs(self.l - pc))))
+            atr_sum = tr.rolling(n).sum()
+            hh = pd.Series(self.h).rolling(n).max()
+            ll = pd.Series(self.l).rolling(n).min()
+            return (100.0 * np.log10((atr_sum / (hh - ll + 1e-12)).clip(lower=1e-9)) / np.log10(n)).values
+        return self._get(("chop", n), f)
 
-def _prev(a, k=1):
-    out = np.empty_like(a)
-    out[:k] = np.nan
-    out[k:] = a[:-k]
-    return out
+    def adx(self, n=14):
+        def f():
+            up = pd.Series(self.h).diff()
+            dn = -pd.Series(self.l).diff()
+            pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0))
+            mdm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0))
+            atr = pd.Series(self.atr(n)) + 1e-12
+            pdi = 100.0 * pdm.ewm(alpha=1 / n, adjust=False).mean() / atr
+            mdi = 100.0 * mdm.ewm(alpha=1 / n, adjust=False).mean() / atr
+            dx = 100.0 * (pdi - mdi).abs() / (pdi + mdi + 1e-12)
+            return dx.ewm(alpha=1 / n, adjust=False).mean().values
+        return self._get(("adx", n), f)
 
+    def er(self, n=10):
+        def f():
+            change = pd.Series(self.c).diff(n).abs()
+            volatility = pd.Series(self.c).diff().abs().rolling(n).sum()
+            return (change / (volatility + 1e-12)).values
+        return self._get(("er", n), f)
 
-def _sig(call, put):
-    out = np.zeros(len(call), dtype=np.int8)
-    out[call] = 1
-    out[put & ~call] = -1
-    return out
+    def kama(self, n=10, fast=2, slow=30):
+        def f():
+            er = self.er(n)
+            fast_sc = 2.0 / (fast + 1.0)
+            slow_sc = 2.0 / (slow + 1.0)
+            sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+            out = np.full(len(self.c), np.nan)
+            start = n
+            if start < len(self.c):
+                out[start] = self.c[start]
+                for i in range(start + 1, len(self.c)):
+                    k = sc[i] if np.isfinite(sc[i]) else slow_sc ** 2
+                    out[i] = out[i - 1] + k * (self.c[i] - out[i - 1])
+            return out
+        return self._get(("kama", n, fast, slow), f)
 
 
 def s_rsi_rev(F, n, lo, hi):
@@ -205,30 +261,6 @@ def s_zscore(F, th):
     return _sig(z < -th, z > th)
 
 
-STRATEGIES = []
-for n_, lo_, hi_ in ((7, 30, 70), (7, 20, 80), (7, 15, 85), (14, 30, 70), (14, 25, 75), (14, 20, 80)):
-    STRATEGIES.append((f"rsi_rev(n={n_},{lo_}/{hi_})", s_rsi_rev, dict(n=n_, lo=lo_, hi=hi_)))
-for k_ in (2.0, 2.5, 3.0):
-    STRATEGIES.append((f"bb_fade(k={k_})", s_bb, dict(k=k_, mode="fade")))
-    STRATEGIES.append((f"bb_break(k={k_})", s_bb, dict(k=k_, mode="cont")))
-for a_, b_ in ((9, 21), (5, 13)):
-    STRATEGIES.append((f"ema_cross({a_},{b_})", s_ema_cross, dict(a=a_, b=b_)))
-STRATEGIES += [
-    ("trend_pullback", s_pullback, {}),
-    ("macd_flip", s_macd, {}),
-    ("stoch_rev", s_stoch, {}),
-    ("engulfing_rev", s_engulf, {}),
-    ("pin_bar_rev", s_pin, {}),
-]
-for n_ in (20, 10):
-    STRATEGIES.append((f"donchian_break({n_})", s_donchian, dict(n=n_)))
-for n_ in (3, 4):
-    STRATEGIES.append((f"streak_fade({n_})", s_streak, dict(n=n_, mode="fade")))
-    STRATEGIES.append((f"streak_cont({n_})", s_streak, dict(n=n_, mode="cont")))
-for th_ in (2.0, 2.5):
-    STRATEGIES.append((f"zscore_fade({th_})", s_zscore, dict(th=th_)))
-
-
 def _htf(F, h):
     d = F.htf.get(h)
     if d is None:
@@ -264,11 +296,326 @@ def s_mtf_range_fade(F, h):
     return _sig(calm & (F.c < ma - 2 * sd), calm & (F.c > ma + 2 * sd))
 
 
+def s_new_turtle_soup(F):
+    hh20 = pd.Series(F.h).rolling(20).max().shift(1).values
+    ll20 = pd.Series(F.l).rolling(20).min().shift(1).values
+    recent_hh3 = pd.Series(F.h).rolling(3).max().shift(1).values
+    recent_ll3 = pd.Series(F.l).rolling(3).min().shift(1).values
+    call = (ll20 < recent_ll3) & (F.l < ll20) & (F.c > ll20)
+    put = (hh20 > recent_hh3) & (F.h > hh20) & (F.c < hh20)
+    return _sig(call, put)
+
+
+def s_new_asian_sweep(F):
+    df_tmp = pd.DataFrame({"h": F.h, "l": F.l}, index=F.index)
+    asia = df_tmp[df_tmp.index.hour < 7]
+    if asia.empty:
+        return np.zeros(len(F.c), dtype=np.int8)
+    daily_asia = asia.groupby(asia.index.date).agg(ah=("h", "max"), al=("l", "min"))
+    dates = pd.Series(F.index.date, index=F.index)
+    ah = dates.map(daily_asia["ah"]).values.astype(float)
+    al = dates.map(daily_asia["al"]).values.astype(float)
+    lon = (F.index.hour >= 7) & (F.index.hour <= 11)
+    call = lon & np.isfinite(al) & (F.l < al) & (F.c > al)
+    put = lon & np.isfinite(ah) & (F.h > ah) & (F.c < ah)
+    return _sig(call, put)
+
+
+def s_new_pdhl_reject(F):
+    df_tmp = pd.DataFrame({"h": F.h, "l": F.l, "c": F.c}, index=F.index)
+    daily = df_tmp.resample("1D").agg({"h": "max", "l": "min", "c": "last"}).dropna().shift(1)
+    day_idx = pd.to_datetime(F.index.date)
+    pdh = day_idx.map(daily["h"]).values.astype(float)
+    pdl = day_idx.map(daily["l"]).values.astype(float)
+    rng = F.h - F.l + 1e-12
+    lw = np.minimum(F.o, F.c) - F.l
+    uw = F.h - np.maximum(F.o, F.c)
+    call = np.isfinite(pdl) & (F.l < pdl) & (F.c > pdl) & (lw >= 0.45 * rng)
+    put = np.isfinite(pdh) & (F.h > pdh) & (F.c < pdh) & (uw >= 0.45 * rng)
+    return _sig(call, put)
+
+
+def s_new_round_bounce(F):
+    step = 0.50 if F.is_jpy else 0.0050
+    tol = 0.15 * F.atr(14)
+    nearest = np.round(F.c / step) * step
+    r = F.rsi(14)
+    chop = F.chop(14)
+    call = (chop >= 50) & (np.abs(F.l - nearest) <= tol) & (F.c > nearest) & (r < 38)
+    put = (chop >= 50) & (np.abs(F.h - nearest) <= tol) & (F.c < nearest) & (r > 62)
+    return _sig(call, put)
+
+
+def s_new_pivot_s1r1(F):
+    df_tmp = pd.DataFrame({"h": F.h, "l": F.l, "c": F.c}, index=F.index)
+    daily = df_tmp.resample("1D").agg({"h": "max", "l": "min", "c": "last"}).dropna().shift(1)
+    pp = (daily["h"] + daily["l"] + daily["c"]) / 3.0
+    r1 = 2.0 * pp - daily["l"]
+    s1 = 2.0 * pp - daily["h"]
+    day_idx = pd.to_datetime(F.index.date)
+    s1v = day_idx.map(s1).values.astype(float)
+    r1v = day_idx.map(r1).values.astype(float)
+    chop = F.chop(14)
+    call = (chop >= 48) & np.isfinite(s1v) & (F.l <= s1v) & (F.c > s1v) & (F.c > F.o)
+    put = (chop >= 48) & np.isfinite(r1v) & (F.h >= r1v) & (F.c < r1v) & (F.c < F.o)
+    return _sig(call, put)
+
+
+def s_new_ob_retest(F):
+    atr = F.atr(14)
+    po, pc = _prev(F.o), _prev(F.c)
+    bull_ob_hi = np.full(len(F.c), np.nan)
+    bull_ob_lo = np.full(len(F.c), np.nan)
+    bear_ob_hi = np.full(len(F.c), np.nan)
+    bear_ob_lo = np.full(len(F.c), np.nan)
+    last_b_hi = last_b_lo = last_s_hi = last_s_lo = np.nan
+    for i in range(2, len(F.c)):
+        imp = F.c[i - 1] - F.o[i - 1]
+        if F.c[i - 2] < F.o[i - 2] and imp > 1.5 * atr[i - 1]:
+            last_b_hi, last_b_lo = F.h[i - 2], F.l[i - 2]
+        if F.c[i - 2] > F.o[i - 2] and -imp > 1.5 * atr[i - 1]:
+            last_s_hi, last_s_lo = F.h[i - 2], F.l[i - 2]
+        bull_ob_hi[i], bull_ob_lo[i] = last_b_hi, last_b_lo
+        bear_ob_hi[i], bear_ob_lo[i] = last_s_hi, last_s_lo
+    call = np.isfinite(bull_ob_hi) & (F.l <= bull_ob_hi) & (F.c >= bull_ob_lo) & (F.c > F.o) & (pc < po)
+    put = np.isfinite(bear_ob_lo) & (F.h >= bear_ob_lo) & (F.c <= bear_ob_hi) & (F.c < F.o) & (pc > po)
+    return _sig(call, put)
+
+
+def s_new_vwap_zscore(F):
+    tp = (F.h + F.l + F.c) / 3.0
+    w = F.v if np.sum(F.v) > 0 else np.maximum(F.h - F.l, 1e-6)
+    df_tmp = pd.DataFrame({"pv": tp * w, "w": w}, index=F.index)
+    grp = df_tmp.groupby(df_tmp.index.date)
+    vwap = grp["pv"].cumsum().values / (grp["w"].cumsum().values + 1e-12)
+    diff = F.c - vwap
+    sd = pd.Series(diff).rolling(30, min_periods=15).std().values + 1e-12
+    z = diff / sd
+    pz = _prev(z)
+    return _sig((pz < -2.0) & (z > pz) & (F.c > F.o), (pz > 2.0) & (z < pz) & (F.c < F.o))
+
+
+def s_new_kama_band(F):
+    k = F.kama(10)
+    atr = F.atr(14)
+    er = F.er(10)
+    call = (er < 0.25) & (F.c < k - 2.2 * atr) & (F.rsi(7) < 30)
+    put = (er < 0.25) & (F.c > k + 2.2 * atr) & (F.rsi(7) > 70)
+    return _sig(call, put)
+
+
+def s_new_fisher_rev(F):
+    hl2 = 0.5 * (F.h + F.l)
+    lo = pd.Series(hl2).rolling(10).min().values
+    hi = pd.Series(hl2).rolling(10).max().values
+    val = np.clip(0.66 * ((hl2 - lo) / (hi - lo + 1e-12) - 0.5) * 2.0, -0.999, 0.999)
+    val = pd.Series(val).ewm(alpha=0.5, adjust=False).mean().clip(-0.999, 0.999).values
+    ft = np.zeros(len(F.c))
+    for i in range(1, len(F.c)):
+        ft[i] = 0.5 * np.log((1 + val[i]) / (1 - val[i])) + 0.5 * ft[i - 1]
+    pft = _prev(ft)
+    return _sig((pft < -2.0) & (ft > pft), (pft > 2.0) & (ft < pft))
+
+
+def s_new_bb_pctb_fade(F):
+    ma, sd = F.sma(20), F.std(20)
+    upper, lower = ma + 2.0 * sd, ma - 2.0 * sd
+    pctb = (F.c - lower) / (upper - lower + 1e-12)
+    bbw = (upper - lower) / (ma + 1e-12)
+    med_w = pd.Series(bbw).rolling(50).median().values
+    return _sig((bbw <= med_w) & (pctb < 0.0), (bbw <= med_w) & (pctb > 1.0))
+
+
+def s_new_impulse_exh(F):
+    atr = F.atr(14)
+    rng = F.h - F.l + 1e-12
+    uw = F.h - np.maximum(F.o, F.c)
+    lw = np.minimum(F.o, F.c) - F.l
+    big = rng > 2.2 * atr
+    call = big & (F.c < F.o) & (lw > 0.35 * rng)
+    put = big & (F.c > F.o) & (uw > 0.35 * rng)
+    return _sig(call, put)
+
+
+def s_new_zscore_15m(F):
+    z = (F.c - F.sma(30)) / (F.std(30) + 1e-12)
+    return _sig((z < -2.3) & (F.c > F.o), (z > 2.3) & (F.c < F.o))
+
+
+def s_new_holy_grail(F):
+    e20 = F.ema(20)
+    adx = F.adx(14)
+    pl, ph = _prev(F.l), _prev(F.h)
+    up_pb = (adx > 28) & (F.c > e20) & (pl <= e20) & (F.c > ph)
+    dn_pb = (adx > 28) & (F.c < e20) & (ph >= e20) & (F.c < pl)
+    return _sig(up_pb, dn_pb)
+
+
+def s_new_kama_pb(F):
+    k = F.kama(10)
+    er = F.er(10)
+    r2 = F.rsi(2)
+    return _sig((er > 0.35) & (F.c > k) & (r2 < 15), (er > 0.35) & (F.c < k) & (r2 > 85))
+
+
+def s_new_chandelier(F):
+    tr, _ = _htf(F, 60)
+    atr = F.atr(22)
+    hh = pd.Series(F.h).rolling(22).max().values
+    ll = pd.Series(F.l).rolling(22).min().values
+    long_stop = hh - 3.0 * atr
+    short_stop = ll + 3.0 * atr
+    pc = _prev(F.c)
+    call = (tr == 1) & (F.c > short_stop) & (pc <= _prev(short_stop))
+    put = (tr == -1) & (F.c < long_stop) & (pc >= _prev(long_stop))
+    return _sig(call, put)
+
+
+def s_new_donch_mid_pb(F):
+    mid = 0.5 * (pd.Series(F.h).rolling(20).max().values + pd.Series(F.l).rolling(20).min().values)
+    adx = F.adx(14)
+    pmid = _prev(mid, 3)
+    call = (adx > 22) & (mid > pmid) & (F.l <= mid) & (F.c > mid)
+    put = (adx > 22) & (mid < pmid) & (F.h >= mid) & (F.c < mid)
+    return _sig(call, put)
+
+
+def s_new_stochrsi_htf(F):
+    tr15, _ = _htf(F, 15)
+    tr60, _ = _htf(F, 60)
+    r = pd.Series(F.rsi(14))
+    rlo = r.rolling(14).min()
+    rhi = r.rolling(14).max()
+    k = ((r - rlo) / (rhi - rlo + 1e-12) * 100).rolling(3).mean().values
+    d = pd.Series(k).rolling(3).mean().values
+    pk, pdd = _prev(k), _prev(d)
+    call = (tr15 == 1) & (tr60 == 1) & (k > d) & (pk <= pdd) & (k < 25)
+    put = (tr15 == -1) & (tr60 == -1) & (k < d) & (pk >= pdd) & (k > 75)
+    return _sig(call, put)
+
+
+def s_new_123_pb(F):
+    atr = F.atr(14)
+    exp_up = (_prev(F.c, 2) - _prev(F.o, 2)) > 1.5 * _prev(atr, 2)
+    exp_dn = (_prev(F.o, 2) - _prev(F.c, 2)) > 1.5 * _prev(atr, 2)
+    pb_up = _prev(F.c, 1) < _prev(F.o, 1)
+    pb_dn = _prev(F.c, 1) > _prev(F.o, 1)
+    return _sig(exp_up & pb_up & (F.c > _prev(F.h, 1)), exp_dn & pb_dn & (F.c < _prev(F.l, 1)))
+
+
+def s_new_tick_climax(F):
+    vol = F.v if np.sum(F.v) > 0 else np.maximum(F.h - F.l, 1e-6)
+    med = pd.Series(vol).rolling(50).median().values + 1e-12
+    spike = vol > 2.5 * med
+    body = np.abs(F.c - F.o) + 1e-12
+    lw = np.minimum(F.o, F.c) - F.l
+    uw = F.h - np.maximum(F.o, F.c)
+    return _sig(spike & (lw > 2.0 * body), spike & (uw > 2.0 * body))
+
+
+def s_new_obv_z_div(F):
+    vol = F.v if np.sum(F.v) > 0 else np.maximum(F.h - F.l, 1e-6)
+    direction = np.sign(F.c - _prev(F.c))
+    obv = pd.Series(np.nan_to_num(direction) * vol).cumsum()
+    obv_hi10 = obv.rolling(10).max().shift(1).values
+    obv_lo10 = obv.rolling(10).min().shift(1).values
+    p_hi10 = pd.Series(F.h).rolling(10).max().shift(1).values
+    p_lo10 = pd.Series(F.l).rolling(10).min().shift(1).values
+    call = (F.l < p_lo10) & (obv.values > obv_lo10) & (F.c > F.o)
+    put = (F.h > p_hi10) & (obv.values < obv_hi10) & (F.c < F.o)
+    return _sig(call, put)
+
+
+def s_new_wpr_hook(F):
+    hh = pd.Series(F.h).rolling(14).max().values
+    ll = pd.Series(F.l).rolling(14).min().values
+    wpr = -100.0 * (hh - F.c) / (hh - ll + 1e-12)
+    pw = _prev(wpr)
+    chop = F.chop(14)
+    return _sig((chop >= 50) & (pw < -90) & (wpr >= -85), (chop >= 50) & (pw > -10) & (wpr <= -15))
+
+
+def s_new_vortex(F):
+    pc, ph, pl = _prev(F.c), _prev(F.h), _prev(F.l)
+    tr = pd.Series(np.maximum(F.h - F.l, np.maximum(np.abs(F.h - pc), np.abs(F.l - pc))))
+    vmp = pd.Series(np.abs(F.h - pl))
+    vmm = pd.Series(np.abs(F.l - ph))
+    tr14 = tr.rolling(14).sum() + 1e-12
+    vip = (vmp.rolling(14).sum() / tr14).values
+    vim = (vmm.rolling(14).sum() / tr14).values
+    pvip, pvim = _prev(vip), _prev(vim)
+    adx = F.adx(14)
+    rising = adx > _prev(adx)
+    return _sig((adx > 20) & rising & (vip > vim) & (pvip <= pvim), (adx > 20) & rising & (vip < vim) & (pvip >= pvim))
+
+
+def s_new_regime_switch(F):
+    er = F.er(10)
+    k = F.kama(10)
+    ma, sd = F.sma(20), F.std(20)
+    r7 = F.rsi(7)
+    trend_call = (er > 0.35) & (F.c > k) & (F.rsi(2) < 15)
+    trend_put = (er > 0.35) & (F.c < k) & (F.rsi(2) > 85)
+    mr_call = (er < 0.20) & (F.c < ma - 2.0 * sd) & (r7 < 30)
+    mr_put = (er < 0.20) & (F.c > ma + 2.0 * sd) & (r7 > 70)
+    return _sig(trend_call | mr_call, trend_put | mr_put)
+
+
+STRATEGIES = []
+for n_, lo_, hi_ in ((7, 30, 70), (7, 20, 80), (7, 15, 85), (14, 30, 70), (14, 25, 75), (14, 20, 80)):
+    STRATEGIES.append((f"rsi_rev(n={n_},{lo_}/{hi_})", s_rsi_rev, dict(n=n_, lo=lo_, hi=hi_)))
+for k_ in (2.0, 2.5, 3.0):
+    STRATEGIES.append((f"bb_fade(k={k_})", s_bb, dict(k=k_, mode="fade")))
+    STRATEGIES.append((f"bb_break(k={k_})", s_bb, dict(k=k_, mode="cont")))
+for a_, b_ in ((9, 21), (5, 13)):
+    STRATEGIES.append((f"ema_cross({a_},{b_})", s_ema_cross, dict(a=a_, b=b_)))
+STRATEGIES += [
+    ("trend_pullback", s_pullback, {}),
+    ("macd_flip", s_macd, {}),
+    ("stoch_rev", s_stoch, {}),
+    ("engulfing_rev", s_engulf, {}),
+    ("pin_bar_rev", s_pin, {}),
+]
+for n_ in (20, 10):
+    STRATEGIES.append((f"donchian_break({n_})", s_donchian, dict(n=n_)))
+for n_ in (3, 4):
+    STRATEGIES.append((f"streak_fade({n_})", s_streak, dict(n=n_, mode="fade")))
+    STRATEGIES.append((f"streak_cont({n_})", s_streak, dict(n=n_, mode="cont")))
+for th_ in (2.0, 2.5):
+    STRATEGIES.append((f"zscore_fade({th_})", s_zscore, dict(th=th_)))
 for h_ in (15, 60):
     STRATEGIES.append((f"mtf_pullback(htf={h_}m)", s_mtf_pullback, dict(h=h_)))
     STRATEGIES.append((f"mtf_ema_cross(htf={h_}m)", s_mtf_cross, dict(h=h_)))
     STRATEGIES.append((f"mtf_breakout(htf={h_}m)", s_mtf_break, dict(h=h_)))
     STRATEGIES.append((f"mtf_range_fade(htf={h_}m)", s_mtf_range_fade, dict(h=h_)))
+
+NEW_STRATEGIES = [
+    ("NEW_TURTLE_SOUP_5M", s_new_turtle_soup, {}),
+    ("NEW_ASIAN_SWEEP_5M", s_new_asian_sweep, {}),
+    ("NEW_PDHL_REJECT_15M", s_new_pdhl_reject, {}),
+    ("NEW_ROUND_BOUNCE_5M", s_new_round_bounce, {}),
+    ("NEW_PIVOT_S1R1_5M", s_new_pivot_s1r1, {}),
+    ("NEW_OB_RETEST_5M", s_new_ob_retest, {}),
+    ("NEW_VWAP_ZSCORE_5M", s_new_vwap_zscore, {}),
+    ("NEW_KAMA_BAND_5M", s_new_kama_band, {}),
+    ("NEW_FISHER_REV_5M", s_new_fisher_rev, {}),
+    ("NEW_BB_PCTB_FADE_5M", s_new_bb_pctb_fade, {}),
+    ("NEW_IMPULSE_EXH_5M", s_new_impulse_exh, {}),
+    ("NEW_ZSCORE_15M", s_new_zscore_15m, {}),
+    ("NEW_HOLY_GRAIL_5M", s_new_holy_grail, {}),
+    ("NEW_KAMA_PB_5M", s_new_kama_pb, {}),
+    ("NEW_CHANDELIER_15M", s_new_chandelier, {}),
+    ("NEW_DONCH_MID_PB_5M", s_new_donch_mid_pb, {}),
+    ("NEW_STOCHRSI_HTF_5M", s_new_stochrsi_htf, {}),
+    ("NEW_123_PB_3M", s_new_123_pb, {}),
+    ("NEW_TICK_CLIMAX_3M", s_new_tick_climax, {}),
+    ("NEW_OBV_Z_DIV_5M", s_new_obv_z_div, {}),
+    ("NEW_WPR_HOOK_5M", s_new_wpr_hook, {}),
+    ("NEW_VORTEX_15M", s_new_vortex, {}),
+    ("NEW_REGIME_SWITCH_5M", s_new_regime_switch, {}),
+]
+STRATEGIES.extend(NEW_STRATEGIES)
+
 HTFS = (15, 60)
 
 
@@ -364,6 +711,54 @@ def cluster_stats(win, em, breakeven):
     return dict(n=n, wr=p, se=se, z=z, p=norm_sf(z), lo=p - 1.645 * se)
 
 
+def collect_basket_strategies(data, store, delay=0):
+    closes_5m, opens_1m, mins_1m = {}, {}, {}
+    for pair, df1 in data.items():
+        d5 = df1.resample("5min", label="left", closed="left").agg({"close": "last"}).dropna()
+        if len(d5) >= 120:
+            closes_5m[pair] = d5["close"]
+            mins_1m[pair] = minutes_of(df1.index)
+            opens_1m[pair] = df1["open"].values.astype(float)
+
+    if all(p in closes_5m for p in ("EUR/USD", "GBP/USD", "AUD/USD")):
+        df_u = pd.concat([closes_5m["EUR/USD"], closes_5m["GBP/USD"], closes_5m["AUD/USD"]], axis=1, join="inner")
+        df_u.columns = ["EU", "GU", "AU"]
+        ret = df_u.pct_change(3)
+        z_eu = ret["EU"] - ret[["GU", "AU"]].mean(axis=1)
+        score = z_eu / (z_eu.rolling(60).std() + 1e-12)
+        sig_eu = np.where(score < -2.2, 1, np.where(score > 2.2, -1, 0)).astype(np.int8)
+        end_m = minutes_of(df_u.index) + 5
+        for exp in (10, 15):
+            em, w = extract_trades(sig_eu, end_m, mins_1m["EUR/USD"], opens_1m["EUR/USD"], exp, delay)
+            if len(em):
+                store.setdefault(("NEW_USD_DIV_5M", 5, str(exp)), []).append((em, w))
+
+    jpy_pairs = [p for p in ("EUR/JPY", "GBP/JPY", "AUD/JPY", "CAD/JPY", "USD/JPY") if p in closes_5m]
+    if len(jpy_pairs) >= 4:
+        df_j = pd.concat([closes_5m[p] for p in jpy_pairs], axis=1, join="inner")
+        df_j.columns = jpy_pairs
+        r1 = df_j.pct_change(1)
+        sync_sig = np.where((r1 > 0.0005).sum(axis=1) >= 3, 1, np.where((r1 < -0.0005).sum(axis=1) >= 3, -1, 0)).astype(np.int8)
+        end_m = minutes_of(df_j.index) + 5
+        for p in jpy_pairs:
+            for exp in (10, 15):
+                em, w = extract_trades(sync_sig, end_m, mins_1m[p], opens_1m[p], exp, delay)
+                if len(em):
+                    store.setdefault(("NEW_JPY_SYNC_5M", 5, str(exp)), []).append((em, w))
+
+    if "EUR/USD" in closes_5m and "USD/CHF" in closes_5m:
+        df_c = pd.concat([closes_5m["EUR/USD"], closes_5m["USD/CHF"]], axis=1, join="inner")
+        df_c.columns = ["EU", "UC"]
+        synth = np.log(df_c["EU"] * df_c["UC"])
+        z = (synth - synth.rolling(60).mean()) / (synth.rolling(60).std() + 1e-12)
+        sig_eu = np.where(z < -2.2, 1, np.where(z > 2.2, -1, 0)).astype(np.int8)
+        end_m = minutes_of(df_c.index) + 5
+        for exp in (10, 15):
+            em, w = extract_trades(sig_eu, end_m, mins_1m["EUR/USD"], opens_1m["EUR/USD"], exp, delay)
+            if len(em):
+                store.setdefault(("NEW_CORR_SPREAD_5M", 5, str(exp)), []).append((em, w))
+
+
 def collect(data, delay=0, verbose=True):
     store = {}
     t0 = time.time()
@@ -382,12 +777,12 @@ def collect(data, delay=0, verbose=True):
                 dft = df1
             else:
                 dft = df1.resample(f"{tf}min", label="left", closed="left").agg(
-                    {"open": "first", "high": "max", "low": "min", "close": "last"}
-                ).dropna()
+                    {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+                ).dropna(subset=["open", "high", "low", "close"])
             if len(dft) < 120:
                 continue
             end_min = minutes_of(dft.index) + tf
-            F = Feat(dft)
+            F = Feat(dft, pair_name=pair)
             attach_htf(F, df1, tf, end_min)
             exp_variants = [(str(e), e) for e in EXPIRATIONS] + [
                 (r, dynamic_exp(F, tf, r)) for r in ("dyn_vol", "dyn_vol_inv")
@@ -432,6 +827,8 @@ def collect(data, delay=0, verbose=True):
         if verbose:
             print(f"  [{pi + 1}/{len(data)}] {pair} готово ({time.time() - t0:.0f}с)", flush=True)
 
+    collect_basket_strategies(data, store, delay=delay)
+
     merged = {}
     for k, parts in store.items():
         em = np.concatenate([p[0] for p in parts])
@@ -459,6 +856,39 @@ def analyze(merged, payout):
     return rep, split, breakeven
 
 
+def prune_config_from_report(rep: pd.DataFrame, config_path: str, threshold: float = 0.45, min_trades: int = 30) -> list[str]:
+    if not os.path.exists(config_path):
+        return []
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    bot_rows = rep[rep["strategy"].str.startswith("BOT_")].copy()
+    if bot_rows.empty:
+        return []
+    bot_rows["base_key"] = bot_rows["strategy"].str.replace(r"^BOT_|_(REG|RAW)$", "", regex=True)
+    bot_rows["tot_n"] = bot_rows["d_n"] + bot_rows["c_n"]
+    bot_rows["tot_w"] = bot_rows["d_wr"].fillna(0) * bot_rows["d_n"] + bot_rows["c_wr"].fillna(0) * bot_rows["c_n"]
+    agg = bot_rows.groupby("base_key")[["tot_w", "tot_n"]].sum()
+
+    disabled = []
+    for key, row in agg.iterrows():
+        n = float(row["tot_n"])
+        if n < min_trades:
+            continue
+        wr = float(row["tot_w"]) / n
+        if key in cfg and wr < threshold and cfg[key]:
+            cfg[key] = False
+            disabled.append(f"{key} ({wr * 100:.1f}%, n={int(n)})")
+
+    if disabled:
+        tmp = config_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.replace(tmp, config_path)
+    return disabled
+
+
 def build_summary(rep, split, breakeven, payout, data_info):
     real = rep[~rep.control & (rep.d_n >= MIN_DISC_TRADES)].copy()
     ctrl = rep[rep.control & (rep.d_n >= MIN_DISC_TRADES)].copy()
@@ -468,7 +898,7 @@ def build_summary(rep, split, breakeven, payout, data_info):
     top["PASS"] = (top.c_n >= MIN_CONF_TRADES) & (top.c_wr > breakeven) & (top.c_p < alpha)
     lines = []
     A = lines.append
-    A("🧪 ЛАБОРАТОРІЯ СТРАТЕГІЙ (57 СТРАТЕГІЙ)")
+    A("🧪 ЛАБОРАТОРІЯ СТРАТЕГІЙ (57 НАЯВНИХ + 26 НОВИХ КАУЗАЛЬНИХ)")
     A(f"Дані: {data_info}")
     A(f"Беззбиток при виплаті {payout * 100:.0f}%: {breakeven * 100:.2f}%")
     A(f"Перевірено конфігурацій: {n_configs}")
@@ -492,10 +922,6 @@ def build_summary(rep, split, breakeven, payout, data_info):
     n_pass = int(top.PASS.sum())
     A("")
     A(f"ПІДСУМОК: пройшли перевірку {n_pass} з {len(top)}.")
-    if n_pass == 0:
-        A("Жодна конфігурація не показала статистично значущої переваги на нових даних.")
-    else:
-        A("Кандидати пройшли позавибіркову перевірку; перевірте на демо/мінімальному обсязі.")
     return "\n".join(lines), top[top.PASS]
 
 
@@ -506,6 +932,8 @@ def main():
     ap.add_argument("--payout", type=float, default=0.85)
     ap.add_argument("--delay", type=int, default=0, help="затримка входу в хвилинах після закриття свічки")
     ap.add_argument("--out", default=".")
+    ap.add_argument("--prune-config", default="", help="шлях до strategies_config.json для авто-вимкнення стратегій нижче порога")
+    ap.add_argument("--prune-threshold", type=float, default=0.45)
     args = ap.parse_args()
 
     if args.download:
@@ -538,6 +966,9 @@ def main():
             ensure_ascii=False,
             indent=2,
         )
+    if args.prune_config:
+        pruned = prune_config_from_report(rep, args.prune_config, threshold=args.prune_threshold)
+        print(f"Відсіяно нижче {args.prune_threshold * 100:.0f}%: {pruned or 'нічого'}")
     print("\n" + summary)
 
 
