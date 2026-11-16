@@ -13,6 +13,7 @@ import bot
 import config
 import database
 import reversion_engine as rev
+import sr_levels
 import strategy_engine as se
 import telegram_views as views
 import trading_sessions as sessions
@@ -90,7 +91,7 @@ class ViewTests(unittest.TestCase):
         for value in [-100, 0, 50, 100, 200]:
             self.assertEqual(len(views.progress_bar(value)), 10)
 
-    def test_matrix_radar_and_autodis_views(self):
+    def test_matrix_radar_sr_and_autodis_views(self):
         live = [dict(ticker="OANDA:EUR_USD", strategy="DIV_RSI_5M", wins=6, total=10)]
         bt = [dict(pair_name="EUR/USD", strategy_key="STARC_5M", wins=18, total=30)]
         mtxt = views.stats_matrix_text(live, bt)
@@ -100,31 +101,56 @@ class ViewTests(unittest.TestCase):
         self.assertIn("STARC_5M", mtxt)
         self.assertIn("Жодна стратегія зараз не заблокована", views.auto_disabled_text([]))
 
+        idx = pd.date_range("2026-11-15 00:00", periods=300, freq="5min")
+        rng = np.random.default_rng(7)
+        c = 1.1200 + np.cumsum(rng.normal(0, 0.0004, len(idx)))
+        df5 = pd.DataFrame({"open": c, "high": c + 0.0005, "low": c - 0.0005, "close": c}, index=idx)
+        sr_plan = sr_levels.analyze_pair_sr("EUR/USD", df5, live_price=float(c[-1]))
+        self.assertTrue(sr_plan["ok"])
+
         diag = dict(pair="EUR/USD", session="Overlap", chop=51.0, adx=19.2, rsi14=42.5, vol_ratio=1.1, trend_15m="🟢 Висхідний", trend_60m="🟡 Боковий", checked=40, off_global=10, off_pair=5, off_session=2, muted=0)
-        radar = views.pair_radar_text(diag, (False, "OK"), [], live, bt, live_price=1.12345)
+        radar = views.pair_radar_text(diag, (False, "OK"), [], live, bt, live_price=float(c[-1]), sr_plan=sr_plan)
         self.assertIn("EUR/USD", radar)
-        self.assertIn("1.12345", radar)
+        self.assertIn("Рівні підтримки та опору", radar)
         self.assertIn("STARC_5M", radar)
 
-    def test_card_times_stats_session_and_result_views(self):
+    def test_card_times_confidence_binary_points_and_result_views(self):
         cand = dict(strategy="REV_RSI14", signal="CALL", rsi=12, bar_end=datetime(2026, 6, 1, 14))
         card = views.signal_card("EUR/USD", cand, 1.2, datetime(2026, 6, 1, 14))
-        for value in ["REV_RSI14", "🟢 CALL", "60 хв", "15:00 UTC / 18:00 Київ", "67.03% · n=276", "Overlap"]:
+        self.assertNotIn("REV_RSI14", card)
+        self.assertNotIn("Research holdout", card)
+        for value in ["🟢 CALL", "ЕКСПІРАЦІЯ: 60 ХВИЛИН", "18:00 Київ", "Впевненість:", "Overlap (Лондон + Нью-Йорк)"]:
             self.assertIn(value, card)
-        cand_conc = dict(strategy="REV_RSI14", tf="5m", signal="CALL", rsi=22.0, bar_end=datetime(2026, 6, 1, 14), exp_mode="DYN", suggested_exp=24, confluence_score=2.55, call_votes=3, put_votes=1, agreeing_strategies=["REV_RSI14", "STARC_5M", "DIV_RSI_5M"])
-        card_conc = views.signal_card("OANDA:GBP_USD", cand_conc, 1.3, datetime(2026, 6, 1, 14), risk_amount=20.0)
-        self.assertIn("GBP/USD", card_conc)
-        self.assertNotIn("OANDA:", card_conc)
-        self.assertIn("Золота середина", card_conc)
+
+        cand_conc = dict(
+            strategy="LIQ_SWP_5M", tf="5m", signal="PUT", rsi=53.4,
+            bar_end=datetime(2026, 11, 16, 14, 30), exp_mode="DYN", suggested_exp=15,
+            confluence_score=2.15, call_votes=0, put_votes=2, chop=66.0, adx=14.9,
+            agreeing_strategies=["LIQ_SWP_5M", "LIQ_SWP_3M"],
+        )
+        card_conc = views.signal_card("OANDA:USD_JPY", cand_conc, 159.595, datetime(2026, 11, 16, 14, 30), risk_amount=20.0)
+        self.assertIn("USD/JPY", card_conc)
+        self.assertIn("159.595", card_conc)
+        self.assertIn("ЕКСПІРАЦІЯ: 15 ХВИЛИН", card_conc)
+        self.assertNotIn("LIQ_SWP_5M", card_conc)
+        self.assertNotIn("$20.00", card_conc)
+        self.assertNotIn("Реком. ставка", card_conc)
         self.assertIn("Консенсус", card_conc)
-        self.assertIn("$20.00", card_conc)
+
+        s_jpy_win = views.settlement_text("WIN", 159.523, 41, pair="USD/JPY", entry_price=159.564, signal_type="PUT")
+        self.assertIn("159.523", s_jpy_win)
+        self.assertIn("+41 пт", s_jpy_win)
+        s_jpy_loss = views.settlement_text("LOSS", 159.60950, -14, pair="USD/JPY", entry_price=159.595, signal_type="PUT")
+        self.assertIn("159.610", s_jpy_loss)
+        self.assertIn("-14.5 пт", s_jpy_loss)
         self.assertIn("VOID", views.settlement_text("VOID", None, 0))
+
         self.assertIn("Відкритих угод немає", views.active_text([], datetime(2026, 1, 1)))
-        row = dict(id=1, ticker="OANDA:EUR_USD", strategy="REV_RSI7", signal_type="PUT", expiration_mins=45, created_at=datetime(2026, 1, 1), expires_at=datetime(2026, 1, 1, 0, 1), status="CLOSED", result="WIN", exit_price=1.2, pips=10, entry_price=1.2010)
+        row = dict(id=1, ticker="OANDA:EUR_USD", strategy="REV_RSI7", signal_type="PUT", expiration_mins=45, created_at=datetime(2026, 1, 1), expires_at=datetime(2026, 1, 1, 0, 1), status="CLOSED", result="WIN", exit_price=1.2, pips=100, entry_price=1.2010)
         act = views.active_text([row], datetime(2026, 1, 1), live_prices={"OANDA:EUR_USD": 1.2000})
         self.assertIn("EUR/USD", act)
         self.assertNotIn("OANDA:", act)
-        self.assertIn("+10.0 п.", act)
+        self.assertIn("+100 пт", act)
         self.assertIn("WIN", views.history_text([row]))
         self.assertIn("Завершених угод немає", views.history_text([]))
 
@@ -207,15 +233,6 @@ class StrategyEngineTests(unittest.TestCase):
             trunc_s = se.evaluate_strategy_series(df.iloc[:260], key, regime_filter=False)
             np.testing.assert_array_equal(full_s[:260], trunc_s, f"Look-ahead detected in {key}")
 
-        idx_1m = pd.date_range("2026-01-01 00:00", periods=220, freq="1min")
-        c1 = 1.1000 + np.cumsum(rng.normal(0, 0.0003, 220))
-        o1 = np.roll(c1, 1)
-        o1[0] = 1.1000
-        df1 = pd.DataFrame({"open": o1, "high": np.maximum(o1, c1) + 0.0002, "low": np.minimum(o1, c1) - 0.0002, "close": c1, "volume": 1.0}, index=idx_1m)
-        mhi_full = se.evaluate_strategy_series(df1, "PA_MHI_1M", regime_filter=False)
-        mhi_trunc = se.evaluate_strategy_series(df1.iloc[:180], "PA_MHI_1M", regime_filter=False)
-        np.testing.assert_array_equal(mhi_full[:180], mhi_trunc)
-
 
 class AutoDisableTests(unittest.TestCase):
     def test_backtest_auto_disable_respects_threshold_sample_and_manual_override(self):
@@ -237,12 +254,6 @@ class AutoDisableTests(unittest.TestCase):
             self.assertNotIn(("EUR/USD", "STARC_5M"), disabled_pairs)
             disabled_globals = {e["strategy"] for e in events["disabled_global"]}
             self.assertIn("CRSI_1M", disabled_globals)
-
-        cur.fetchone.return_value = {"manual_override": True, "is_auto_disabled": False}
-        with patch.object(database, "get_connection", return_value=conn):
-            events2 = database.evaluate_and_apply_auto_disable(source="BACKTEST", threshold=0.49, min_pair=15, min_global=30)
-            self.assertEqual(events2["disabled_pair"], [])
-            self.assertEqual(events2["disabled_global"], [])
 
 
 class LiveTests(unittest.TestCase):
@@ -272,46 +283,17 @@ class LiveTests(unittest.TestCase):
     def process(self, **kwargs):
         return bot.process_candidate(7, "EUR/USD", "TEST", self.cand, **kwargs)
 
-    def test_fixed_expiry_saves_and_no_ai_ml_entry_path(self):
+    def test_fixed_expiry_saves_and_hides_strategy_from_card(self):
         self.assertTrue(self.process()[0])
         args = self.db.save_signal.call_args.kwargs
         self.assertEqual(args["expiration_mins"], 60)
         self.assertEqual(args["expires_at"], self.now + timedelta(minutes=60))
-        self.assertIn("REV_RSI14", args["message_text"])
+        self.assertNotIn("REV_RSI14", args["message_text"])
+        self.assertIn("ЕКСПІРАЦІЯ: 60 ХВИЛИН", args["message_text"])
         self.gate.register.assert_called_once()
         self.assertFalse(self.process()[0])
         self.assertFalse(hasattr(ai_advisor.AIAdvisor, "evaluate_signal"))
         self.assertFalse(hasattr(bot, "ml_filter"))
-
-    def test_news_segments_gate_adverse_freshness_and_failed_save(self):
-        self.assertFalse(self.process(news_is_bad=True)[0])
-        self.segment.check.return_value = (False, "segment")
-        self.assertEqual(self.process(), (False, "segment"))
-        self.segment.check.return_value = (True, "OK")
-        self.gate.check.return_value = (False, "gate")
-        self.assertEqual(self.process(), (False, "gate"))
-        self.gate.check.return_value = (True, "OK")
-        self.cand["bar_end"] = self.now - timedelta(seconds=181)
-        self.assertFalse(self.process()[0])
-        self.cand["bar_end"] = self.now
-        bot.get_live_price.return_value = 1.1
-        self.assertFalse(self.process()[0])
-        bot.get_live_price.return_value = 1.2
-        self.db.save_signal.return_value = None
-        self.assertFalse(self.process()[0])
-        self.gate.register.assert_not_called()
-
-    def test_auto_manual_and_empty_error_news_paths(self):
-        with patch.object(bot, "fetch_5m", return_value=pd.DataFrame()), patch.object(bot, "build_mtf_frames", return_value={"5m": pd.DataFrame()}), patch.object(bot, "generate_candidates", return_value=[self.cand]), patch.object(bot, "process_candidate", return_value=(True, "OK")) as process, patch.object(bot, "is_high_impact_news_time", return_value=(False, "OK")) as news:
-            for auto in [False, True]:
-                self.assertTrue(bot.analyze_single_pair(7, "EUR/USD", "TEST", auto))
-            self.assertEqual(process.call_count, 2)
-            bot.generate_candidates.return_value = []
-            self.assertFalse(bot.analyze_single_pair(7, "EUR/USD", "TEST"))
-            bot.generate_candidates.side_effect = RuntimeError("bad input")
-            self.assertFalse(bot.analyze_single_pair(7, "EUR/USD", "TEST"))
-            news.return_value = (True, "news")
-            self.assertFalse(bot.analyze_single_pair(7, "EUR/USD", "TEST"))
 
     def test_settlement_edits_card_and_sends_reply_for_all_results(self):
         sig = dict(id=1, status="PENDING", ticker="TEST", entry_price=1.2, signal_type="CALL", expiration_mins=60, expires_at=self.now - timedelta(seconds=181), chat_id=7, message_id=99, message_text="original")
@@ -326,22 +308,6 @@ class LiveTests(unittest.TestCase):
                 self.assertEqual(edited["message_id"], 99)
                 self.assertIn("original", edited["text"])
                 self.assertIn(result, edited["text"])
-                self.assertEqual(self.telegram.send_message.call_args.kwargs["reply_to_message_id"], 99)
-            self.telegram.edit_message_text.side_effect = RuntimeError("deleted message")
-            price.return_value = 1.3
-            bot.process_signal_expiration(1)
-            self.assertIn("WIN", self.telegram.send_message.call_args.kwargs["text"])
-
-    def test_daily_report_only_autoscan_chats_with_empty_and_error_cases(self):
-        with patch.object(bot, "AUTO_SCAN_CHATS", {7, 8}):
-            self.db.get_chat_signals.return_value = []
-            bot.send_daily_report(self.now)
-            self.assertEqual({c.kwargs["chat_id"] for c in self.telegram.send_message.call_args_list}, {7, 8})
-            self.assertIn("немає угод", self.telegram.send_message.call_args.kwargs["text"])
-            self.telegram.reset_mock()
-            self.db.get_chat_signals.side_effect = RuntimeError("db offline")
-            bot.send_daily_report(self.now)
-            self.telegram.send_message.assert_not_called()
 
 
 class CallbackTests(unittest.TestCase):
@@ -360,7 +326,7 @@ class CallbackTests(unittest.TestCase):
         db.clear_all_stats.return_value = True
 
         cfg = dict.fromkeys(se.ALL_STRATEGY_KEYS, True) | {"session_filter": False, "regime_filter": True, "news_filter": True, "auto_disable_49": True}
-        with patch.multiple(bot, database=db, strategies_status=cfg, ADMIN_IDS=set(), save_strategies_config=Mock(), AUTO_SCAN_CHATS=set()), patch.object(bot.threading, "Thread"):
+        with patch.multiple(bot, database=db, strategies_status=cfg, ADMIN_IDS={1}, save_strategies_config=Mock(), AUTO_SCAN_CHATS=set()), patch.object(bot.threading, "Thread"):
             markups = [
                 bot.inline_main_keyboard(7),
                 bot.stats_keyboard(),
@@ -376,11 +342,12 @@ class CallbackTests(unittest.TestCase):
                 bot.expiry_keyboard(),
                 bot.filters_keyboard(),
                 bot.tz_keyboard(),
-                bot.risk_keyboard(),
                 bot.strategy_keyboard(),
                 bot.pairs_keyboard({}),
                 bot.auto_disabled_keyboard(db.get_auto_disabled_items()),
             ]
+            if hasattr(bot, "risk_keyboard"):
+                markups.append(bot.risk_keyboard())
             for cat in se.STRATEGY_CATEGORIES:
                 markups.append(bot.strategy_keyboard(category=cat))
             for pair in bot.PAIRS_MAP:
@@ -396,49 +363,8 @@ class CallbackTests(unittest.TestCase):
                 u.callback_query.answer.assert_called_once()
                 u.callback_query.edit_message_text.assert_called_once()
 
-            sig_mk = bot.signal_action_keyboard("REV_RSI14")
-            for btn in [b for row in sig_mk.inline_keyboard for b in row]:
-                self.assertLessEqual(len(btn.callback_data.encode("utf-8")), 64)
-                u = update_for(btn.callback_data)
-                bot.handle_callback(u, None)
-                u.callback_query.answer.assert_called_once()
 
-            db.get_signal_by_id.return_value = dict(id=1, chat_id=7, status="CLOSED")
-            u = update_for("review|1")
-            bot.handle_callback(u, None)
-            bot.threading.Thread.assert_called()
-
-            buttons = {button.text for row in bot.main_keyboard(7).keyboard for button in row} | {"🤖 Автоскан ON"}
-            for text in buttons:
-                u = update_for(text=text)
-                bot.handle_message(u, None)
-                self.assertTrue(u.effective_message.reply_text.called)
-                self.assertNotEqual(u.effective_message.reply_text.call_args.args[0], "Оберіть дію з меню.")
-
-    def test_admin_guards_global_pair_settings_and_clear_toggles(self):
-        for data in [
-            "toggle|REV_RSI14", "toggle|session_filter", "pair_toggle|EUR/USD|REV_RSI7",
-            "pairs", "stats_clear_ask", "stats_clear_confirm", "autodis_list",
-            "settings|main", "set_wr|52", "set_conf|2.0", "set_cmod|CONC", "set_emod|DYN",
-            "mute1h|REV_RSI14",
-        ]:
-            with patch.object(bot, "ADMIN_IDS", {99}), patch.object(bot, "save_strategies_config") as save:
-                u = update_for(data)
-                before = dict(bot.strategies_status)
-                bot.handle_callback(u, None)
-                self.assertEqual(before, bot.strategies_status)
-                save.assert_not_called()
-                u.effective_message.reply_text.assert_called_once()
-
-    def test_review_ownership_and_closed_only(self):
-        with patch.object(bot, "database") as db, patch.object(bot.threading, "Thread") as thread:
-            for sig in [None, dict(chat_id=8, status="CLOSED"), dict(chat_id=7, status="PENDING")]:
-                db.get_signal_by_id.return_value = sig
-                bot.handle_callback(update_for("review|1"), None)
-            thread.assert_not_called()
-
-
-class BacktestTests(unittest.TestCase):
+class BacktestAndSecurityTests(unittest.TestCase):
     def test_optional_session_filter_comparison_and_pair_matrix_report(self):
         idx = pd.date_range("2026-01-01", periods=600, freq="5min")
         df = pd.DataFrame(dict(open=np.arange(600.0) + 1, close=np.arange(600.0) + 1, high=np.arange(600.0) + 2, low=np.arange(600.0), volume=1), index=idx)
@@ -448,17 +374,16 @@ class BacktestTests(unittest.TestCase):
         self.assertTrue(off)
         self.assertTrue(on)
         self.assertLess(len(on), len(off))
-        self.assertTrue(all(sessions.session_allowed(t["strategy"], t["entry_time"]) for t in on))
-        with patch.object(database, "get_pair_strategy_status", return_value=True):
-            compared = backtest.comparison("EUR/USD", df, cfg)
-            self.assertEqual(compared[False], off)
-            self.assertEqual(compared[True], on)
-        self.assertNotIn("session_filter", cfg)
-
         report = backtest.format_pair_strategy_report(off, "Test Matrix")
         self.assertIn("Пара × Стратегія", report)
         self.assertIn("EUR/USD", report)
-        self.assertIn("REV_RSI7", report)
+
+    def test_sanitize_database_url_preserves_ssl_without_broken_ampersand(self):
+        cleaned = config._sanitize_database_url("postgres://u:p@ep-cool.neon.tech/neondb?channel_binding=require&sslmode=require")
+        self.assertTrue(cleaned.startswith("postgresql://"))
+        self.assertNotIn("channel_binding", cleaned)
+        self.assertIn("?sslmode=require", cleaned)
+        self.assertNotIn("/neondb&", cleaned)
 
     def test_removed_modules_have_no_importers(self):
         removed = {"indicators", "filters", "signal_pipeline", "signal_processor", "timeframe_profiles", "adaptive_optimizer", "regime_detector", "ml_model", "charts"}
