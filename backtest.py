@@ -3,7 +3,9 @@
 import csv
 import html
 import io
+import json
 import logging
+import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -11,7 +13,7 @@ import pandas as pd
 import yfinance as yf
 
 import database
-from config import AUTO_DISABLE_WR_THRESHOLD, PAIRS_MAP, PAYOUT, YAHOO_PAIRS_MAP
+from config import AUTO_DISABLE_WR_THRESHOLD, PAIRS_MAP, PAYOUT, PRUNE_WR_THRESHOLD, YAHOO_PAIRS_MAP
 from quality_gate import SignalGate, wilson_bounds
 from reversion_engine import (
     PRESETS,
@@ -31,6 +33,7 @@ from trading_sessions import session_allowed
 
 logger = logging.getLogger(__name__)
 BREAK_EVEN = 1.0 / (1.0 + PAYOUT)
+CONFIG_META_FLAGS = {"session_filter", "regime_filter", "news_filter", "auto_disable_49"}
 
 
 def load_strategy_settings():
@@ -96,8 +99,8 @@ def summarize(trades, title, payout: float = PAYOUT, wr_threshold: float = AUTO_
     lines = [
         title,
         f"🎯 Угод: <b>{n}</b> | ✅ {w} | 🏆 Вінрейт: <b>{w / n * 100:.1f}%</b>",
-        f"📐 95% інтервал: {lo * 100:.1f}–{hi * 100:.1f}% | Беззбиток (виплата {int(float(payout) * 100)}%): {be * 100:.1f}%",
-        f"💰 Очікування на угоду: <b>{ev * 100:+.1f}%</b> від ставки\n",
+        f"📐 95% інтервал: {lo * 100:.1f}–{hi * 100:.1f}% | Беззбиток ({int(float(payout) * 100)}% випл.): {be * 100:.1f}%",
+        f"📈 Очікування на угоду: <b>{ev * 100:+.1f}%</b>\n",
         "📋 <b>По таймфреймах:</b>",
     ]
     for tf, g in df.groupby("tf"):
@@ -111,7 +114,7 @@ def summarize(trades, title, payout: float = PAYOUT, wr_threshold: float = AUTO_
         stats.append((gw / gn, gn, gw, st))
     stats.sort(reverse=True)
     for wr, gn, gw, st in stats:
-        ico = "🟢" if wr >= be else ("🟡" if wr >= float(wr_threshold) else "🔴")
+        ico = "🟢" if wr >= be else ("🟡" if wr >= PRUNE_WR_THRESHOLD else "⛔")
         lines.append(f"{ico} {html.escape(st)}: {gw}/{gn} ({wr * 100:.1f}%)")
     return "\n".join(lines)
 
@@ -298,6 +301,59 @@ def compute_pair_strategy_stats(trades: list[dict]) -> list[dict]:
     return rows
 
 
+def prune_strategies_below_threshold(
+    stats_rows: list[dict],
+    config_path: str | Path | None = None,
+    min_wr: float = PRUNE_WR_THRESHOLD,
+    min_trades: int = 20,
+    dry_run: bool = False,
+) -> dict:
+    agg = {}
+    for r in stats_rows or []:
+        st = r["strategy"]
+        if st not in agg:
+            agg[st] = {"wins": 0, "total": 0}
+        agg[st]["wins"] += int(r["wins"])
+        agg[st]["total"] += int(r["total"])
+
+    to_disable = []
+    sub_breakeven = []
+    kept = []
+
+    for st, counts in sorted(agg.items()):
+        tot = counts["total"]
+        wins = counts["wins"]
+        if tot < min_trades:
+            continue
+        wr = wins / tot
+        entry = {"strategy": st, "wins": wins, "total": tot, "win_rate": round(wr, 4)}
+        if wr < float(min_wr):
+            to_disable.append(entry)
+        elif wr < BREAK_EVEN:
+            sub_breakeven.append(entry)
+        else:
+            kept.append(entry)
+
+    cfg_path = Path(config_path) if config_path else Path(__file__).with_name("strategies_config.json")
+    if not dry_run and to_disable and cfg_path.exists():
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        for item in to_disable:
+            st = item["strategy"]
+            if st in data and st not in CONFIG_META_FLAGS:
+                data[st] = False
+        tmp_path = cfg_path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp_path, cfg_path)
+
+    return {
+        "disabled": to_disable,
+        "sub_breakeven": sub_breakeven,
+        "profitable": kept,
+        "threshold": float(min_wr),
+        "break_even": round(BREAK_EVEN, 4),
+    }
+
+
 def format_pair_strategy_report(trades: list[dict], title: str, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD) -> str:
     base = summarize(trades, title, payout=payout, wr_threshold=wr_threshold)
     if not trades:
@@ -316,7 +372,7 @@ def format_pair_strategy_report(trades: list[dict], title: str, payout: float = 
             st_rows.append((sw / sn, sn, sw, st))
         st_rows.sort(reverse=True)
         for wr, sn, sw, st in st_rows:
-            ico = "🟢" if wr >= be else ("🟡" if wr >= float(wr_threshold) else "🔴")
+            ico = "🟢" if wr >= be else ("🟡" if wr >= PRUNE_WR_THRESHOLD else "⛔")
             lines.append(f"  {ico} <code>{html.escape(st)}</code>: {wr * 100:.1f}% ({sw}/{sn})")
     return "\n".join(lines)
 
@@ -324,7 +380,10 @@ def format_pair_strategy_report(trades: list[dict], title: str, payout: float = 
 def build_backtest_csv(stats_rows: list[dict], wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Pair", "Strategy", "Category", "TF", "ExpiryMin", "Wins", "Losses", "Total", "WinRatePct", "BelowThreshold"])
+    writer.writerow([
+        "Pair", "Strategy", "Category", "TF", "ExpiryMin",
+        "Wins", "Losses", "Total", "WinRatePct", "Below45Prune", "BelowThreshold", "BelowBreakEven"
+    ])
     for r in stats_rows:
         meta = STRATEGIES_META.get(r["strategy"], {})
         wr_pct = round(r["win_rate"] * 100.0, 2)
@@ -338,7 +397,9 @@ def build_backtest_csv(stats_rows: list[dict], wr_threshold: float = AUTO_DISABL
             r["losses"],
             r["total"],
             wr_pct,
+            "YES" if r["win_rate"] < float(PRUNE_WR_THRESHOLD) else "NO",
             "YES" if r["win_rate"] < float(wr_threshold) else "NO",
+            "YES" if r["win_rate"] < BREAK_EVEN else "NO",
         ])
     return buf.getvalue().encode("utf-8-sig")
 
@@ -389,7 +450,7 @@ def run_full_backtest_with_stats(pair_name: str, strategies_status=None, include
         expiry_mode=expiry_mode,
     )
     stats_rows = compute_pair_strategy_stats(trades)
-    mode_lbl = "усі 57 стратегій" if include_all_strategies else "активні стратегії"
+    mode_lbl = "усі стратегії" if include_all_strategies else "активні стратегії"
     report = format_pair_strategy_report(
         trades,
         f"📊 <b>{html.escape(pair_name)} · Бектест ({mode_lbl} · {expiry_mode} · 1m/3m: 7д, 5m/15m: 60д)</b>",
@@ -418,7 +479,7 @@ def run_full_backtest_all_with_stats(strategies_status=None, include_all_strateg
             )
         )
     stats_rows = compute_pair_strategy_stats(all_trades)
-    mode_lbl = "усі 57 стратегій" if include_all_strategies else "активні стратегії"
+    mode_lbl = "усі стратегії" if include_all_strategies else "активні стратегії"
     report = format_pair_strategy_report(
         all_trades,
         f"🌐 <b>21 пара · Бектест ({mode_lbl} · {expiry_mode} · 1m/3m: 7д, 5m/15m: 60д)</b>",
