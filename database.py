@@ -24,13 +24,18 @@ _STATUS_CACHE = {}
 _BULK_CACHE_TS = 0.0
 _STATUS_TTL_SEC = 60
 
+_SETTINGS_LOCK = threading.Lock()
+_BOT_SETTINGS_CACHE = {}
+_BOT_SETTINGS_TS = 0.0
+_MUTE_MEM = {}
+
 
 def get_connection():
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL не вказано у змінних оточення!")
     raw_url = DATABASE_URL
     if raw_url.startswith("postgres://"):
-        raw_url = raw_url.replace("postgres://", "postgresql://", 1)
+        raw_url = raw_db = raw_url.replace("postgres://", "postgresql://", 1)
     raw_url = raw_url.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
     return psycopg2.connect(raw_url, sslmode="require")
 
@@ -139,6 +144,16 @@ def init_db():
 
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                setting_key VARCHAR(64) PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS filtered_logs (
                 id SERIAL PRIMARY KEY,
                 chat_id BIGINT,
@@ -219,6 +234,85 @@ def get_autoscan_chats() -> set[int]:
     except Exception as e:
         logger.error(f"⚠️ Помилка завантаження чатів автоскану: {e}")
         return set()
+
+
+def get_all_bot_settings() -> dict[str, str]:
+    global _BOT_SETTINGS_TS
+    now = time.time()
+    with _SETTINGS_LOCK:
+        if now - _BOT_SETTINGS_TS < 60:
+            return dict(_BOT_SETTINGS_CACHE)
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT setting_key, setting_value FROM bot_settings;")
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            _BOT_SETTINGS_CACHE.clear()
+            for k, v in rows:
+                _BOT_SETTINGS_CACHE[str(k)] = str(v)
+            _BOT_SETTINGS_TS = time.time()
+        except Exception:
+            _BOT_SETTINGS_TS = time.time()
+        return dict(_BOT_SETTINGS_CACHE)
+
+
+def get_bot_setting(key: str, default=None):
+    settings = get_all_bot_settings()
+    return settings.get(key, default)
+
+
+def set_bot_setting(key: str, value):
+    global _BOT_SETTINGS_TS
+    val_str = str(value)
+    with _SETTINGS_LOCK:
+        _BOT_SETTINGS_CACHE[str(key)] = val_str
+        _BOT_SETTINGS_TS = time.time()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO bot_settings (setting_key, setting_value, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (setting_key) DO UPDATE
+            SET setting_value = EXCLUDED.setting_value,
+                updated_at = CURRENT_TIMESTAMP;
+            """,
+            (str(key), val_str),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Не вдалося зберегти налаштування {key}: {e}")
+
+
+def mute_strategy_until(strategy_key: str, duration_sec: int = 3600) -> float:
+    until_ts = time.time() + max(60, int(duration_sec))
+    with _SETTINGS_LOCK:
+        _MUTE_MEM[strategy_key] = until_ts
+    set_bot_setting(f"mute:{strategy_key}", f"{until_ts:.0f}")
+    return until_ts
+
+
+def is_strategy_muted(strategy_key: str, now_ts: float | None = None) -> tuple[bool, int]:
+    now = now_ts if now_ts is not None else time.time()
+    with _SETTINGS_LOCK:
+        until = _MUTE_MEM.get(strategy_key, 0.0)
+    if not until:
+        raw = get_bot_setting(f"mute:{strategy_key}")
+        if raw:
+            try:
+                until = float(raw)
+                with _SETTINGS_LOCK:
+                    _MUTE_MEM[strategy_key] = until
+            except ValueError:
+                until = 0.0
+    if until > now:
+        return True, max(1, int((until - now) // 60) + 1)
+    return False, 0
 
 
 def save_signal(
@@ -637,17 +731,20 @@ def upsert_backtest_results(rows: list[dict]):
         logger.error(f"⚠️ Помилка збереження результатів бектесту: {e}")
 
 
-def get_backtest_results(pair_filter: str | None = None) -> list[dict]:
+def get_backtest_results(pair_filter: str | None = None, strategy_filter: str | None = None) -> list[dict]:
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
+        clauses = []
+        params = []
         if pair_filter:
-            cursor.execute(
-                "SELECT * FROM backtest_results WHERE pair_name = %s ORDER BY win_rate DESC, total DESC;",
-                (normalize_pair_name(pair_filter),),
-            )
-        else:
-            cursor.execute("SELECT * FROM backtest_results ORDER BY pair_name ASC, win_rate DESC;")
+            clauses.append("pair_name = %s")
+            params.append(normalize_pair_name(pair_filter))
+        if strategy_filter:
+            clauses.append("strategy_key = %s")
+            params.append(strategy_filter)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        cursor.execute(f"SELECT * FROM backtest_results{where} ORDER BY pair_name ASC, win_rate DESC, total DESC;", tuple(params))
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -757,10 +854,6 @@ def evaluate_and_apply_auto_disable(
     min_pair: int | None = None,
     min_global: int | None = None,
 ) -> dict[str, list[dict]]:
-    """
-    Перевіряє результати (LIVE або BACKTEST) і автоматично вимикає стратегії
-    (по парі та/або глобально), якщо вінрейт < threshold при достатній вибірці.
-    """
     src = source.upper()
     req_pair = min_pair if min_pair is not None else (
         AUTO_DISABLE_MIN_BT_PAIR if src == "BACKTEST" else AUTO_DISABLE_MIN_LIVE_PAIR
