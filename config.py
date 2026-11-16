@@ -1,5 +1,38 @@
 # -*- coding: utf-8 -*-
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+
+def _sanitize_database_url(raw_url: str) -> str:
+    if not raw_url:
+        return ""
+    url = raw_url.strip()
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    try:
+        parts = urlsplit(url)
+        query_items = [
+            (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if k.lower() != "channel_binding"
+        ]
+        host = (parts.hostname or "").lower()
+        has_ssl = any(k.lower() == "sslmode" for k, _ in query_items)
+        if host and host not in ("localhost", "127.0.0.1", "::1") and not has_ssl:
+            query_items.append(("sslmode", "require"))
+        clean_query = urlencode(query_items)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, clean_query, parts.fragment))
+    except Exception:
+        return url
+
+
+def _parse_int_set(env_value: str) -> set[int]:
+    result = set()
+    for part in str(env_value or "").split(","):
+        p = part.strip()
+        if p.lstrip("-").isdigit():
+            result.add(int(p))
+    return result
+
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -7,17 +40,20 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 FINNHUB_TOKEN = os.environ.get("FINNHUB_TOKEN") or os.environ.get("FINNHUB_API_KEY", "")
 FINNHUB_API_KEY = FINNHUB_TOKEN
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
 
-raw_db_url = os.environ.get("DATABASE_URL", "")
-if raw_db_url.startswith("postgres://"):
-    raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
+ADMIN_IDS = _parse_int_set(os.environ.get("ADMIN_IDS", ""))
+ALLOWED_CHAT_IDS = _parse_int_set(os.environ.get("ALLOWED_CHAT_IDS", ""))
+ALLOW_OPEN_ADMIN = os.environ.get("ALLOW_OPEN_ADMIN", "false").lower() in ("1", "true", "yes")
 
-DATABASE_URL = raw_db_url.replace("&channel_binding=require", "").replace("?channel_binding=require", "")
+DATABASE_URL = _sanitize_database_url(os.environ.get("DATABASE_URL", ""))
 
 PAYOUT = float(os.environ.get("PAYOUT", "0.85"))
 NEWS_BLACKOUT_MINS = int(os.environ.get("NEWS_BLACKOUT_MINS", "15"))
 DISABLE_FINNHUB_CANDLES = os.environ.get("DISABLE_FINNHUB_CANDLES", "false").lower() in ("1", "true", "yes")
+FINNHUB_CONNECT_DELAY_SEC = float(os.environ.get("FINNHUB_CONNECT_DELAY_SEC", "4.0"))
 
+PRUNE_WR_THRESHOLD = float(os.environ.get("PRUNE_WR_THRESHOLD", "0.45"))
 AUTO_DISABLE_WR_THRESHOLD = float(os.environ.get("AUTO_DISABLE_WR_THRESHOLD", "0.49"))
 AUTO_DISABLE_MIN_LIVE_PAIR = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_PAIR", "8"))
 AUTO_DISABLE_MIN_LIVE_GLOBAL = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_GLOBAL", "15"))
@@ -28,8 +64,10 @@ CONFLUENCE_MODE = os.environ.get("CONFLUENCE_MODE", "CONC").upper()
 CONFLUENCE_THRESHOLD = float(os.environ.get("CONFLUENCE_THRESHOLD", "1.0"))
 EXPIRY_MODE = os.environ.get("EXPIRY_MODE", "DYN").upper()
 DEFAULT_TIMEZONE = os.environ.get("DEFAULT_TIMEZONE", "Europe/Kyiv")
-DEFAULT_DEPOSIT = float(os.environ.get("DEFAULT_DEPOSIT", "1000.0"))
-DEFAULT_RISK_PCT = float(os.environ.get("DEFAULT_RISK_PCT", "2.0"))
+
+DEFAULT_DEPOSIT = 0.0
+DEFAULT_RISK_PCT = 0.0
+MAX_ACTIVE_PER_CURRENCY = int(os.environ.get("MAX_ACTIVE_PER_CURRENCY", "2"))
 
 PAIRS_MAP = {
     "EUR/USD": "OANDA:EUR_USD",
