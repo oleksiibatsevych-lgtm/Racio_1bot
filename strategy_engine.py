@@ -26,80 +26,91 @@ GLOBAL_FILTERS = {
     "session_filter": "🌐 Фільтр торгових сесій",
     "regime_filter": "🧭 Фільтр режиму (CHOP/ADX/ATR)",
     "news_filter": "📰 Карантин макроновин (FF)",
-    "auto_disable_49": "🛡 Авто-вимкнення (<49% WR)",
+    "auto_disable_49": "🛡 Авто-вимкнення за WR%",
+}
+
+CONFLUENCE_MODES = {
+    "CONC": "🎯 Єдиний консенсус (без конфліктів)",
+    "MAJ": "⚖️ Мажоритарний фільтр",
+    "IND": "🔀 Незалежний (кожна окремо)",
+}
+
+EXPIRY_MODES = {
+    "DYN": "⏱ Динамічна (Золота середина)",
+    "FIX": "📌 Фіксована (по стратегії)",
 }
 
 STRATEGIES_META = {
     # --- REV (3) ---
-    "REV_RSI14": {"title": "REV RSI14", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 60, "htf": None, "regime": "ANY", "priority": 100},
-    "REV_BB3": {"title": "REV BB3", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 60, "htf": None, "regime": "ANY", "priority": 99},
-    "REV_RSI7": {"title": "REV RSI7", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 45, "htf": None, "regime": "ANY", "priority": 98},
+    "REV_RSI14": {"title": "REV RSI14", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 60, "htf": None, "regime": "ANY", "priority": 100, "weight": 1.40},
+    "REV_BB3": {"title": "REV BB3", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 60, "htf": None, "regime": "ANY", "priority": 99, "weight": 1.35},
+    "REV_RSI7": {"title": "REV RSI7", "category": "REV", "tf": "5m", "tf_min": 5, "exp": 45, "htf": None, "regime": "ANY", "priority": 98, "weight": 1.25},
 
     # --- MEAN (15) ---
-    "CRSI_5M": {"title": "Connors RSI 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86},
-    "CRSI_1M": {"title": "Connors RSI 1m", "category": "MEAN", "tf": "1m", "tf_min": 1, "exp": 3, "htf": None, "regime": "RANGE", "priority": 72},
-    "VALUE_CH_5M": {"title": "Value Chart 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 85},
-    "VALUE_CH_1M": {"title": "Value Chart 1m", "category": "MEAN", "tf": "1m", "tf_min": 1, "exp": 3, "htf": None, "regime": "RANGE", "priority": 71},
-    "OSC_CONS_5M": {"title": "RSI+BB+Stoch 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 87},
-    "OSC_CONS_3M": {"title": "RSI+BB+Stoch 3m", "category": "MEAN", "tf": "3m", "tf_min": 3, "exp": 6, "htf": None, "regime": "RANGE", "priority": 78},
-    "BB_KC_REV_5M": {"title": "BB+KC Envelope 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": 60, "regime": "RANGE", "priority": 84},
-    "BB_KC_REV_15M": {"title": "BB+KC Envelope 15m", "category": "MEAN", "tf": "15m", "tf_min": 15, "exp": 30, "htf": 60, "regime": "RANGE", "priority": 89},
-    "PIVOT_REV_5M": {"title": "Daily Pivot S/R 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 83},
-    "EXH_STRK_1M": {"title": "Streak Exhaustion 1m", "category": "MEAN", "tf": "1m", "tf_min": 1, "exp": 3, "htf": None, "regime": "RANGE", "priority": 70},
-    "EXH_STRK_3M": {"title": "Streak Exhaustion 3m", "category": "MEAN", "tf": "3m", "tf_min": 3, "exp": 6, "htf": None, "regime": "RANGE", "priority": 76},
-    "STARC_5M": {"title": "STARC Bands 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86},
-    "STARC_15M": {"title": "STARC Bands 15m", "category": "MEAN", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "RANGE", "priority": 90},
-    "LINREG_5M": {"title": "LinReg Channel 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 85},
-    "HUBBA_5M": {"title": "Hubba Reversal 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 84},
+    "CRSI_5M": {"title": "Connors RSI 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86, "weight": 1.10},
+    "CRSI_1M": {"title": "Connors RSI 1m", "category": "MEAN", "tf": "1m", "tf_min": 1, "exp": 3, "htf": None, "regime": "RANGE", "priority": 72, "weight": 0.85},
+    "VALUE_CH_5M": {"title": "Value Chart 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 85, "weight": 1.10},
+    "VALUE_CH_1M": {"title": "Value Chart 1m", "category": "MEAN", "tf": "1m", "tf_min": 1, "exp": 3, "htf": None, "regime": "RANGE", "priority": 71, "weight": 0.85},
+    "OSC_CONS_5M": {"title": "RSI+BB+Stoch 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 87, "weight": 1.15},
+    "OSC_CONS_3M": {"title": "RSI+BB+Stoch 3m", "category": "MEAN", "tf": "3m", "tf_min": 3, "exp": 6, "htf": None, "regime": "RANGE", "priority": 78, "weight": 0.95},
+    "BB_KC_REV_5M": {"title": "BB+KC Envelope 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": 60, "regime": "RANGE", "priority": 84, "weight": 1.15},
+    "BB_KC_REV_15M": {"title": "BB+KC Envelope 15m", "category": "MEAN", "tf": "15m", "tf_min": 15, "exp": 30, "htf": 60, "regime": "RANGE", "priority": 89, "weight": 1.25},
+    "PIVOT_REV_5M": {"title": "Daily Pivot S/R 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 83, "weight": 1.05},
+    "EXH_STRK_1M": {"title": "Streak Exhaustion 1m", "category": "MEAN", "tf": "1m", "tf_min": 1, "exp": 3, "htf": None, "regime": "RANGE", "priority": 70, "weight": 0.85},
+    "EXH_STRK_3M": {"title": "Streak Exhaustion 3m", "category": "MEAN", "tf": "3m", "tf_min": 3, "exp": 6, "htf": None, "regime": "RANGE", "priority": 76, "weight": 0.95},
+    "STARC_5M": {"title": "STARC Bands 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86, "weight": 1.15},
+    "STARC_15M": {"title": "STARC Bands 15m", "category": "MEAN", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "RANGE", "priority": 90, "weight": 1.25},
+    "LINREG_5M": {"title": "LinReg Channel 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 85, "weight": 1.10},
+    "HUBBA_5M": {"title": "Hubba Reversal 5m", "category": "MEAN", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 84, "weight": 1.10},
 
     # --- TREND (14) ---
-    "MTF_PB_1M_15": {"title": "MTF Pullback 1m/15m", "category": "TREND", "tf": "1m", "tf_min": 1, "exp": 5, "htf": 15, "regime": "TREND", "priority": 75},
-    "MTF_PB_3M_15": {"title": "MTF Pullback 3m/15m", "category": "TREND", "tf": "3m", "tf_min": 3, "exp": 10, "htf": 15, "regime": "TREND", "priority": 81},
-    "MTF_PB_5M_60": {"title": "MTF Pullback 5m/60m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": 60, "regime": "TREND", "priority": 90},
-    "EMA_RIB_3M": {"title": "EMA Ribbon 3m", "category": "TREND", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "TREND", "priority": 77},
-    "EMA_RIB_5M": {"title": "EMA Ribbon 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 84},
-    "MACD_ADX_5M": {"title": "MACD+ADX Trend 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 85},
-    "MACD_ADX_15M": {"title": "MACD+ADX Trend 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 91},
-    "ST_MOM_3M": {"title": "Dual Supertrend 3m", "category": "TREND", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "TREND", "priority": 79},
-    "ST_MOM_5M": {"title": "Dual Supertrend 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 86},
-    "PSAR_EMA_5M": {"title": "PSAR+EMA200 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 86},
-    "PSAR_EMA_15M": {"title": "PSAR+EMA200 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 90},
-    "ICHI_TK_5M": {"title": "Ichimoku Kumo+TK 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 88},
-    "ICHI_TK_15M": {"title": "Ichimoku Kumo+TK 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 92},
-    "HA_EMA_5M": {"title": "Heikin Ashi+EMA50 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 83},
+    "MTF_PB_1M_15": {"title": "MTF Pullback 1m/15m", "category": "TREND", "tf": "1m", "tf_min": 1, "exp": 5, "htf": 15, "regime": "TREND", "priority": 75, "weight": 0.90},
+    "MTF_PB_3M_15": {"title": "MTF Pullback 3m/15m", "category": "TREND", "tf": "3m", "tf_min": 3, "exp": 10, "htf": 15, "regime": "TREND", "priority": 81, "weight": 1.05},
+    "MTF_PB_5M_60": {"title": "MTF Pullback 5m/60m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": 60, "regime": "TREND", "priority": 90, "weight": 1.20},
+    "EMA_RIB_3M": {"title": "EMA Ribbon 3m", "category": "TREND", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "TREND", "priority": 77, "weight": 0.95},
+    "EMA_RIB_5M": {"title": "EMA Ribbon 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 84, "weight": 1.10},
+    "MACD_ADX_5M": {"title": "MACD+ADX Trend 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 85, "weight": 1.15},
+    "MACD_ADX_15M": {"title": "MACD+ADX Trend 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 91, "weight": 1.25},
+    "ST_MOM_3M": {"title": "Dual Supertrend 3m", "category": "TREND", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "TREND", "priority": 79, "weight": 1.00},
+    "ST_MOM_5M": {"title": "Dual Supertrend 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 86, "weight": 1.15},
+    "PSAR_EMA_5M": {"title": "PSAR+EMA200 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 86, "weight": 1.15},
+    "PSAR_EMA_15M": {"title": "PSAR+EMA200 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 90, "weight": 1.25},
+    "ICHI_TK_5M": {"title": "Ichimoku Kumo+TK 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 88, "weight": 1.15},
+    "ICHI_TK_15M": {"title": "Ichimoku Kumo+TK 15m", "category": "TREND", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "TREND", "priority": 92, "weight": 1.25},
+    "HA_EMA_5M": {"title": "Heikin Ashi+EMA50 5m", "category": "TREND", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "TREND", "priority": 83, "weight": 1.05},
 
     # --- VOL (6) ---
-    "TTM_SQZ_5M": {"title": "TTM Squeeze 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 92},
-    "TTM_SQZ_15M": {"title": "TTM Squeeze 15m", "category": "VOL", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "BREAKOUT", "priority": 94},
-    "ORB_LON_5M": {"title": "ORB London 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 93},
-    "ORB_NY_5M": {"title": "ORB New York 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 93},
-    "DONCH_BRK_5M": {"title": "Donchian Breakout 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 82},
-    "JUDAS_LON_5M": {"title": "London Judas Swing 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 91},
+    "TTM_SQZ_5M": {"title": "TTM Squeeze 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 92, "weight": 1.20},
+    "TTM_SQZ_15M": {"title": "TTM Squeeze 15m", "category": "VOL", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "BREAKOUT", "priority": 94, "weight": 1.30},
+    "ORB_LON_5M": {"title": "ORB London 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 93, "weight": 1.20},
+    "ORB_NY_5M": {"title": "ORB New York 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 93, "weight": 1.20},
+    "DONCH_BRK_5M": {"title": "Donchian Breakout 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "BREAKOUT", "priority": 82, "weight": 1.05},
+    "JUDAS_LON_5M": {"title": "London Judas Swing 5m", "category": "VOL", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 91, "weight": 1.20},
 
     # --- DIV (10) ---
-    "DIV_RSI_5M": {"title": "RSI Divergence 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 91},
-    "DIV_RSI_15M": {"title": "RSI Divergence 15m", "category": "DIV", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "PA", "priority": 94},
-    "DIV_MACD_5M": {"title": "MACD Divergence 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 90},
-    "DIV_MACD_15M": {"title": "MACD Divergence 15m", "category": "DIV", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "PA", "priority": 93},
-    "AO_TWIN_5M": {"title": "AO Twin Peaks 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 87},
-    "AO_ZERO_3M": {"title": "AO Zero Cross 3m", "category": "DIV", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "TREND", "priority": 80},
-    "CCI_WPR_5M": {"title": "CCI + Williams %R 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 87},
-    "CCI_WPR_3M": {"title": "CCI + Williams %R 3m", "category": "DIV", "tf": "3m", "tf_min": 3, "exp": 6, "htf": None, "regime": "RANGE", "priority": 79},
-    "DEM_BB_5M": {"title": "DeMarker + BB 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86},
-    "WT_CROSS_5M": {"title": "WaveTrend Cross 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 88},
+    "DIV_RSI_5M": {"title": "RSI Divergence 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 91, "weight": 1.20},
+    "DIV_RSI_15M": {"title": "RSI Divergence 15m", "category": "DIV", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "PA", "priority": 94, "weight": 1.30},
+    "DIV_MACD_5M": {"title": "MACD Divergence 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 90, "weight": 1.15},
+    "DIV_MACD_15M": {"title": "MACD Divergence 15m", "category": "DIV", "tf": "15m", "tf_min": 15, "exp": 30, "htf": None, "regime": "PA", "priority": 93, "weight": 1.25},
+    "AO_TWIN_5M": {"title": "AO Twin Peaks 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 87, "weight": 1.10},
+    "AO_ZERO_3M": {"title": "AO Zero Cross 3m", "category": "DIV", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "TREND", "priority": 80, "weight": 0.95},
+    "CCI_WPR_5M": {"title": "CCI + Williams %R 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 87, "weight": 1.10},
+    "CCI_WPR_3M": {"title": "CCI + Williams %R 3m", "category": "DIV", "tf": "3m", "tf_min": 3, "exp": 6, "htf": None, "regime": "RANGE", "priority": 79, "weight": 0.95},
+    "DEM_BB_5M": {"title": "DeMarker + BB 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 86, "weight": 1.10},
+    "WT_CROSS_5M": {"title": "WaveTrend Cross 5m", "category": "DIV", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "RANGE", "priority": 88, "weight": 1.15},
 
     # --- SMC (4) ---
-    "LIQ_SWP_3M": {"title": "ICT Liquidity Sweep 3m", "category": "SMC", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "SMC", "priority": 80},
-    "LIQ_SWP_5M": {"title": "ICT Liquidity Sweep 5m", "category": "SMC", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "SMC", "priority": 88},
-    "FVG_IMP_3M": {"title": "ICT Fair Value Gap 3m", "category": "SMC", "tf": "3m", "tf_min": 3, "exp": 9, "htf": 15, "regime": "SMC", "priority": 80},
-    "FVG_IMP_5M": {"title": "ICT Fair Value Gap 5m", "category": "SMC", "tf": "5m", "tf_min": 5, "exp": 15, "htf": 60, "regime": "SMC", "priority": 89},
+    "LIQ_SWP_3M": {"title": "ICT Liquidity Sweep 3m", "category": "SMC", "tf": "3m", "tf_min": 3, "exp": 9, "htf": None, "regime": "SMC", "priority": 80, "weight": 1.00},
+    "LIQ_SWP_5M": {"title": "ICT Liquidity Sweep 5m", "category": "SMC", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "SMC", "priority": 88, "weight": 1.15},
+    "FVG_IMP_3M": {"title": "ICT Fair Value Gap 3m", "category": "SMC", "tf": "3m", "tf_min": 3, "exp": 9, "htf": 15, "regime": "SMC", "priority": 80, "weight": 1.00},
+    "FVG_IMP_5M": {"title": "ICT Fair Value Gap 5m", "category": "SMC", "tf": "5m", "tf_min": 5, "exp": 15, "htf": 60, "regime": "SMC", "priority": 89, "weight": 1.20},
 
     # --- PA (5) ---
-    "PA_PIN_BB_5M": {"title": "PA Pin Bar + BB 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 84},
-    "PA_ENG_SR_5M": {"title": "PA Engulfing S/R 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 85},
-    "PA_FAKEY_5M": {"title": "PA Fakey Trap 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 88},
-    "PA_MHI_1M": {"title": "MHI 1m Minority", "category": "PA", "tf": "1m", "tf_min": 1, "exp": 1, "htf": None, "regime": "RANGE", "priority": 68},
-    "PA_3LS_5M": {"title": "Three Line Strike 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 85},
+    "PA_PIN_BB_5M": {"title": "PA Pin Bar + BB 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 84, "weight": 1.10},
+    "PA_ENG_SR_5M": {"title": "PA Engulfing S/R 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 85, "weight": 1.10},
+    "PA_FAKEY_5M": {"title": "PA Fakey Trap 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 88, "weight": 1.15},
+    "PA_MHI_1M": {"title": "MHI 1m Minority", "category": "PA", "tf": "1m", "tf_min": 1, "exp": 1, "htf": None, "regime": "RANGE", "priority": 68, "weight": 0.80},
+    "PA_3LS_5M": {"title": "Three Line Strike 5m", "category": "PA", "tf": "5m", "tf_min": 5, "exp": 15, "htf": None, "regime": "PA", "priority": 85, "weight": 1.10},
 }
 
 ALL_STRATEGY_KEYS = list(STRATEGIES_META.keys())
@@ -114,6 +125,143 @@ def get_strategy_expiration(cand: dict) -> int:
         return int(cand["suggested_exp"])
     meta = STRATEGIES_META.get(cand.get("strategy", ""))
     return int(meta["exp"]) if meta else 15
+
+
+def get_candidate_weight(cand: dict, strategy_weights: dict | None = None) -> float:
+    strat = cand.get("strategy", "")
+    if strategy_weights and strat in strategy_weights:
+        base_w = float(strategy_weights[strat])
+    elif "weight" in cand and cand["weight"] is not None:
+        base_w = float(cand["weight"])
+    else:
+        base_w = float(STRATEGIES_META.get(strat, {}).get("weight", 1.0))
+    if cand.get("confirmations", 0) > 0:
+        base_w += 0.20
+    return base_w
+
+
+def calculate_dynamic_expiration(candidates: list[dict], expiry_mode: str = "DYN", strategy_weights: dict | None = None) -> int:
+    """
+    Розраховує 'Золоту середину' часу експірації як зважене середнє між
+    власною експірацією кожної стратегії та 3*TF, скориговане на волатильність (vol_ratio).
+    """
+    if not candidates:
+        return 15
+    if str(expiry_mode).upper() == "FIX":
+        return get_strategy_expiration(candidates[0])
+
+    if len(candidates) == 1 and int(candidates[0].get("suggested_exp", 15)) == 1 and int(candidates[0].get("tf_minutes", 5)) == 1:
+        return 1
+
+    vals = []
+    weights = []
+    for c in candidates:
+        base_exp = int(c.get("suggested_exp") or STRATEGIES_META.get(c.get("strategy", ""), {}).get("exp", 15))
+        tf_min = int(c.get("tf_minutes") or STRATEGIES_META.get(c.get("strategy", ""), {}).get("tf_min", 5))
+        golden = (base_exp + tf_min * 3.0) / 2.0
+        vr = float(c.get("vol_ratio") or 1.0)
+        if vr > 1.3:
+            golden *= 0.8
+        elif vr < 0.7:
+            golden *= 1.2
+        w = get_candidate_weight(c, strategy_weights)
+        vals.append(golden * w)
+        weights.append(w)
+
+    res = int(round(sum(vals) / max(sum(weights), 1e-9)))
+    return max(3, min(res, 60))
+
+
+def resolve_confluence(
+    candidates: list[dict],
+    conflict_mode: str = "CONC",
+    threshold: float = 1.0,
+    expiry_mode: str = "DYN",
+    strategy_weights: dict | None = None,
+) -> tuple[list[dict], str]:
+    """
+    Усуває суперечливі CALL/PUT сигнали по одній парі та оцінює зважений консенсус.
+    Повертає (відібрані кандидати, текстовий статус).
+    """
+    if not candidates:
+        return [], "Немає вхідних умов від стратегій"
+
+    mode = str(conflict_mode or "CONC").upper()
+    exp_mode = str(expiry_mode or "DYN").upper()
+    th = float(threshold or 1.0)
+
+    if mode == "IND":
+        out = []
+        for c in candidates:
+            c2 = dict(c)
+            if exp_mode == "DYN":
+                c2["suggested_exp"] = calculate_dynamic_expiration([c2], "DYN", strategy_weights)
+                c2["exp_mode"] = "DYN"
+            else:
+                c2["exp_mode"] = "FIX"
+            out.append(c2)
+        return out, "OK"
+
+    calls = [c for c in candidates if c.get("signal") == "CALL"]
+    puts = [c for c in candidates if c.get("signal") == "PUT"]
+
+    call_score = sum(get_candidate_weight(c, strategy_weights) for c in calls)
+    put_score = sum(get_candidate_weight(c, strategy_weights) for c in puts)
+    net = call_score - put_score
+
+    if calls and puts and (abs(net) < 1e-9 or (len(calls) == len(puts) and abs(net) < 0.35)):
+        return [], f"Конфлікт/нічия: {len(calls)} CALL ({call_score:.1f}) vs {len(puts)} PUT ({put_score:.1f})"
+
+    if abs(net) < th:
+        return [], f"Слабка конфлюентність: |{net:+.2f}| < порогу {th:.2f} ({len(calls)} CALL / {len(puts)} PUT)"
+
+    win_dir = "CALL" if net > 0 else "PUT"
+    winners = calls if net > 0 else puts
+    losers = puts if net > 0 else calls
+
+    winners = sorted(
+        winners,
+        key=lambda c: (
+            get_candidate_weight(c, strategy_weights),
+            c.get("priority", STRATEGIES_META.get(c.get("strategy", ""), {}).get("priority", 50)),
+        ),
+        reverse=True,
+    )
+
+    if mode == "MAJ":
+        out = []
+        for c in winners:
+            c2 = dict(c)
+            if exp_mode == "DYN":
+                c2["suggested_exp"] = calculate_dynamic_expiration([c2], "DYN", strategy_weights)
+                c2["exp_mode"] = "DYN"
+            else:
+                c2["exp_mode"] = "FIX"
+            c2["call_votes"] = len(calls)
+            c2["put_votes"] = len(puts)
+            c2["confluence_score"] = round(abs(net), 2)
+            out.append(c2)
+        return out, "OK"
+
+    # CONC: об'єднуємо переможців у єдину авторитетну картку
+    primary = dict(winners[0])
+    primary["signal"] = win_dir
+    primary["confluence_score"] = round(abs(net), 2)
+    primary["net_score"] = round(net, 2)
+    primary["call_votes"] = len(calls)
+    primary["put_votes"] = len(puts)
+    primary["call_score"] = round(call_score, 2)
+    primary["put_score"] = round(put_score, 2)
+    primary["agreeing_strategies"] = [c["strategy"] for c in winners]
+    primary["opposing_strategies"] = [c["strategy"] for c in losers]
+    primary["confirmations"] = len(winners)
+    if exp_mode == "DYN":
+        primary["suggested_exp"] = calculate_dynamic_expiration(winners, "DYN", strategy_weights)
+        primary["exp_mode"] = "DYN"
+    else:
+        primary["suggested_exp"] = get_strategy_expiration(primary)
+        primary["exp_mode"] = "FIX"
+    return [primary], "OK"
 
 
 def load_all_strategy_config(path) -> dict:
@@ -593,10 +741,6 @@ def _non_repainting_divergence(
     left: int = 5,
     right: int = 2,
 ) -> np.ndarray:
-    """
-    Строго каузальна (без перемальовування) дивергенція:
-    півот на барі p = i - right підтверджується лише на закритті бара i.
-    """
     h, l, o, c = ind["h"], ind["l"], ind["o"], ind["c"]
     n = len(c)
     out = np.zeros(n, dtype=np.int8)
@@ -1144,7 +1288,13 @@ def generate_all_candidates(
             status,
             pair_enabled=pair_enabled,
         )
-        candidates.extend(rev_cands)
+        for rc in rev_cands:
+            meta = STRATEGIES_META.get(rc["strategy"], {})
+            rc.setdefault("weight", meta.get("weight", 1.3))
+            rc.setdefault("priority", meta.get("priority", 98))
+            rc.setdefault("category", "REV")
+            rc.setdefault("vol_ratio", 1.0)
+            candidates.append(rc)
 
     closed_by_tf = {}
     ind_by_tf = {}
@@ -1223,6 +1373,7 @@ def generate_all_candidates(
             "adx": adx_val,
             "chop": chop_val,
             "vol_ratio": vr_val,
+            "weight": meta.get("weight", 1.0),
             "bar_id": f"{pair_name}|{tf_name}|{closed.index[-1]}",
             "bar_end": bar_end,
             "bar_age_sec": age,
@@ -1246,39 +1397,71 @@ def generate_all_candidates(
     return candidates
 
 
-def diagnose_pair_market(pair_name: str, frames: dict[str, pd.DataFrame], now, strategies_status: dict, pair_enabled=None) -> dict:
+def diagnose_pair_market(
+    pair_name: str,
+    frames: dict[str, pd.DataFrame],
+    now,
+    strategies_status: dict,
+    pair_enabled=None,
+    mute_check=None,
+) -> dict:
     now_ts = pd.Timestamp(now)
     if now_ts.tzinfo is not None:
         now_ts = now_ts.tz_convert("UTC").tz_localize(None)
+
     df_5m = _normalize_frame(frames.get("5m"))
     closed_5m = df_5m.loc[df_5m.index + pd.Timedelta(minutes=5) <= now_ts] if not df_5m.empty else pd.DataFrame()
-    chop = adx = rsi14 = None
+    chop = adx = rsi14 = price = vol_ratio = None
     sess = session_name(now_ts)
     if len(closed_5m) >= 60:
         ind = compute_base_indicators(closed_5m)
         chop = float(ind["chop"][-1])
         adx = float(ind["adx"][-1])
         rsi14 = float(ind["rsi14"][-1])
+        vol_ratio = float(ind["vol_ratio"][-1])
+        price = float(closed_5m["close"].iloc[-1])
         sess = session_name(closed_5m.index[-1] + pd.Timedelta(minutes=5))
 
-    checked = off_global = off_pair = off_session = 0
+    def _trend_label(df_htf: pd.DataFrame | None) -> str:
+        df_h = _normalize_frame(df_htf)
+        if df_h.empty or len(df_h) < 55:
+            return "—"
+        cl = df_h["close"].astype(float)
+        e21 = float(cl.ewm(span=21, adjust=False).mean().iloc[-1])
+        e50 = float(cl.ewm(span=50, adjust=False).mean().iloc[-1])
+        last_c = float(cl.iloc[-1])
+        if e21 > e50 and last_c > e50:
+            return "🟢 Висхідний"
+        if e21 < e50 and last_c < e50:
+            return "🔴 Низхідний"
+        return "🟡 Боковий"
+
+    checked = off_global = off_pair = off_session = muted = 0
     for key in STRATEGIES_META:
         if not strategies_status.get(key, False):
             off_global += 1
         elif pair_enabled is not None and not pair_enabled(pair_name, key):
             off_pair += 1
+        elif mute_check is not None and mute_check(key)[0]:
+            muted += 1
         elif strategies_status.get("session_filter", False) and not session_allowed(key, now_ts):
             off_session += 1
         else:
             checked += 1
+
     return {
         "pair": pair_name,
         "session": sess,
+        "price": price,
         "chop": chop,
         "adx": adx,
         "rsi14": rsi14,
+        "vol_ratio": vol_ratio,
+        "trend_15m": _trend_label(frames.get("15m")),
+        "trend_60m": _trend_label(frames.get("60m")),
         "checked": checked,
         "off_global": off_global,
         "off_pair": off_pair,
         "off_session": off_session,
+        "muted": muted,
     }
