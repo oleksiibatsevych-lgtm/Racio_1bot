@@ -21,6 +21,7 @@ from reversion_engine import (
 )
 from strategy_engine import (
     STRATEGIES_META,
+    calculate_dynamic_expiration,
     compute_base_indicators,
     evaluate_strategy_series,
     htf_alignment,
@@ -66,7 +67,6 @@ def _record_trade(pair_name, cand, now, prices, trades, gate, open_reversions):
 
 
 def simulate_reversion_pair(pair_name, df_5m, strategies_status=None, start=None, end=None, pair_enabled=None):
-    """Повна 5m-історія для прогріву; точні open входу/експірації, без перекриття пресету."""
     settings = load_strategy_settings() if strategies_status is None else strategies_status
     indicators = reversion_indicators(df_5m)
     trades, open_reversions = [], {}
@@ -85,23 +85,24 @@ def simulate_reversion_pair(pair_name, df_5m, strategies_status=None, start=None
     return trades
 
 
-def summarize(trades, title):
+def summarize(trades, title, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD):
     if not trades:
         return f"{title}\nСигналів не знайдено."
+    be = 1.0 / (1.0 + float(payout))
     df = pd.DataFrame(trades)
     n, w = len(df), int(df["win"].sum())
     lo, hi = wilson_bounds(w, n)
-    ev = (w / n) * PAYOUT - (1.0 - w / n)
+    ev = (w / n) * float(payout) - (1.0 - w / n)
     lines = [
         title,
         f"🎯 Угод: <b>{n}</b> | ✅ {w} | 🏆 Вінрейт: <b>{w / n * 100:.1f}%</b>",
-        f"📐 95% інтервал: {lo * 100:.1f}–{hi * 100:.1f}% | Беззбиток (виплата {int(PAYOUT * 100)}%): {BREAK_EVEN * 100:.1f}%",
+        f"📐 95% інтервал: {lo * 100:.1f}–{hi * 100:.1f}% | Беззбиток (виплата {int(float(payout) * 100)}%): {be * 100:.1f}%",
         f"💰 Очікування на угоду: <b>{ev * 100:+.1f}%</b> від ставки\n",
         "📋 <b>По таймфреймах:</b>",
     ]
     for tf, g in df.groupby("tf"):
         gw, gn = int(g["win"].sum()), len(g)
-        ico = "🟢" if gw / gn >= BREAK_EVEN else ("🟡" if gw / gn >= AUTO_DISABLE_WR_THRESHOLD else "🔴")
+        ico = "🟢" if gw / gn >= be else ("🟡" if gw / gn >= float(wr_threshold) else "🔴")
         lines.append(f"{ico} {tf}: {gw}/{gn} ({gw / gn * 100:.1f}%)")
     lines.append("\n📋 <b>По стратегіях:</b>")
     stats = []
@@ -110,7 +111,7 @@ def summarize(trades, title):
         stats.append((gw / gn, gn, gw, st))
     stats.sort(reverse=True)
     for wr, gn, gw, st in stats:
-        ico = "🟢" if wr >= BREAK_EVEN else ("🟡" if wr >= AUTO_DISABLE_WR_THRESHOLD else "🔴")
+        ico = "🟢" if wr >= be else ("🟡" if wr >= float(wr_threshold) else "🔴")
         lines.append(f"{ico} {html.escape(st)}: {gw}/{gn} ({wr * 100:.1f}%)")
     return "\n".join(lines)
 
@@ -184,7 +185,7 @@ def load_frames_for_backtest(pair_name):
     )
 
 
-def simulate_strategy_suite(pair_name, frames, strategies_status=None, pair_enabled=None, include_all_strategies=False):
+def simulate_strategy_suite(pair_name, frames, strategies_status=None, pair_enabled=None, include_all_strategies=False, expiry_mode="FIX"):
     settings = dict(load_full_strategy_settings() if strategies_status is None else strategies_status)
     use_session = bool(settings.get("session_filter", False))
     use_regime = bool(settings.get("regime_filter", True))
@@ -233,8 +234,7 @@ def simulate_strategy_suite(pair_name, frames, strategies_status=None, pair_enab
             htf_ctx = htf_cache[htf_key]
 
         sig_series = evaluate_strategy_series(df_tf, strategy_key, ind=ind, htf_ctx=htf_ctx, regime_filter=use_regime)
-        exp = int(meta["exp"])
-        price_ref = df_1m if (df_1m is not None and not df_1m.empty and exp % tf_min != 0) else df_tf
+        base_exp = int(meta["exp"])
         next_allowed = df_tf.index[0]
 
         for i in range(min_bars - 1, len(df_tf)):
@@ -246,6 +246,19 @@ def simulate_strategy_suite(pair_name, frames, strategies_status=None, pair_enab
                 continue
             if use_session and not session_allowed(strategy_key, entry_time):
                 continue
+
+            if str(expiry_mode).upper() == "DYN":
+                vr = float(ind["vol_ratio"][i]) if not pd.isna(ind["vol_ratio"][i]) else 1.0
+                exp = calculate_dynamic_expiration([{
+                    "strategy": strategy_key,
+                    "suggested_exp": base_exp,
+                    "tf_minutes": tf_min,
+                    "vol_ratio": vr,
+                }], "DYN")
+            else:
+                exp = base_exp
+
+            price_ref = df_1m if (df_1m is not None and not df_1m.empty and exp % tf_min != 0) else df_tf
             exit_time = entry_time + timedelta(minutes=exp)
             if entry_time not in price_ref.index or exit_time not in price_ref.index:
                 continue
@@ -285,16 +298,17 @@ def compute_pair_strategy_stats(trades: list[dict]) -> list[dict]:
     return rows
 
 
-def format_pair_strategy_report(trades: list[dict], title: str) -> str:
-    base = summarize(trades, title)
+def format_pair_strategy_report(trades: list[dict], title: str, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD) -> str:
+    base = summarize(trades, title, payout=payout, wr_threshold=wr_threshold)
     if not trades:
         return base
+    be = 1.0 / (1.0 + float(payout))
     df = pd.DataFrame(trades)
     lines = [base, "\n🔎 <b>Детально: Пара × Стратегія</b>"]
     for pair in sorted(df["pair"].unique()):
         pdf = df[df["pair"] == pair]
         pw, pn = int(pdf["win"].sum()), len(pdf)
-        p_ico = "🟢" if pw / pn >= BREAK_EVEN else ("🟡" if pw / pn >= AUTO_DISABLE_WR_THRESHOLD else "🔴")
+        p_ico = "🟢" if pw / pn >= be else ("🟡" if pw / pn >= float(wr_threshold) else "🔴")
         lines.append(f"\n{p_ico} <b>{html.escape(pair)}</b> ({pw / pn * 100:.1f}% · {pw}/{pn})")
         st_rows = []
         for st, grp in pdf.groupby("strategy"):
@@ -302,15 +316,15 @@ def format_pair_strategy_report(trades: list[dict], title: str) -> str:
             st_rows.append((sw / sn, sn, sw, st))
         st_rows.sort(reverse=True)
         for wr, sn, sw, st in st_rows:
-            ico = "🟢" if wr >= BREAK_EVEN else ("🟡" if wr >= AUTO_DISABLE_WR_THRESHOLD else "🔴")
+            ico = "🟢" if wr >= be else ("🟡" if wr >= float(wr_threshold) else "🔴")
             lines.append(f"  {ico} <code>{html.escape(st)}</code>: {wr * 100:.1f}% ({sw}/{sn})")
     return "\n".join(lines)
 
 
-def build_backtest_csv(stats_rows: list[dict]) -> bytes:
+def build_backtest_csv(stats_rows: list[dict], wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Pair", "Strategy", "Category", "TF", "ExpiryMin", "Wins", "Losses", "Total", "WinRatePct", "Below49"])
+    writer.writerow(["Pair", "Strategy", "Category", "TF", "ExpiryMin", "Wins", "Losses", "Total", "WinRatePct", "BelowThreshold"])
     for r in stats_rows:
         meta = STRATEGIES_META.get(r["strategy"], {})
         wr_pct = round(r["win_rate"] * 100.0, 2)
@@ -324,7 +338,7 @@ def build_backtest_csv(stats_rows: list[dict]) -> bytes:
             r["losses"],
             r["total"],
             wr_pct,
-            "YES" if r["win_rate"] < AUTO_DISABLE_WR_THRESHOLD else "NO",
+            "YES" if r["win_rate"] < float(wr_threshold) else "NO",
         ])
     return buf.getvalue().encode("utf-8-sig")
 
@@ -364,7 +378,7 @@ def run_backtest_all_detailed(period="60d", strategies_status=None):
     ]
 
 
-def run_full_backtest_with_stats(pair_name: str, strategies_status=None, include_all_strategies: bool = True) -> tuple[str, list[dict]]:
+def run_full_backtest_with_stats(pair_name: str, strategies_status=None, include_all_strategies: bool = True, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD, expiry_mode: str = "FIX") -> tuple[str, list[dict]]:
     frames = load_frames_for_backtest(pair_name)
     trades = simulate_strategy_suite(
         pair_name,
@@ -372,17 +386,20 @@ def run_full_backtest_with_stats(pair_name: str, strategies_status=None, include
         strategies_status,
         pair_enabled=database.get_pair_strategy_status,
         include_all_strategies=include_all_strategies,
+        expiry_mode=expiry_mode,
     )
     stats_rows = compute_pair_strategy_stats(trades)
-    mode_lbl = "усі стратегії" if include_all_strategies else "активні стратегії"
+    mode_lbl = "усі 57 стратегій" if include_all_strategies else "активні стратегії"
     report = format_pair_strategy_report(
         trades,
-        f"📊 <b>{html.escape(pair_name)} · Бектест ({mode_lbl} · 1m/3m: 7д, 5m/15m: 60д)</b>",
+        f"📊 <b>{html.escape(pair_name)} · Бектест ({mode_lbl} · {expiry_mode} · 1m/3m: 7д, 5m/15m: 60д)</b>",
+        payout=payout,
+        wr_threshold=wr_threshold,
     ) + "\n<i>Research only: без новин і прослизання.</i>"
     return report, stats_rows
 
 
-def run_full_backtest_all_with_stats(strategies_status=None, include_all_strategies: bool = True) -> tuple[str, list[dict]]:
+def run_full_backtest_all_with_stats(strategies_status=None, include_all_strategies: bool = True, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD, expiry_mode: str = "FIX") -> tuple[str, list[dict]]:
     b1 = _download_yf_batch("1m", "7d")
     b5 = _download_yf_batch("5m", "60d")
     b15 = _download_yf_batch("15m", "60d")
@@ -397,13 +414,16 @@ def run_full_backtest_all_with_stats(strategies_status=None, include_all_strateg
                 strategies_status,
                 pair_enabled=database.get_pair_strategy_status,
                 include_all_strategies=include_all_strategies,
+                expiry_mode=expiry_mode,
             )
         )
     stats_rows = compute_pair_strategy_stats(all_trades)
-    mode_lbl = "усі стратегії" if include_all_strategies else "активні стратегії"
+    mode_lbl = "усі 57 стратегій" if include_all_strategies else "активні стратегії"
     report = format_pair_strategy_report(
         all_trades,
-        f"🌐 <b>21 пара · Бектест ({mode_lbl} · 1m/3m: 7д, 5m/15m: 60д)</b>",
+        f"🌐 <b>21 пара · Бектест ({mode_lbl} · {expiry_mode} · 1m/3m: 7д, 5m/15m: 60д)</b>",
+        payout=payout,
+        wr_threshold=wr_threshold,
     ) + "\n<i>Research only: без новин і прослизання.</i>"
     return report, stats_rows
 
