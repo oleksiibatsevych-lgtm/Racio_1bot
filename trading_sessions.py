@@ -7,6 +7,13 @@ KYIV = ZoneInfo("Europe/Kyiv")
 LONDON = ZoneInfo("Europe/London")
 NEW_YORK = ZoneInfo("America/New_York")
 
+SUPPORTED_TIMEZONES = {
+    "Europe/Kyiv": ("Київ", KYIV),
+    "UTC": ("UTC", UTC),
+    "Europe/London": ("Лондон", LONDON),
+    "America/New_York": ("Нью-Йорк", NEW_YORK),
+}
+
 ALLOWED_SESSIONS = {
     "REV_RSI14": {"London", "Overlap", "Other"},
     "REV_BB3": {"NY", "Other"},
@@ -77,6 +84,10 @@ STRATEGY_SESSIONS = {
 
 def utc_datetime(value):
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def get_tz_info(tz_name: str = "Europe/Kyiv"):
+    return SUPPORTED_TIMEZONES.get(tz_name, ("Київ", KYIV))
 
 
 def london_time(value):
