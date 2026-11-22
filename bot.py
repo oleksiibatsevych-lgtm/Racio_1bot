@@ -22,6 +22,8 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, Filters, MessageH
 
 load_dotenv()
 import database
+import db_reset
+import sr_levels
 import tick_candles
 from ai_advisor import ai_advisor_instance
 from backtest import (
@@ -33,23 +35,25 @@ from backtest import (
 )
 from calendar_filter import get_upcoming_news, is_high_impact_news_time
 from config import (
+    ALLOW_OPEN_ADMIN,
     AUTO_DISABLE_WR_THRESHOLD,
+    BIQUOTE_ENABLED,
     CONFLUENCE_MODE,
     CONFLUENCE_THRESHOLD,
-    DEFAULT_DEPOSIT,
-    DEFAULT_RISK_PCT,
     DEFAULT_TIMEZONE,
     DISABLE_FINNHUB_CANDLES,
     EXPIRY_MODE,
     FINNHUB_API_KEY,
     FINNHUB_TOKEN,
+    MAX_ACTIVE_PER_CURRENCY,
     NEWS_BLACKOUT_MINS,
     PAIRS_MAP,
     PAYOUT,
     YAHOO_PAIRS_MAP,
     normalize_pair_name,
 )
-from finnhub_ws import get_live_price, get_live_quote, start_finnhub_ws
+from finnhub_ws import get_live_price, get_live_quote, start_finnhub_ws, stop_finnhub_ws
+from market_data import fetch_biquote_ohlc, fetch_biquote_quote
 from quality_gate import SegmentFilter, SignalGate
 from reversion_engine import PRESETS, ReversionGuard
 from strategy_engine import (
@@ -71,6 +75,7 @@ from telegram_views import (
     active_text,
     auto_disabled_text,
     history_text,
+    localized_session_name,
     pair_radar_text,
     settlement_text,
     signal_card,
@@ -83,35 +88,11 @@ from trading_sessions import SUPPORTED_TIMEZONES, next_daily_report, period_star
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-ADMIN_IDS = {int(v.strip()) for v in os.environ.get("ADMIN_IDS", "").split(",") if v.strip()}
+ADMIN_IDS = {int(v.strip()) for v in os.environ.get("ADMIN_IDS", "").split(",") if v.strip().lstrip("-").isdigit()}
 STRATEGIES_CONFIG_FILE = Path(__file__).with_name("strategies_config.json")
+_CFG_LOCK = threading.RLock()
 strategies_status = load_all_strategy_config(STRATEGIES_CONFIG_FILE)
 AUTO_SCAN_CHATS = set()
-signal_gate = SignalGate()
-reversion_guard = ReversionGuard()
-segment_filter = SegmentFilter(database, break_even=0.54, min_trades=40)
-bot = None
-LAB_PROC = None
-
-STRATEGIES_15M = tuple(k for k, m in STRATEGIES_META.items() if m["tf"] == "15m" or m.get("htf") == 15)
-STRATEGIES_60M = tuple(k for k, m in STRATEGIES_META.items() if m.get("htf") == 60)
-
-_DATA_LOCK = threading.Lock()
-_FINNHUB_CANDLE_DISABLED_UNTIL = 0.0
-_YAHOO_CACHE = {}
-_MERGED_1M_CACHE = {}
-_YF_TTL_BY_INTERVAL = {"1m": 45, "5m": 120, "15m": 600, "60m": 1800, "1h": 1800}
-
-
-def require_admin(update):
-    if not ADMIN_IDS or update.effective_user.id in ADMIN_IDS:
-        return True
-    update.effective_message.reply_text("⛔ Ця дія доступна лише адміністратору.")
-    return False
-
-
-def save_strategies_config(cfg):
-    STRATEGIES_CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _get_runtime_settings():
@@ -123,8 +104,6 @@ def _get_runtime_settings():
         "news_blackout_mins": int(NEWS_BLACKOUT_MINS),
         "payout": float(PAYOUT),
         "timezone": str(DEFAULT_TIMEZONE),
-        "risk_deposit": float(DEFAULT_DEPOSIT),
-        "risk_pct": float(DEFAULT_RISK_PCT),
     }
     try:
         raw = database.get_all_bot_settings()
@@ -144,13 +123,55 @@ def _get_runtime_settings():
             defaults["payout"] = float(raw["payout"])
         if "timezone" in raw and raw["timezone"] in SUPPORTED_TIMEZONES:
             defaults["timezone"] = raw["timezone"]
-        if "risk_deposit" in raw:
-            defaults["risk_deposit"] = float(raw["risk_deposit"])
-        if "risk_pct" in raw:
-            defaults["risk_pct"] = float(raw["risk_pct"])
     except Exception:
         pass
     return defaults
+
+
+signal_gate = SignalGate(max_ccy_exposure=MAX_ACTIVE_PER_CURRENCY)
+reversion_guard = ReversionGuard()
+segment_filter = SegmentFilter(
+    database,
+    break_even=lambda: 1.0 / (1.0 + _get_runtime_settings()["payout"]),
+    min_trades=40,
+)
+bot = None
+LAB_PROC = None
+
+STRATEGIES_15M = tuple(k for k, m in STRATEGIES_META.items() if m["tf"] == "15m" or m.get("htf") == 15)
+STRATEGIES_60M = tuple(k for k, m in STRATEGIES_META.items() if m.get("htf") == 60)
+
+_DATA_LOCK = threading.Lock()
+_FINNHUB_CANDLE_DISABLED_UNTIL = 0.0
+_YAHOO_CACHE = {}
+_MERGED_1M_CACHE = {}
+_YF_TTL_BY_INTERVAL = {"1m": 45, "5m": 120, "15m": 600, "60m": 1800, "1h": 1800}
+
+
+def require_admin(update):
+    user = getattr(update, "effective_user", None)
+    uid = getattr(user, "id", None)
+    if ADMIN_IDS:
+        if uid in ADMIN_IDS:
+            return True
+    elif ALLOW_OPEN_ADMIN:
+        return True
+    cq = getattr(update, "callback_query", None)
+    if cq is not None and getattr(cq, "data", None):
+        try:
+            cq.answer("⛔ Ця дія доступна лише адміністратору.", show_alert=True)
+        except Exception:
+            pass
+    elif getattr(update, "effective_message", None):
+        update.effective_message.reply_text("⛔ Ця дія доступна лише адміністратору.")
+    return False
+
+
+def save_strategies_config(cfg):
+    with _CFG_LOCK:
+        tmp = STRATEGIES_CONFIG_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, STRATEGIES_CONFIG_FILE)
 
 
 def _safe_edit(query, text, parse_mode=None, reply_markup=None):
@@ -262,6 +283,15 @@ def fetch_yahoo_fallback(ticker, interval="1m", range_period="5d"):
             return cleaned.copy()
     except Exception as e:
         logger.warning(f"Yahoo fallback failed for {ticker} ({interval}): {e}")
+
+    if BIQUOTE_ENABLED:
+        pair_clean = normalize_pair_name(ticker)
+        if pair_clean:
+            bq = fetch_biquote_ohlc(pair_clean, interval=interval, limit=500)
+            if not bq.empty:
+                with _DATA_LOCK:
+                    _YAHOO_CACHE[cache_key] = (time.time(), bq)
+                return bq.copy()
     return pd.DataFrame()
 
 
@@ -330,6 +360,10 @@ def get_exit_price(ticker, expires_at, name=""):
         df_yf = fetch_yahoo_fallback(yahoo_ticker, interval="1m", range_period="1d")
         if df_yf is not None and not df_yf.empty and minute in df_yf.index and minute + pd.Timedelta(minutes=1) <= now:
             return float(df_yf.loc[minute, "close"])
+    if BIQUOTE_ENABLED and abs((now - expires_at).total_seconds()) <= 45:
+        bq_p = fetch_biquote_quote(name or ticker, allow_stale=False)
+        if bq_p:
+            return float(bq_p)
     return None
 
 
@@ -342,6 +376,18 @@ def schedule_signal_timer(sig_id, timestamp_val, expiration_mins):
         timer.start()
     except Exception as e:
         logger.exception(f"Помилка планування таймера: {e}")
+
+
+def _recover_pending_timers():
+    try:
+        for row in database.get_pending_signals():
+            exp_dt = parse_dt(row["expires_at"]) if row.get("expires_at") else parse_dt(row["timestamp_str"]) + timedelta(minutes=row["expiration_mins"])
+            delay = max(1, (exp_dt - get_utc_now()).total_seconds())
+            timer = threading.Timer(delay, process_signal_expiration, args=[row["id"]])
+            timer.daemon = True
+            timer.start()
+    except Exception as e:
+        logger.error(f"Помилка відновлення таймерів PENDING: {e}")
 
 
 def start_background_checker():
@@ -398,17 +444,18 @@ def _sync_auto_disable_events(events, notify_chat_id=None, wr_threshold=None):
     lines = []
 
     if disabled_global:
-        changed = dict(strategies_status)
-        for ev in disabled_global:
-            s_key = ev["strategy"]
-            if s_key in changed:
-                changed[s_key] = False
-            lines.append(
-                f"⛔ Глобально вимкнено <code>{html.escape(s_key)}</code>: "
-                f"{ev['wr'] * 100:.1f}% ({ev['wins']}/{ev['total']}) &lt; {th * 100:.0f}%"
-            )
-        save_strategies_config(changed)
-        strategies_status.update(changed)
+        with _CFG_LOCK:
+            changed = dict(strategies_status)
+            for ev in disabled_global:
+                s_key = ev["strategy"]
+                if s_key in changed:
+                    changed[s_key] = False
+                lines.append(
+                    f"⛔ Глобально вимкнено <code>{html.escape(s_key)}</code>: "
+                    f"{ev['wr'] * 100:.1f}% ({ev['wins']}/{ev['total']}) &lt; {th * 100:.0f}%"
+                )
+            save_strategies_config(changed)
+            strategies_status.update(changed)
 
     for ev in disabled_pair:
         lines.append(
@@ -457,9 +504,11 @@ def handle_lab_run_command(update, context):
     base = os.path.dirname(os.path.abspath(__file__))
     try:
         log = open(os.path.join(base, "lab.log"), "w")
-        LAB_PROC = subprocess.Popen(["nice", "-n", "19", sys.executable, "lab.py", "--download"],
-                                    cwd=base, stdout=log, stderr=subprocess.STDOUT)
-        update.message.reply_text("🧪 Лабораторію запущено у фоні (зазвичай 2–5 хв). Коли завершиться, надішліть /lab")
+        LAB_PROC = subprocess.Popen(
+            ["nice", "-n", "19", sys.executable, "lab.py", "--download", "--source", "dukascopy", "--days", "90", "--prune-config", "strategies_config.json"],
+            cwd=base, stdout=log, stderr=subprocess.STDOUT,
+        )
+        update.message.reply_text("🧪 Лабораторію (Dukascopy 90д) запущено у фоні. Коли завершиться, надішліть /lab")
     except Exception as e:
         update.message.reply_text(f"❌ Не вдалося запустити лабораторію: {e}")
 
@@ -532,15 +581,19 @@ def signal_action_keyboard(strategy_key):
             InlineKeyboardButton("🔕 Пауза 1г", callback_data=f"mute1h|{strategy_key}"),
             InlineKeyboardButton("📊 Стат. стратегії", callback_data=f"st_stat|{strategy_key}"),
         ],
-        [
-            InlineKeyboardButton("💰 Розрахунок ставки", callback_data="risk|menu"),
-            InlineKeyboardButton("🏠 Меню", callback_data="main_menu"),
-        ],
+        [InlineKeyboardButton("🏠 Меню", callback_data="main_menu")],
     ])
 
 
 def notify_settlement(sig, result, exit_price, pips):
-    report = settlement_text(result, exit_price, pips)
+    report = settlement_text(
+        result,
+        exit_price,
+        pips,
+        pair=sig.get("ticker"),
+        entry_price=sig.get("entry_price"),
+        signal_type=sig.get("signal_type"),
+    )
     markup = None
     if ai_advisor_instance.api_key and result in ("WIN", "LOSS", "NEUTRAL"):
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Розбір закритої угоди", callback_data=f"review|{sig['id']}")]])
@@ -582,13 +635,14 @@ def process_signal_expiration(sig_id):
                 timer.daemon = True
                 timer.start()
                 return
-            database.update_signal_result(sig_id, "NEUTRAL", None, 0, status="VOID")
-            notify_settlement(sig, "VOID", None, 0)
+            database.update_signal_result(sig_id, "NEUTRAL", None, 0.0, status="VOID")
+            notify_settlement(sig, "VOID", None, 0.0)
             return
         entry = float(sig["entry_price"])
         move = exit_price - entry if sig["signal_type"] == "CALL" else entry - exit_price
         result = "NEUTRAL" if exit_price == entry else ("WIN" if move > 0 else "LOSS")
-        pips = int(round(move * (1000 if "JPY" in sig["ticker"] else 100000)))
+        is_jpy = "JPY" in normalize_pair_name(sig["ticker"])
+        pips = round(move * (1000.0 if is_jpy else 100000.0), 1)
         database.update_signal_result(sig_id, result, exit_price, pips)
         notify_settlement(sig, result, exit_price, pips)
         if result in ("WIN", "LOSS"):
@@ -626,6 +680,8 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames=None, aut
         if not ok:
             return False, reason
         live = get_live_price(ticker_finnhub)
+        if not live and BIQUOTE_ENABLED:
+            live = fetch_biquote_quote(pair_name, allow_stale=False)
         if live:
             adverse = cand["current_price"] - live if cand["signal"] == "CALL" else live - cand["current_price"]
             if adverse > 0.5 * cand["atr"]:
@@ -638,8 +694,7 @@ def process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames=None, aut
         rt = _get_runtime_settings()
         entry = float(live or cand["current_price"])
         expiration = get_strategy_expiration(cand)
-        risk_amt = rt["risk_deposit"] * (rt["risk_pct"] / 100.0)
-        text = signal_card(pair_name, cand, entry, now, tz_name=rt["timezone"], risk_amount=risk_amt)
+        text = signal_card(pair_name, cand, entry, now, tz_name=rt["timezone"])
         message = bot.send_message(
             chat_id=chat_id,
             text=text,
@@ -691,7 +746,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
     try:
         rt = _get_runtime_settings()
         if strategies_status.get("news_filter", True):
-            bad_news, reason = is_high_impact_news_time(pair_name, blackout_mins=rt["news_blackout_mins"])
+            bad_news, _reason = is_high_impact_news_time(pair_name, blackout_mins=rt["news_blackout_mins"])
             if bad_news:
                 return False
         yahoo = normalize_yahoo_ticker(ticker_finnhub, pair_name)
@@ -716,7 +771,7 @@ def analyze_single_pair(chat_id, pair_name, ticker_finnhub, auto_mode=False, sta
             candidates = eligible
 
         for cand in candidates:
-            ok, reason = process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames=frames, auto_mode=auto_mode)
+            ok, _reason = process_candidate(chat_id, pair_name, ticker_finnhub, cand, frames=frames, auto_mode=auto_mode)
             if ok:
                 return True
         return False
@@ -761,7 +816,7 @@ def analyze_single_pair_report(chat_id, pair_name, ticker_finnhub):
             if ok:
                 return (
                     f"✅ <b>{html.escape(pair_name)}</b>: сигнал сформовано!\n"
-                    f"<code>{html.escape(cand['strategy'])}</code> · {cand['signal']} · {get_strategy_expiration(cand)} хв"
+                    f"Напрямок: {cand['signal']} · Експірація: <b>{get_strategy_expiration(cand)} ХВ</b>"
                 )
             skipped.append(f"{cand['strategy']}: {reason}")
 
@@ -778,7 +833,7 @@ def analyze_single_pair_report(chat_id, pair_name, ticker_finnhub):
         rsi_s = f"{diag['rsi14']:.1f}" if diag["rsi14"] is not None else "—"
         msg = (
             f"📡 <b>{html.escape(pair_name)}</b>: зараз сигналів немає\n"
-            f"📊 5m режим: CHOP <b>{chop_s}</b> · ADX <b>{adx_s}</b> · RSI14 <b>{rsi_s}</b> · Сесія: {diag['session']}\n"
+            f"📊 5m режим: CHOP <b>{chop_s}</b> · ADX <b>{adx_s}</b> · RSI14 <b>{rsi_s}</b> · Сесія: {localized_session_name(now)}\n"
             f"⚙️ Активних стратегій: <b>{diag['checked']}</b> (глоб.вимк: {diag['off_global']}, пара: {diag['off_pair']}, пауза: {diag.get('muted', 0)}, сесія: {diag['off_session']})"
         )
         if not raw_candidates:
@@ -819,8 +874,8 @@ def inline_main_keyboard(chat_id):
             InlineKeyboardButton("⚙️ Стратегії", callback_data="cat|MAIN"),
         ],
         [
-            InlineKeyboardButton("💰 Ризик-калькулятор", callback_data="risk|menu"),
             InlineKeyboardButton(auto_lbl, callback_data="settings|main"),
+            InlineKeyboardButton("🗑 Скинути БД (GitHub)", callback_data="db_reset_ask"),
         ],
     ])
 
@@ -841,6 +896,15 @@ def clear_stats_confirm_keyboard():
         [
             InlineKeyboardButton("✅ Так, очистити все", callback_data="stats_clear_confirm"),
             InlineKeyboardButton("❌ Скасувати", callback_data="stats|all"),
+        ]
+    ])
+
+
+def db_reset_confirm_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔥 ТАК, ОБНУЛИТИ БД + КОНФІГ", callback_data="db_reset_confirm"),
+            InlineKeyboardButton("❌ Скасувати", callback_data="settings|main"),
         ]
     ])
 
@@ -912,14 +976,12 @@ def settings_menu_keyboard(rt=None):
         [InlineKeyboardButton(f"🧩 Конфлюентність: {rt['conflict_mode']} · ≥ {rt['confluence_threshold']:.1f}", callback_data="settings|confluence")],
         [InlineKeyboardButton(f"⏱ Експірація: {rt['expiry_mode']} (Золота сер. / Фікс)", callback_data="settings|expiry")],
         [InlineKeyboardButton(f"📰 Фільтри / Новини ({rt['news_blackout_mins']}хв) · Випл. {pay_pct}%", callback_data="settings|filters")],
-        [
-            InlineKeyboardButton(f"🕒 Пояс: {tz_lbl}", callback_data="settings|tz"),
-            InlineKeyboardButton(f"💰 Ризик: ${rt['risk_deposit']:.0f} ({rt['risk_pct']:.0f}%)", callback_data="settings|risk"),
-        ],
+        [InlineKeyboardButton(f"🕒 Пояс: {tz_lbl}", callback_data="settings|tz")],
         [
             InlineKeyboardButton("⚙️ Категорії стратегій", callback_data="cat|MAIN"),
             InlineKeyboardButton("🎯 По парах", callback_data="pairs"),
         ],
+        [InlineKeyboardButton("🗑 Повне скидання БД (GitHub)", callback_data="db_reset_ask")],
         [InlineKeyboardButton("🏠 Головне меню", callback_data="main_menu")],
     ])
 
@@ -1009,27 +1071,6 @@ def tz_keyboard(rt=None):
         buttons.append([InlineKeyboardButton(f"{mark}{label} ({k})", callback_data=f"set_tz|{k}")])
     buttons.append([InlineKeyboardButton("⬅️ Назад до налаштувань", callback_data="settings|main")])
     return InlineKeyboardMarkup(buttons)
-
-
-def risk_keyboard(rt=None):
-    rt = rt or _get_runtime_settings()
-    dep = int(round(rt["risk_deposit"]))
-    rsk = int(round(rt["risk_pct"]))
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(("• $100 •" if dep == 100 else "$100"), callback_data="set_dep|100"),
-            InlineKeyboardButton(("• $500 •" if dep == 500 else "$500"), callback_data="set_dep|500"),
-            InlineKeyboardButton(("• $1000 •" if dep == 1000 else "$1000"), callback_data="set_dep|1000"),
-            InlineKeyboardButton(("• $5000 •" if dep == 5000 else "$5000"), callback_data="set_dep|5000"),
-        ],
-        [
-            InlineKeyboardButton(("• 1% •" if rsk == 1 else "1%"), callback_data="set_rsk|1"),
-            InlineKeyboardButton(("• 2% •" if rsk == 2 else "2%"), callback_data="set_rsk|2"),
-            InlineKeyboardButton(("• 3% •" if rsk == 3 else "3%"), callback_data="set_rsk|3"),
-            InlineKeyboardButton(("• 5% •" if rsk == 5 else "5%"), callback_data="set_rsk|5"),
-        ],
-        [InlineKeyboardButton("⬅️ Налаштування", callback_data="settings|main"), InlineKeyboardButton("🏠 Меню", callback_data="main_menu")],
-    ])
 
 
 def pairs_keyboard(auto_map=None):
@@ -1151,14 +1192,12 @@ def strategy_keyboard(category=None, pair=None, auto_map=None):
 def _settings_summary_text(rt=None):
     rt = rt or _get_runtime_settings()
     be = 100.0 / (1.0 + rt["payout"])
-    stake = rt["risk_deposit"] * (rt["risk_pct"] / 100.0)
     return (
         "🎛 <b>Панель керування порогами та фільтрами</b>\n"
         f"• Авто-вимкнення WR: <b>&lt;{rt['wr_threshold'] * 100:.0f}%</b>\n"
         f"• Конфлюентність: <b>{rt['conflict_mode']}</b> (поріг <b>{rt['confluence_threshold']:.1f}</b>)\n"
         f"• Експірація: <b>{rt['expiry_mode']}</b>\n"
-        f"• Новини: <b>±{rt['news_blackout_mins']} хв</b> · Виплата: <b>{int(rt['payout'] * 100)}%</b> (беззбиток {be:.1f}%)\n"
-        f"• Депозит: <b>${rt['risk_deposit']:.0f}</b> · Ризик: <b>{rt['risk_pct']:.1f}%</b> (ставка <b>${stake:.2f}</b>)"
+        f"• Новини: <b>±{rt['news_blackout_mins']} хв</b> · Виплата: <b>{int(rt['payout'] * 100)}%</b> (беззбиток {be:.1f}%)"
     )
 
 
@@ -1181,6 +1220,15 @@ def _build_pair_radar(pair_name):
     live_rows = database.get_detailed_pair_strategy_stats(ticker_filter=ticker)
     bt_rows = database.get_backtest_results(pair_filter=pair_name)
     lp = get_live_price(ticker)
+    if not lp and BIQUOTE_ENABLED:
+        lp = fetch_biquote_quote(pair_name, allow_stale=False)
+    sr_plan = sr_levels.analyze_pair_sr(
+        pair_name,
+        frames.get("5m"),
+        frames.get("15m"),
+        frames.get("60m"),
+        live_price=lp,
+    )
     return pair_radar_text(
         diag,
         news_st,
@@ -1190,6 +1238,7 @@ def _build_pair_radar(pair_name):
         live_price=lp,
         payout=rt["payout"],
         wr_threshold=rt["wr_threshold"],
+        sr_plan=sr_plan,
     )
 
 
@@ -1241,26 +1290,7 @@ def handle_check_command(update, context):
 
 
 def handle_size_command(update, context):
-    if not require_admin(update):
-        return
-    args = context.args or []
-    if len(args) >= 2:
-        try:
-            dep = max(10.0, float(args[0]))
-            pct = max(0.5, min(25.0, float(args[1])))
-            database.set_bot_setting("risk_deposit", f"{dep:.2f}")
-            database.set_bot_setting("risk_pct", f"{pct:.2f}")
-        except ValueError:
-            update.effective_message.reply_text("Формат: /size 1000 2 (депозит і ризик %)")
-            return
-    rt = _get_runtime_settings()
-    stake = rt["risk_deposit"] * (rt["risk_pct"] / 100.0)
-    update.effective_message.reply_text(
-        f"💰 <b>Ризик-калькулятор</b>\nДепозит: <b>${rt['risk_deposit']:.2f}</b> · Ризик: <b>{rt['risk_pct']:.1f}%</b>\n"
-        f"Рекомендована фіксована ставка: <b>${stake:.2f}</b>",
-        parse_mode="HTML",
-        reply_markup=risk_keyboard(rt),
-    )
+    update.effective_message.reply_text("ℹ️ Розрахунок рекомендованої ставки вимкнено. Орієнтуйтесь на рівень впевненості сигналу.")
 
 
 def show_stats(chat_id, period="all"):
@@ -1408,6 +1438,44 @@ def _run_backtest_async(chat_id, pair, include_all):
     threading.Thread(target=worker, daemon=True).start()
 
 
+def _build_review_context(sig: dict) -> dict:
+    enriched = dict(sig)
+    try:
+        pair = normalize_pair_name(sig.get("ticker"))
+        if sig.get("created_at"):
+            enriched["session"] = localized_session_name(sig["created_at"])
+        if pair in PAIRS_MAP:
+            yahoo = normalize_yahoo_ticker(sig["ticker"], pair)
+            df5 = fetch_yahoo_fallback(yahoo, interval="5m", range_period="5d")
+            df60 = fetch_yahoo_fallback(yahoo, interval="60m", range_period="30d")
+            if df5 is not None and not df5.empty:
+                sr = sr_levels.analyze_pair_sr(pair, df5, df_60m=df60, live_price=float(sig.get("entry_price") or 0) or None)
+                if sr.get("ok"):
+                    ls = sr["local_support"]["price"] if sr.get("local_support") else None
+                    lr = sr["local_resistance"]["price"] if sr.get("local_resistance") else None
+                    gs = sr["global_support"]["price"] if sr.get("global_support") else None
+                    gr = sr["global_resistance"]["price"] if sr.get("global_resistance") else None
+                    enriched["sr_context"] = f"Loc S={ls} / R={lr}; Glob S={gs} / R={gr}"
+                if sig.get("created_at") and sig.get("expires_at") and sig.get("entry_price"):
+                    t0 = parse_dt(sig["created_at"])
+                    t1 = parse_dt(sig["expires_at"])
+                    win_df = df5.loc[(df5.index >= t0 - timedelta(minutes=5)) & (df5.index <= t1 + timedelta(minutes=5))]
+                    if not win_df.empty:
+                        ep = float(sig["entry_price"])
+                        mult = 1000.0 if "JPY" in pair else 100000.0
+                        hi_p, lo_p = float(win_df["high"].max()), float(win_df["low"].min())
+                        if str(sig.get("signal_type", "")).upper() == "CALL":
+                            mfe = (hi_p - ep) * mult
+                            mae = (lo_p - ep) * mult
+                        else:
+                            mfe = (ep - lo_p) * mult
+                            mae = (ep - hi_p) * mult
+                        enriched["price_path_summary"] = f"MFE={mfe:+.1f} пт, MAE={mae:+.1f} пт"
+    except Exception:
+        pass
+    return enriched
+
+
 def handle_callback(update, context):
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -1453,20 +1521,23 @@ def handle_callback(update, context):
         for r in (rows if isinstance(rows, (list, tuple)) else []):
             tkr = r.get("ticker")
             if tkr and tkr not in live_map:
-                live_map[tkr] = get_live_price(tkr)
+                lp = get_live_price(tkr)
+                if not lp and BIQUOTE_ENABLED:
+                    lp = fetch_biquote_quote(tkr, allow_stale=False)
+                live_map[tkr] = lp
         _safe_edit(query, active_text(rows, get_utc_now(), live_prices=live_map), parse_mode="HTML", reply_markup=active_keyboard())
 
     elif action == "check_menu":
         _safe_edit(
             query,
-            "🔍 <b>Радар пари</b>\nОберіть валютну пару для перегляду індикаторів, новин і статистики:",
+            "🔍 <b>Радар пари</b>\nОберіть валютну пару для перегляду індикаторів, рівнів S/R, новин і статистики:",
             parse_mode="HTML",
             reply_markup=check_pairs_keyboard(),
         )
 
     elif action == "check_go" and len(parts) == 2 and parts[1] in PAIRS_MAP:
         pair = parts[1]
-        _safe_edit(query, f"🔍 Завантажую дані та індикатори для <b>{html.escape(pair)}</b>…", parse_mode="HTML")
+        _safe_edit(query, f"🔍 Завантажую дані та рівні S/R для <b>{html.escape(pair)}</b>…", parse_mode="HTML")
         msg_id = query.message.message_id
         def worker():
             try:
@@ -1557,22 +1628,20 @@ def handle_callback(update, context):
         _run_backtest_async(chat_id, pair, include_all)
 
     elif action == "risk":
-        rt = _get_runtime_settings()
-        stake = rt["risk_deposit"] * (rt["risk_pct"] / 100.0)
         _safe_edit(
             query,
-            f"💰 <b>Ризик-калькулятор</b>\nДепозит: <b>${rt['risk_deposit']:.2f}</b> · Ризик: <b>{rt['risk_pct']:.1f}%</b>\n"
-            f"Рекомендована фіксована ставка: <b>${stake:.2f}</b>",
-            parse_mode="HTML",
-            reply_markup=risk_keyboard(rt),
+            "ℹ️ Калькулятор ставки вилучено. Орієнтуйтесь на рівень впевненості на картці сигналу.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="main_menu")]]),
         )
 
     elif action in (
         "toggle", "ftog", "cat", "cat_all", "pairs", "pair", "pair_all",
         "pcat", "pcat_all", "pair_toggle",
         "stats_clear_ask", "stats_clear_confirm",
+        "db_reset_ask", "db_reset_confirm",
         "autodis_list", "autodis_en", "mute1h",
-        "settings", "set_wr", "set_conf", "set_cmod", "set_emod", "set_news", "set_pay", "set_tz", "set_dep", "set_rsk",
+        "settings", "set_wr", "set_conf", "set_cmod", "set_emod", "set_news", "set_pay", "set_tz",
+        "review",
     ):
         if not require_admin(update):
             return
@@ -1603,6 +1672,37 @@ def handle_callback(update, context):
             ok = database.clear_all_stats()
             text = "🧹 <b>Статистику повністю очищено.</b>" if ok else "❌ Не вдалося очистити статистику."
             _safe_edit(query, text, parse_mode="HTML", reply_markup=stats_keyboard())
+
+        elif action == "db_reset_ask":
+            _safe_edit(
+                query,
+                "🚨 <b>ПОВНЕ ОБНУЛЕННЯ БОТА ДО СТАНУ GITHUB</b>\n"
+                "Будуть очищені ВСІ таблиці PostgreSQL (користувачі, угоди, логи, бектест, налаштування по парах і боту) "
+                "та відновлено початковий <code>strategies_config.json</code>.\n"
+                "Цю дію неможливо скасувати!",
+                parse_mode="HTML",
+                reply_markup=db_reset_confirm_keyboard(),
+            )
+
+        elif action == "db_reset_confirm":
+            try:
+                res = db_reset.reset_database_and_config(STRATEGIES_CONFIG_FILE, reset_config=True)
+                with _CFG_LOCK:
+                    strategies_status.clear()
+                    strategies_status.update(load_all_strategy_config(STRATEGIES_CONFIG_FILE))
+                AUTO_SCAN_CHATS.clear()
+                signal_gate.reset()
+                tables_txt = ", ".join(res.get("tables") or []) or "—"
+                _safe_edit(
+                    query,
+                    f"✅ <b>Базу даних і конфігурацію повністю обнулено до чистого GitHub.</b>\n"
+                    f"Очищені таблиці: <code>{html.escape(tables_txt)}</code>",
+                    parse_mode="HTML",
+                    reply_markup=inline_main_keyboard(chat_id),
+                )
+            except Exception as e:
+                logger.exception("Помилка db_reset_confirm")
+                _safe_edit(query, f"❌ Помилка обнулення БД: {html.escape(str(e)[:120])}", parse_mode="HTML", reply_markup=settings_menu_keyboard())
 
         elif action == "settings":
             sub = parts[1] if len(parts) > 1 else "main"
@@ -1651,15 +1751,6 @@ def handle_callback(update, context):
                     parse_mode="HTML",
                     reply_markup=tz_keyboard(rt),
                 )
-            elif sub == "risk":
-                stake = rt["risk_deposit"] * (rt["risk_pct"] / 100.0)
-                _safe_edit(
-                    query,
-                    f"💰 <b>Ризик-калькулятор</b>\nДепозит: <b>${rt['risk_deposit']:.2f}</b> · Ризик: <b>{rt['risk_pct']:.1f}%</b>\n"
-                    f"Рекомендована ставка: <b>${stake:.2f}</b>",
-                    parse_mode="HTML",
-                    reply_markup=risk_keyboard(rt),
-                )
 
         elif action == "set_wr" and len(parts) == 2:
             val = max(0.30, min(0.70, float(parts[1]) / 100.0))
@@ -1700,26 +1791,13 @@ def handle_callback(update, context):
             rt = _get_runtime_settings()
             _safe_edit(query, f"🕒 Часовий пояс оновлено: <b>{parts[1]}</b>", parse_mode="HTML", reply_markup=tz_keyboard(rt))
 
-        elif action == "set_dep" and len(parts) == 2:
-            dep = max(10.0, float(parts[1]))
-            database.set_bot_setting("risk_deposit", f"{dep:.2f}")
-            rt = _get_runtime_settings()
-            stake = rt["risk_deposit"] * (rt["risk_pct"] / 100.0)
-            _safe_edit(query, f"💰 Депозит: <b>${rt['risk_deposit']:.2f}</b> · Ризик: <b>{rt['risk_pct']:.1f}%</b> · Ставка: <b>${stake:.2f}</b>", parse_mode="HTML", reply_markup=risk_keyboard(rt))
-
-        elif action == "set_rsk" and len(parts) == 2:
-            rsk = max(0.5, min(25.0, float(parts[1])))
-            database.set_bot_setting("risk_pct", f"{rsk:.2f}")
-            rt = _get_runtime_settings()
-            stake = rt["risk_deposit"] * (rt["risk_pct"] / 100.0)
-            _safe_edit(query, f"💰 Депозит: <b>${rt['risk_deposit']:.2f}</b> · Ризик: <b>{rt['risk_pct']:.1f}%</b> · Ставка: <b>${stake:.2f}</b>", parse_mode="HTML", reply_markup=risk_keyboard(rt))
-
         elif action == "ftog" and len(parts) == 2 and parts[1] in GLOBAL_FILTERS:
             key = parts[1]
-            changed = dict(strategies_status)
-            changed[key] = not changed.get(key, False)
-            save_strategies_config(changed)
-            strategies_status.update(changed)
+            with _CFG_LOCK:
+                changed = dict(strategies_status)
+                changed[key] = not changed.get(key, False)
+                save_strategies_config(changed)
+                strategies_status.update(changed)
             rt = _get_runtime_settings()
             if key == "auto_disable_49":
                 _safe_edit(query, f"🎚 Поріг авто-вимкнення: <b>{rt['wr_threshold'] * 100:.0f}%</b>", parse_mode="HTML", reply_markup=thresholds_keyboard(rt))
@@ -1733,128 +1811,99 @@ def handle_callback(update, context):
             elif cat in STRATEGY_CATEGORIES:
                 _safe_edit(query, STRATEGY_CATEGORIES[cat], reply_markup=strategy_keyboard(category=cat))
 
-        elif action == "cat_all" and len(parts) == 3 and parts[1] in STRATEGY_CATEGORIES and parts[2] in ("0", "1"):
-            cat, val = parts[1], parts[2] == "1"
-            changed = dict(strategies_status)
-            for k, m in STRATEGIES_META.items():
-                if m["category"] == cat:
-                    changed[k] = val
-                    if val:
-                        database.mark_strategy_manual_enable("GLOBAL", "*", k)
-            save_strategies_config(changed)
-            strategies_status.update(changed)
+        elif action == "cat_all" and len(parts) == 3 and parts[1] in STRATEGY_CATEGORIES:
+            cat, on = parts[1], parts[2] == "1"
+            with _CFG_LOCK:
+                changed = dict(strategies_status)
+                for k, m in STRATEGIES_META.items():
+                    if m["category"] == cat:
+                        changed[k] = on
+                save_strategies_config(changed)
+                strategies_status.update(changed)
             _safe_edit(query, STRATEGY_CATEGORIES[cat], reply_markup=strategy_keyboard(category=cat))
 
-        elif action == "toggle" and len(parts) == 2 and (parts[1] in STRATEGIES_META or parts[1] in GLOBAL_FILTERS):
+        elif action == "toggle" and len(parts) == 2:
             key = parts[1]
-            changed = dict(strategies_status)
-            new_val = not changed.get(key, False)
-            changed[key] = new_val
-            if new_val and key in STRATEGIES_META:
-                database.mark_strategy_manual_enable("GLOBAL", "*", key)
-            save_strategies_config(changed)
-            strategies_status.update(changed)
-            if key in STRATEGIES_META:
-                cat = STRATEGIES_META[key]["category"]
-                _safe_edit(query, STRATEGY_CATEGORIES[cat], reply_markup=strategy_keyboard(category=cat))
-            else:
-                _safe_edit(query, "⚙️ Категорії стратегій та глобальні фільтри", reply_markup=strategy_keyboard())
+            if key in STRATEGIES_META or key in GLOBAL_FILTERS:
+                with _CFG_LOCK:
+                    changed = dict(strategies_status)
+                    changed[key] = not changed.get(key, False)
+                    save_strategies_config(changed)
+                    strategies_status.update(changed)
+                cat = STRATEGIES_META[key]["category"] if key in STRATEGIES_META else "MAIN"
+                title = STRATEGY_CATEGORIES[cat] if cat in STRATEGY_CATEGORIES else "⚙️ Категорії стратегій та глобальні фільтри"
+                _safe_edit(query, title, reply_markup=strategy_keyboard(category=None if cat == "MAIN" else cat))
 
         elif action == "pairs":
-            try:
-                auto_map = database.get_auto_disabled_map()
-                if not isinstance(auto_map, dict):
-                    auto_map = {}
-            except Exception:
-                auto_map = {}
-            _safe_edit(query, "🎯 Оберіть пару", reply_markup=pairs_keyboard(auto_map))
+            auto_map = database.get_auto_disabled_map()
+            _safe_edit(query, "🎯 Оберіть пару для індивідуального налаштування стратегій:", reply_markup=pairs_keyboard(auto_map))
 
         elif action == "pair" and len(parts) == 2 and parts[1] in PAIRS_MAP:
             pair = parts[1]
-            _safe_edit(query, f"🎯 {pair} · оберіть категорію", reply_markup=strategy_keyboard(pair=pair))
+            _safe_edit(query, f"🎯 Налаштування стратегій для <b>{html.escape(pair)}</b>", parse_mode="HTML", reply_markup=strategy_keyboard(pair=pair))
 
-        elif action == "pair_all" and len(parts) == 3 and parts[1] in PAIRS_MAP and parts[2] in ("0", "1"):
-            pair, val = parts[1], parts[2] == "1"
-            database.set_pair_bulk_strategy_status(pair, ALL_STRATEGY_KEYS, val)
-            if val:
-                for k in ALL_STRATEGY_KEYS:
-                    database.mark_strategy_manual_enable("PAIR", pair, k)
-            _safe_edit(query, f"🎯 {pair} · оберіть категорію", reply_markup=strategy_keyboard(pair=pair))
+        elif action == "pair_all" and len(parts) == 3 and parts[1] in PAIRS_MAP:
+            pair, on = parts[1], parts[2] == "1"
+            database.set_pair_bulk_strategy_status(pair, list(ALL_STRATEGY_KEYS), on)
+            _safe_edit(query, f"🎯 Налаштування стратегій для <b>{html.escape(pair)}</b>", parse_mode="HTML", reply_markup=strategy_keyboard(pair=pair))
 
         elif action == "pcat" and len(parts) == 3 and parts[1] in PAIRS_MAP and parts[2] in STRATEGY_CATEGORIES:
             pair, cat = parts[1], parts[2]
-            _safe_edit(
-                query,
-                f"🎯 {pair} · {STRATEGY_CATEGORIES[cat]}",
-                reply_markup=strategy_keyboard(category=cat, pair=pair),
-            )
+            _safe_edit(query, f"🎯 {html.escape(pair)} · {html.escape(STRATEGY_CATEGORIES[cat])}", parse_mode="HTML", reply_markup=strategy_keyboard(category=cat, pair=pair))
 
-        elif action == "pcat_all" and len(parts) == 4 and parts[1] in PAIRS_MAP and parts[2] in STRATEGY_CATEGORIES and parts[3] in ("0", "1"):
-            pair, cat, val = parts[1], parts[2], parts[3] == "1"
+        elif action == "pcat_all" and len(parts) == 4 and parts[1] in PAIRS_MAP and parts[2] in STRATEGY_CATEGORIES:
+            pair, cat, on = parts[1], parts[2], parts[3] == "1"
             cat_keys = [k for k, m in STRATEGIES_META.items() if m["category"] == cat]
-            database.set_pair_bulk_strategy_status(pair, cat_keys, val)
-            if val:
-                for k in cat_keys:
-                    database.mark_strategy_manual_enable("PAIR", pair, k)
-            _safe_edit(
-                query,
-                f"🎯 {pair} · {STRATEGY_CATEGORIES[cat]}",
-                reply_markup=strategy_keyboard(category=cat, pair=pair),
-            )
+            database.set_pair_bulk_strategy_status(pair, cat_keys, on)
+            _safe_edit(query, f"🎯 {html.escape(pair)} · {html.escape(STRATEGY_CATEGORIES[cat])}", parse_mode="HTML", reply_markup=strategy_keyboard(category=cat, pair=pair))
 
         elif action == "pair_toggle" and len(parts) == 3 and parts[1] in PAIRS_MAP and parts[2] in STRATEGIES_META:
             pair, key = parts[1], parts[2]
-            new_val = not database.get_pair_strategy_status(pair, key)
-            database.set_pair_strategy_status(pair, key, new_val)
-            if new_val:
-                database.mark_strategy_manual_enable("PAIR", pair, key)
+            cur = database.get_pair_strategy_status(pair, key)
+            database.set_pair_strategy_status(pair, key, not cur)
             cat = STRATEGIES_META[key]["category"]
-            _safe_edit(
-                query,
-                f"🎯 {pair} · {STRATEGY_CATEGORIES[cat]}",
-                reply_markup=strategy_keyboard(category=cat, pair=pair),
-            )
+            _safe_edit(query, f"🎯 {html.escape(pair)} · {html.escape(STRATEGY_CATEGORIES[cat])}", parse_mode="HTML", reply_markup=strategy_keyboard(category=cat, pair=pair))
 
         elif action == "autodis_list":
-            rt = _get_runtime_settings()
             items = database.get_auto_disabled_items()
-            _safe_edit(
-                query,
-                auto_disabled_text(items, wr_threshold=rt["wr_threshold"]),
-                parse_mode="HTML",
-                reply_markup=auto_disabled_keyboard(items),
-            )
+            rt = _get_runtime_settings()
+            _safe_edit(query, auto_disabled_text(items, wr_threshold=rt["wr_threshold"]), parse_mode="HTML", reply_markup=auto_disabled_keyboard(items))
 
-        elif action == "autodis_en":
-            if len(parts) == 3 and parts[1] == "G" and parts[2] in STRATEGIES_META:
+        elif action == "autodis_en" and len(parts) >= 3:
+            if parts[1] == "G":
                 key = parts[2]
-                changed = dict(strategies_status)
-                changed[key] = True
-                save_strategies_config(changed)
-                strategies_status.update(changed)
                 database.mark_strategy_manual_enable("GLOBAL", "*", key)
-            elif len(parts) == 4 and parts[1] == "P" and parts[2] in PAIRS_MAP and parts[3] in STRATEGIES_META:
-                pair, key = parts[2], parts[3]
-                database.set_pair_strategy_status(pair, key, True)
-                database.mark_strategy_manual_enable("PAIR", pair, key)
-            rt = _get_runtime_settings()
+                with _CFG_LOCK:
+                    changed = dict(strategies_status)
+                    if key in changed:
+                        changed[key] = True
+                        save_strategies_config(changed)
+                        strategies_status.update(changed)
+            elif parts[1] == "P" and len(parts) == 4:
+                database.mark_strategy_manual_enable("PAIR", parts[2], parts[3])
             items = database.get_auto_disabled_items()
-            _safe_edit(
-                query,
-                auto_disabled_text(items, wr_threshold=rt["wr_threshold"]),
-                parse_mode="HTML",
-                reply_markup=auto_disabled_keyboard(items),
-            )
+            rt = _get_runtime_settings()
+            _safe_edit(query, auto_disabled_text(items, wr_threshold=rt["wr_threshold"]), parse_mode="HTML", reply_markup=auto_disabled_keyboard(items))
 
-    elif action == "review" and len(parts) == 2 and parts[1].isdigit():
-        sig = database.get_signal_by_id(int(parts[1]))
-        if not sig or sig["chat_id"] != chat_id or sig["status"] != "CLOSED":
-            return
-        def review():
-            result = ai_advisor_instance.evaluate_closed_trade(sig)
-            database.save_signal_ai_review(sig["id"], result)
-            bot.send_message(chat_id=chat_id, text="🤖 <b>Розбір (не причинний доказ):</b>\n" + html.escape(result[:3000]), parse_mode="HTML")
-        threading.Thread(target=review, daemon=True).start()
+        elif action == "review" and len(parts) == 2 and parts[1].isdigit():
+            sig_id = int(parts[1])
+            def review():
+                try:
+                    sig = database.get_signal_by_id(sig_id)
+                    if not sig:
+                        bot.send_message(chat_id=chat_id, text="⚠️ Угоду не знайдено.")
+                        return
+                    text = sig.get("ai_review")
+                    if not text:
+                        enriched = _build_review_context(sig)
+                        text = ai_advisor_instance.evaluate_closed_trade(enriched)
+                        if text and not text.startswith("⚠️"):
+                            database.save_signal_ai_review(sig_id, text)
+                    bot.send_message(chat_id=chat_id, text=f"🔍 <b>AI-розбір угоди #{sig_id}:</b>\n{html.escape(text)}", parse_mode="HTML")
+                except Exception:
+                    logger.exception("Помилка AI-розбору #%s", sig_id)
+                    bot.send_message(chat_id=chat_id, text="❌ Помилка під час AI-розбору.")
+            threading.Thread(target=review, daemon=True).start()
 
 
 def handle_backtest_command(update, context):
@@ -1922,11 +1971,12 @@ def main():
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_TOKEN не задано")
-    if not ADMIN_IDS:
-        logger.warning("ADMIN_IDS не задано: глобальне керування доступне всім користувачам.")
+    if not ADMIN_IDS and not ALLOW_OPEN_ADMIN:
+        logger.warning("ADMIN_IDS не задано: адмін-команди заблоковано (встановіть ADMIN_IDS або ALLOW_OPEN_ADMIN=true).")
     bot = Bot(token=token)
     database.init_db()
     AUTO_SCAN_CHATS.update(database.get_autoscan_chats())
+    _recover_pending_timers()
     start_finnhub_ws()
     start_background_checker()
     start_auto_scanner_loop()
@@ -1943,8 +1993,11 @@ def main():
     updater.dispatcher.add_handler(CommandHandler("lab", handle_lab_command))
     updater.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     updater.dispatcher.add_handler(CallbackQueryHandler(handle_callback))
-    updater.start_polling()
-    updater.idle()
+    try:
+        updater.start_polling()
+        updater.idle()
+    finally:
+        stop_finnhub_ws()
 
 
 if __name__ == "__main__":
