@@ -13,7 +13,8 @@ import pandas as pd
 import yfinance as yf
 
 import database
-from config import AUTO_DISABLE_WR_THRESHOLD, PAIRS_MAP, PAYOUT, PRUNE_WR_THRESHOLD, YAHOO_PAIRS_MAP
+from config import AUTO_DISABLE_WR_THRESHOLD, BIQUOTE_ENABLED, PAIRS_MAP, PAYOUT, PRUNE_WR_THRESHOLD, YAHOO_PAIRS_MAP
+from market_data import fetch_biquote_ohlc
 from quality_gate import SignalGate, wilson_bounds
 from reversion_engine import (
     PRESETS,
@@ -140,23 +141,39 @@ def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
 def _download_yf(pair_name, interval, period):
     if pair_name not in PAIRS_MAP:
         raise ValueError("Невідома пара")
-    df = yf.download(YAHOO_PAIRS_MAP[pair_name], interval=interval, period=period, progress=False, auto_adjust=True)
-    return _clean_ohlcv(df)
+    cleaned = pd.DataFrame()
+    try:
+        df = yf.download(YAHOO_PAIRS_MAP[pair_name], interval=interval, period=period, progress=False, auto_adjust=True)
+        cleaned = _clean_ohlcv(df)
+    except Exception:
+        cleaned = pd.DataFrame()
+    if cleaned.empty and BIQUOTE_ENABLED:
+        bq = fetch_biquote_ohlc(pair_name, interval=interval, limit=1000)
+        if not bq.empty:
+            return bq
+    return cleaned
 
 
 def _download_yf_batch(interval, period) -> dict[str, pd.DataFrame]:
     tickers = list(YAHOO_PAIRS_MAP.values())
-    raw = yf.download(" ".join(tickers), interval=interval, period=period, group_by="ticker", threads=True, progress=False, auto_adjust=True)
     result = {}
-    if raw is None or raw.empty:
-        return result
-    if isinstance(raw.columns, pd.MultiIndex):
-        top = set(raw.columns.get_level_values(0))
-        for pair, y_ticker in YAHOO_PAIRS_MAP.items():
-            if y_ticker in top:
-                cleaned = _clean_ohlcv(raw[y_ticker])
-                if not cleaned.empty:
-                    result[pair] = cleaned
+    try:
+        raw = yf.download(" ".join(tickers), interval=interval, period=period, group_by="ticker", threads=True, progress=False, auto_adjust=True)
+        if raw is not None and not raw.empty and isinstance(raw.columns, pd.MultiIndex):
+            top = set(raw.columns.get_level_values(0))
+            for pair, y_ticker in YAHOO_PAIRS_MAP.items():
+                if y_ticker in top:
+                    cleaned = _clean_ohlcv(raw[y_ticker])
+                    if not cleaned.empty:
+                        result[pair] = cleaned
+    except Exception:
+        pass
+    if BIQUOTE_ENABLED:
+        for pair in PAIRS_MAP:
+            if pair not in result or result[pair].empty:
+                bq = fetch_biquote_ohlc(pair, interval=interval, limit=1000)
+                if not bq.empty:
+                    result[pair] = bq
     return result
 
 
