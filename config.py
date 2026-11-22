@@ -52,9 +52,11 @@ PAYOUT = float(os.environ.get("PAYOUT", "0.85"))
 NEWS_BLACKOUT_MINS = int(os.environ.get("NEWS_BLACKOUT_MINS", "15"))
 DISABLE_FINNHUB_CANDLES = os.environ.get("DISABLE_FINNHUB_CANDLES", "false").lower() in ("1", "true", "yes")
 FINNHUB_CONNECT_DELAY_SEC = float(os.environ.get("FINNHUB_CONNECT_DELAY_SEC", "4.0"))
+BIQUOTE_ENABLED = os.environ.get("BIQUOTE_ENABLED", "true").lower() in ("1", "true", "yes")
+DUKASCOPY_ENABLED = os.environ.get("DUKASCOPY_ENABLED", "true").lower() in ("1", "true", "yes")
 
 PRUNE_WR_THRESHOLD = float(os.environ.get("PRUNE_WR_THRESHOLD", "0.45"))
-AUTO_DISABLE_WR_THRESHOLD = float(os.environ.get("AUTO_DISABLE_WR_THRESHOLD", "0.49"))
+AUTO_DISABLE_WR_THRESHOLD = float(os.environ.get("AUTO_DISABLE_WR_THRESHOLD", "0.52"))
 AUTO_DISABLE_MIN_LIVE_PAIR = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_PAIR", "8"))
 AUTO_DISABLE_MIN_LIVE_GLOBAL = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_GLOBAL", "15"))
 AUTO_DISABLE_MIN_BT_PAIR = int(os.environ.get("AUTO_DISABLE_MIN_BT_PAIR", "15"))
@@ -137,3 +139,7 @@ def normalize_pair_name(ticker: str | None) -> str:
     elif "/" not in cleaned and len(cleaned) == 6 and cleaned.isalpha():
         cleaned = f"{cleaned[:3]}/{cleaned[3:]}"
     return cleaned
+
+
+def biquote_symbol(pair: str | None) -> str:
+    return normalize_pair_name(pair).replace("/", "").upper()
