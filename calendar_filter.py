@@ -7,11 +7,12 @@ from datetime import datetime, timezone
 
 import requests
 
-from config import NEWS_BLACKOUT_MINS
+from config import BIQUOTE_ENABLED, NEWS_BLACKOUT_MINS
 
 logger = logging.getLogger(__name__)
 
 PRIMARY_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+BIQUOTE_CALENDAR_URL = "https://biquote.io/api/calendar/upcoming?importance=high&limit=200"
 FALLBACK_CALENDAR_URL = os.environ.get("FALLBACK_CALENDAR_URL", "").strip()
 CACHE_TTL_SEC = 3600
 FAIL_RETRY_SEC = 300
@@ -31,7 +32,7 @@ GLOBAL_USD_KEYWORDS = (
 
 CURRENCY_MAP = {
     "US": "USD", "USA": "USD", "USD": "USD",
-    "EU": "EUR", "EUR": "EUR", "DE": "EUR", "FR": "EUR", "EMU": "EUR",
+    "EU": "EUR", "EUR": "EUR", "DE": "EUR", "FR": "EUR", "IT": "EUR", "ES": "EUR", "EMU": "EUR",
     "UK": "GBP", "GB": "GBP", "GBP": "GBP",
     "JP": "JPY", "JPY": "JPY",
     "AU": "AUD", "AUD": "AUD",
@@ -73,20 +74,24 @@ def _parse_generic_events(raw_payload) -> list[dict]:
     for item in items:
         if not isinstance(item, dict):
             continue
+        if str(item.get("type") or "").strip().lower() == "holiday":
+            continue
         imp = str(item.get("impact") or item.get("importance") or "").strip().lower()
         if imp not in ("high", "3", "critical"):
             continue
-        dt = _parse_dt(item.get("date") or item.get("datetime") or item.get("timestamp"))
+        dt = _parse_dt(item.get("date") or item.get("time") or item.get("datetime") or item.get("timestamp"))
         if dt is None:
             continue
-        raw_c = str(item.get("country") or item.get("currency") or "").strip().upper()
+        time_mode = str(item.get("timeMode") or "exact").strip().lower()
+        raw_c = str(item.get("currency") or item.get("country") or item.get("countryCode") or "").strip().upper()
         ccy = CURRENCY_MAP.get(raw_c, raw_c)
         if not ccy:
             continue
         parsed.append({
             "country": ccy,
-            "title": str(item.get("title") or item.get("event") or "High Impact News").strip(),
+            "title": str(item.get("title") or item.get("name") or item.get("event") or "High Impact News").strip(),
             "dt": dt,
+            "exact_time": time_mode == "exact",
         })
     return parsed
 
@@ -99,18 +104,19 @@ def _get_events() -> tuple[list[dict], bool]:
         if _CACHE["fail_ts"] and (now_ts - _CACHE["fail_ts"]) < FAIL_RETRY_SEC:
             return _CACHE["events"], bool(_CACHE["events"])
 
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; RacioBot/2.0)"}
-
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; RacioBot/2.2)"}
     urls = [("primary", PRIMARY_CALENDAR_URL)]
     if FALLBACK_CALENDAR_URL:
-        urls.append(("fallback", FALLBACK_CALENDAR_URL))
+        urls.append(("env_fallback", FALLBACK_CALENDAR_URL))
+    if BIQUOTE_ENABLED:
+        urls.append(("biquote", BIQUOTE_CALENDAR_URL))
 
     for src_name, url in urls:
         try:
             resp = requests.get(url, timeout=6, headers=headers)
             if resp.status_code == 200:
                 events = _parse_generic_events(resp.json())
-                if events or src_name == "primary":
+                if events or src_name == "biquote":
                     with _LOCK:
                         _CACHE["events"] = events
                         _CACHE["ts"] = time.time()
@@ -140,6 +146,8 @@ def is_high_impact_news_time(
 
         if ok:
             for ev in events:
+                if not ev.get("exact_time", True):
+                    continue
                 diff = abs((now_utc - ev["dt"]).total_seconds())
                 if diff > window_sec:
                     continue
