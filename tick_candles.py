@@ -1,19 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Збирач 1-хвилинних свічок із живих тиків Finnhub WebSocket.
-
-Навіщо: безкоштовний Finnhub не віддає forex-свічки через REST, тому бот бере їх із Yahoo,
-а Yahoo інколи відстає на десятки хвилин (або зависає для всіх пар одразу).
-Тики з WebSocket приходять у реальному часі, тож з них можна добудувати свіжі свічки
-і «зашити» дірку між кінцем історії Yahoo та поточним моментом.
-
-Правила:
-  * тик -> бар хвилини (UTC);
-  * хвилини без тиків заповнюються плоскими барами (ціна не змінилась), але лише якщо
-    пропуск ≤ MAX_FILL_GAP_MIN (інакше це вихідні/пауза, дірку лишаємо);
-  * при злитті з Yahoo ціни тикових барів вирівнюються під рівень Yahoo (медіана різниці
-    на спільних хвилинах), щоб не було стрибка на стику.
-"""
+"""Збирач 1-хвилинних свічок із живих тиків Finnhub WebSocket із коректним упорядкуванням."""
 import threading
 import time
 from collections import OrderedDict
@@ -25,25 +11,31 @@ MAX_BARS = 3000
 MAX_FILL_GAP_MIN = 10
 
 _lock = threading.Lock()
-_bars = {}  # symbol -> OrderedDict[minute_key] = [open, high, low, close, ticks]
+_bars = {}
 
 
 def add_tick(symbol: str, price: float, ts_ms=None):
-    if not symbol or not price:
+    if not symbol or price is None:
         return
-    ts = (ts_ms / 1000.0) if ts_ms else time.time()
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return
+    if p <= 0:
+        return
+    ts = (float(ts_ms) / 1000.0) if ts_ms is not None else time.time()
     key = int(ts // 60)
-    p = float(price)
     with _lock:
         d = _bars.setdefault(symbol, OrderedDict())
         bar = d.get(key)
         if bar is None:
+            prev_last_key = next(reversed(d.keys())) if d else None
             d[key] = [p, p, p, p, 1]
-            # бари мають бути впорядковані за часом; запізнілі тики (key < last) просто створюють бар
-            if len(d) > 1 and key < next(reversed(d.keys())):
+            if prev_last_key is not None and key < prev_last_key:
                 _bars[symbol] = OrderedDict(sorted(d.items()))
-            while len(_bars[symbol]) > MAX_BARS:
-                _bars[symbol].popitem(last=False)
+                d = _bars[symbol]
+            while len(d) > MAX_BARS:
+                d.popitem(last=False)
         else:
             if p > bar[1]:
                 bar[1] = p
@@ -58,8 +50,8 @@ def _minute_to_dt(key: int) -> datetime:
 
 
 def get_1m(symbol: str, now_ts: float = None) -> pd.DataFrame:
-    """DataFrame 1m (UTC, naive index). Містить і поточну незакриту хвилину — її відсікає closed_only()."""
-    now_ts = now_ts or time.time()
+    if now_ts is None:
+        now_ts = time.time()
     now_key = int(now_ts // 60)
     with _lock:
         d = _bars.get(symbol)
@@ -80,21 +72,22 @@ def get_1m(symbol: str, now_ts: float = None) -> pd.DataFrame:
             rows[k] = (prev_close, prev_close, prev_close, prev_close, 0)
 
     keys = sorted(rows)
-    df = pd.DataFrame(
+    return pd.DataFrame(
         [rows[k] for k in keys],
         columns=["open", "high", "low", "close", "volume"],
         index=pd.DatetimeIndex([_minute_to_dt(k) for k in keys]),
     )
-    return df
 
 
-def merge_with_history(symbol: str, df_hist: pd.DataFrame, lag_min: int = 3,
-                       min_bars_alone: int = 40, now_ts: float = None) -> pd.DataFrame:
-    """
-    Повертає 1m-історію, доповнену тиковими барами, якщо історія відстає більше за lag_min хв.
-    Якщо історія свіжа — повертає її без змін.
-    """
-    now_ts = now_ts or time.time()
+def merge_with_history(
+    symbol: str,
+    df_hist: pd.DataFrame,
+    lag_min: int = 3,
+    min_bars_alone: int = 40,
+    now_ts: float = None,
+) -> pd.DataFrame:
+    if now_ts is None:
+        now_ts = time.time()
     ticks = get_1m(symbol, now_ts)
     hist_empty = df_hist is None or df_hist.empty
 
@@ -103,6 +96,11 @@ def merge_with_history(symbol: str, df_hist: pd.DataFrame, lag_min: int = 3,
 
     if hist_empty:
         return ticks if len(ticks) >= min_bars_alone else pd.DataFrame()
+
+    if not df_hist.index.is_monotonic_increasing:
+        df_hist = df_hist.sort_index()
+    if df_hist.index.has_duplicates:
+        df_hist = df_hist[~df_hist.index.duplicated(keep="last")]
 
     now_naive = datetime.fromtimestamp(now_ts, timezone.utc).replace(tzinfo=None)
     last_hist = df_hist.index[-1]
@@ -121,7 +119,10 @@ def merge_with_history(symbol: str, df_hist: pd.DataFrame, lag_min: int = 3,
         for col in ("open", "high", "low", "close"):
             new_ticks[col] = new_ticks[col] + offset
 
-    return pd.concat([df_hist, new_ticks])
+    merged = pd.concat([df_hist, new_ticks])
+    if merged.index.has_duplicates:
+        merged = merged[~merged.index.duplicated(keep="last")]
+    return merged
 
 
 def stats() -> dict:
