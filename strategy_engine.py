@@ -243,7 +243,6 @@ def resolve_confluence(
             out.append(c2)
         return out, "OK"
 
-    # CONC: об'єднуємо переможців у єдину авторитетну картку
     primary = dict(winners[0])
     primary["signal"] = win_dir
     primary["confluence_score"] = round(abs(net), 2)
@@ -537,12 +536,13 @@ def compute_heikin_ashi(o: np.ndarray, h: np.ndarray, l: np.ndarray, c: np.ndarr
     return ha_o, ha_c
 
 
-def compute_daily_pivots(df: pd.DataFrame) -> dict[str, np.ndarray]:
+def compute_daily_pivots(df: pd.DataFrame, min_bars_per_day: int = 6) -> dict[str, np.ndarray]:
     idx = pd.DatetimeIndex(df.index)
     if idx.tz is not None:
         idx = idx.tz_convert("UTC").tz_localize(None)
     dates = idx.date
-    daily = df.groupby(dates).agg({"high": "max", "low": "min", "close": "last"})
+    daily = df.groupby(dates).agg({"high": "max", "low": "min", "close": "last", "open": "count"})
+    daily = daily[daily["open"] >= min_bars_per_day]
     prev = daily.shift(1)
     p = (prev["high"] + prev["low"] + prev["close"]) / 3.0
     r1 = 2.0 * p - prev["low"]
