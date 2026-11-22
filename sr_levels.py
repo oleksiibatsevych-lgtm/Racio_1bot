@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Causal Local & Global Support/Resistance engine and Radar trade plan builder."""
+"""Каузальні локальні та глобальні рівні S/R і побудова плану входу для Радара пари."""
 import numpy as np
 import pandas as pd
 
@@ -78,7 +78,6 @@ def _calc_vol_ratio(df: pd.DataFrame) -> float:
 
 
 def _causal_swings(df: pd.DataFrame, left: int = 3, right: int = 3, weight: float = 1.0, tag: str = "Swing") -> list[dict]:
-    """Суворо каузальні локальні екстремуми: свічка підтверджується лише через right закритих барів."""
     if df is None or len(df) < left + right + 5:
         return []
     highs = df["high"].to_numpy(dtype=float)
@@ -138,12 +137,23 @@ def _cluster_levels(raw_levels: list[dict], tolerance: float, ref_price: float) 
 def _daily_pivots_and_pdhl(df_60m: pd.DataFrame, ref_price: float) -> list[dict]:
     if df_60m is None or df_60m.empty:
         return []
-    daily = df_60m.resample("1D", label="left", closed="left").agg(
-        {"open": "first", "high": "max", "low": "min", "close": "last"}
-    ).dropna()
-    if len(daily) < 2:
+    grp = df_60m.resample("1D", label="left", closed="left")
+    daily = grp.agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+    daily["cnt"] = grp["close"].count()
+    daily = daily.dropna()
+    if daily.empty:
         return []
-    prev = daily.iloc[-2]
+
+    full_days = daily[daily["cnt"] >= 6]
+    if full_days.empty:
+        full_days = daily
+
+    cur_date = pd.Timestamp(df_60m.index[-1]).normalize()
+    prev_days = full_days[full_days.index.normalize() < cur_date]
+    if prev_days.empty:
+        return []
+
+    prev = prev_days.iloc[-1]
     ph, pl, pc = float(prev["high"]), float(prev["low"]), float(prev["close"])
     pp = (ph + pl + pc) / 3.0
     r1 = 2.0 * pp - pl
@@ -163,8 +173,8 @@ def _daily_pivots_and_pdhl(df_60m: pd.DataFrame, ref_price: float) -> list[dict]
     ]:
         out.append({"price": float(p), "kind": "S" if p <= ref_price else "R", "weight": w, "tag": tag})
 
-    if len(daily) >= 8:
-        prev_week = daily.iloc[-8:-1]
+    if len(prev_days) >= 5:
+        prev_week = prev_days.tail(7)
         out.append({"price": float(prev_week["high"].max()), "kind": "R", "weight": 2.4, "tag": "7D_High"})
         out.append({"price": float(prev_week["low"].min()), "kind": "S", "weight": 2.4, "tag": "7D_Low"})
     return out
@@ -208,10 +218,6 @@ def analyze_pair_sr(
     df_60m: pd.DataFrame | None = None,
     live_price: float | None = None,
 ) -> dict:
-    """
-    Розраховує локальні (M5/M15/Pivot) та глобальні (H1/H4/PDH/PDL/круглі) рівні S/R
-    і формує рекомендовану ціну входу, напрямок (CALL/PUT/WAIT) та час експірації.
-    """
     clean_pair = normalize_pair_name(pair_name)
     is_jpy = "JPY" in clean_pair
     pt_mult = 1000.0 if is_jpy else 100000.0
