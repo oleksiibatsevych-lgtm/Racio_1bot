@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Strategy Lab — чесна walk-forward перевірка наявних 57 стратегій + 26 нових каузальних стратегій.
+Strategy Lab — walk-forward перевірка 57 наявних + 26 нових каузальних стратегій.
+Підтримує Yahoo Finance (--source yahoo) та багаторічну 1m-історію Dukascopy (--source dukascopy).
 """
 import argparse
 import json
@@ -13,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 import reversion_engine as rev
+from market_data import download_dukascopy_chunked
 from strategy_engine import (
     STRATEGIES_META,
     compute_base_indicators,
@@ -38,22 +40,29 @@ def yahoo_symbol(pair: str) -> str:
     return pair.replace("/", "") + "=X"
 
 
-def download_and_merge(pairs, data_dir):
+def download_and_merge(pairs, data_dir, source: str = "yahoo", days: int = 90):
     import yfinance as yf
     os.makedirs(data_dir, exist_ok=True)
     for p in pairs:
         path = os.path.join(data_dir, p.replace("/", "_") + ".csv")
         try:
-            df = yf.Ticker(yahoo_symbol(p)).history(period="7d", interval="1m", auto_adjust=True)
+            if source == "dukascopy":
+                df = download_dukascopy_chunked(p, days=days)
+            else:
+                raw = yf.Ticker(yahoo_symbol(p)).history(period="7d", interval="1m", auto_adjust=True)
+                if raw is None or raw.empty:
+                    df = pd.DataFrame()
+                else:
+                    cols = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in raw.columns]
+                    df = raw[cols].rename(columns=str.lower)
+                    if "volume" not in df.columns:
+                        df["volume"] = 0.0
+                    if df.index.tz is not None:
+                        df.index = df.index.tz_convert("UTC").tz_localize(None)
+
             if df is None or df.empty:
                 print(f"  {p}: порожньо")
                 continue
-            cols = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
-            df = df[cols].rename(columns=str.lower)
-            if "volume" not in df.columns:
-                df["volume"] = 0.0
-            if df.index.tz is not None:
-                df.index = df.index.tz_convert("UTC").tz_localize(None)
             if os.path.exists(path):
                 old = pd.read_csv(path, index_col=0, parse_dates=True)
                 df = pd.concat([old, df])
@@ -92,6 +101,39 @@ def _sig(call, put):
     out[call] = 1
     out[put & ~call] = -1
     return out
+
+
+def _prev_daily_ohlc_arrays(df_index, highs, lows, closes):
+    tmp = pd.DataFrame({"h": highs, "l": lows, "c": closes}, index=df_index)
+    grp = tmp.groupby(tmp.index.date)
+    daily = grp.agg(h=("h", "max"), l=("l", "min"), c=("c", "last"), cnt=("c", "count"))
+    daily = daily[daily["cnt"] >= 6].sort_index()
+    if daily.empty:
+        nan_arr = np.full(len(df_index), np.nan)
+        return nan_arr, nan_arr, nan_arr
+    valid_dates = np.array(daily.index, dtype="datetime64[D]")
+    bar_dates = np.array(df_index.date, dtype="datetime64[D]")
+    pos = np.searchsorted(valid_dates, bar_dates, side="left") - 1
+    ok = pos >= 0
+    pos_c = np.maximum(pos, 0)
+    dh = np.where(ok, daily["h"].to_numpy(float)[pos_c], np.nan)
+    dl = np.where(ok, daily["l"].to_numpy(float)[pos_c], np.nan)
+    dc = np.where(ok, daily["c"].to_numpy(float)[pos_c], np.nan)
+    return dh, dl, dc
+
+
+def _asian_bounds_arrays(df_index, highs, lows):
+    tmp = pd.DataFrame({"h": highs, "l": lows}, index=df_index)
+    asia = tmp[tmp.index.hour < 7]
+    if asia.empty:
+        nan_arr = np.full(len(df_index), np.nan)
+        return nan_arr, nan_arr
+    daily_asia = asia.groupby(asia.index.date).agg(ah=("h", "max"), al=("l", "min"))
+    dates = pd.Series(df_index.date, index=df_index)
+    ah = dates.map(daily_asia["ah"]).to_numpy(float)
+    al = dates.map(daily_asia["al"]).to_numpy(float)
+    lon = (df_index.hour >= 7) & (df_index.hour <= 11)
+    return np.where(lon, ah, np.nan), np.where(lon, al, np.nan)
 
 
 class Feat:
@@ -178,10 +220,9 @@ class Feat:
             slow_sc = 2.0 / (slow + 1.0)
             sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
             out = np.full(len(self.c), np.nan)
-            start = n
-            if start < len(self.c):
-                out[start] = self.c[start]
-                for i in range(start + 1, len(self.c)):
+            if n < len(self.c):
+                out[n] = self.c[n]
+                for i in range(n + 1, len(self.c)):
                     k = sc[i] if np.isfinite(sc[i]) else slow_sc ** 2
                     out[i] = out[i - 1] + k * (self.c[i] - out[i - 1])
             return out
@@ -307,26 +348,14 @@ def s_new_turtle_soup(F):
 
 
 def s_new_asian_sweep(F):
-    df_tmp = pd.DataFrame({"h": F.h, "l": F.l}, index=F.index)
-    asia = df_tmp[df_tmp.index.hour < 7]
-    if asia.empty:
-        return np.zeros(len(F.c), dtype=np.int8)
-    daily_asia = asia.groupby(asia.index.date).agg(ah=("h", "max"), al=("l", "min"))
-    dates = pd.Series(F.index.date, index=F.index)
-    ah = dates.map(daily_asia["ah"]).values.astype(float)
-    al = dates.map(daily_asia["al"]).values.astype(float)
-    lon = (F.index.hour >= 7) & (F.index.hour <= 11)
-    call = lon & np.isfinite(al) & (F.l < al) & (F.c > al)
-    put = lon & np.isfinite(ah) & (F.h > ah) & (F.c < ah)
+    ah, al = _asian_bounds_arrays(F.index, F.h, F.l)
+    call = np.isfinite(al) & (F.l < al) & (F.c > al)
+    put = np.isfinite(ah) & (F.h > ah) & (F.c < ah)
     return _sig(call, put)
 
 
 def s_new_pdhl_reject(F):
-    df_tmp = pd.DataFrame({"h": F.h, "l": F.l, "c": F.c}, index=F.index)
-    daily = df_tmp.resample("1D").agg({"h": "max", "l": "min", "c": "last"}).dropna().shift(1)
-    day_idx = pd.to_datetime(F.index.date)
-    pdh = day_idx.map(daily["h"]).values.astype(float)
-    pdl = day_idx.map(daily["l"]).values.astype(float)
+    pdh, pdl, _ = _prev_daily_ohlc_arrays(F.index, F.h, F.l, F.c)
     rng = F.h - F.l + 1e-12
     lw = np.minimum(F.o, F.c) - F.l
     uw = F.h - np.maximum(F.o, F.c)
@@ -347,14 +376,10 @@ def s_new_round_bounce(F):
 
 
 def s_new_pivot_s1r1(F):
-    df_tmp = pd.DataFrame({"h": F.h, "l": F.l, "c": F.c}, index=F.index)
-    daily = df_tmp.resample("1D").agg({"h": "max", "l": "min", "c": "last"}).dropna().shift(1)
-    pp = (daily["h"] + daily["l"] + daily["c"]) / 3.0
-    r1 = 2.0 * pp - daily["l"]
-    s1 = 2.0 * pp - daily["h"]
-    day_idx = pd.to_datetime(F.index.date)
-    s1v = day_idx.map(s1).values.astype(float)
-    r1v = day_idx.map(r1).values.astype(float)
+    pdh, pdl, pdc = _prev_daily_ohlc_arrays(F.index, F.h, F.l, F.c)
+    pp = (pdh + pdl + pdc) / 3.0
+    r1v = 2.0 * pp - pdl
+    s1v = 2.0 * pp - pdh
     chop = F.chop(14)
     call = (chop >= 48) & np.isfinite(s1v) & (F.l <= s1v) & (F.c > s1v) & (F.c > F.o)
     put = (chop >= 48) & np.isfinite(r1v) & (F.h >= r1v) & (F.c < r1v) & (F.c < F.o)
@@ -408,11 +433,13 @@ def s_new_fisher_rev(F):
     hl2 = 0.5 * (F.h + F.l)
     lo = pd.Series(hl2).rolling(10).min().values
     hi = pd.Series(hl2).rolling(10).max().values
-    val = np.clip(0.66 * ((hl2 - lo) / (hi - lo + 1e-12) - 0.5) * 2.0, -0.999, 0.999)
-    val = pd.Series(val).ewm(alpha=0.5, adjust=False).mean().clip(-0.999, 0.999).values
-    ft = np.zeros(len(F.c))
+    raw = np.clip(2.0 * ((hl2 - lo) / (hi - lo + 1e-12) - 0.5), -0.999, 0.999)
+    val = pd.Series(raw).ewm(alpha=0.33, adjust=False).mean().clip(-0.999, 0.999).values
+    ft = np.zeros(len(F.c), dtype=float)
     for i in range(1, len(F.c)):
-        ft[i] = 0.5 * np.log((1 + val[i]) / (1 - val[i])) + 0.5 * ft[i - 1]
+        v = val[i]
+        if np.isfinite(v):
+            ft[i] = 0.5 * math.log((1.0 + v) / (1.0 - v)) + 0.5 * ft[i - 1]
     pft = _prev(ft)
     return _sig((pft < -2.0) & (ft > pft), (pft > 2.0) & (ft < pft))
 
@@ -929,6 +956,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default="lab_data")
     ap.add_argument("--download", action="store_true")
+    ap.add_argument("--source", choices=("yahoo", "dukascopy"), default="yahoo")
+    ap.add_argument("--days", type=int, default=90, help="кількість днів історії 1m для Dukascopy")
     ap.add_argument("--payout", type=float, default=0.85)
     ap.add_argument("--delay", type=int, default=0, help="затримка входу в хвилинах після закриття свічки")
     ap.add_argument("--out", default=".")
@@ -937,12 +966,12 @@ def main():
     args = ap.parse_args()
 
     if args.download:
-        print("Завантаження 1m-історії (Yahoo)…")
-        download_and_merge(PAIRS, args.data_dir)
+        print(f"Завантаження 1m-історії ({args.source})…")
+        download_and_merge(PAIRS, args.data_dir, source=args.source, days=args.days)
 
     data = {p: d for p in PAIRS if (d := load_pair(p, args.data_dir)) is not None}
     if not data:
-        print("Немає даних. Запустіть: python3 lab.py --download")
+        print("Немає даних. Запустіть: python3 lab.py --download --source dukascopy --days 90")
         sys.exit(1)
     first = min(d.index[0] for d in data.values())
     last = max(d.index[-1] for d in data.values())
