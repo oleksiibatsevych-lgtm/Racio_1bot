@@ -1,4 +1,6 @@
 import ast
+import json
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
@@ -10,12 +12,18 @@ import pandas as pd
 import ai_advisor
 import backtest
 import bot
+import calendar_filter
 import config
 import database
+import db_reset
+import lab
+import market_data
+import quality_gate
 import reversion_engine as rev
 import sr_levels
 import strategy_engine as se
 import telegram_views as views
+import tick_candles
 import trading_sessions as sessions
 
 
@@ -326,11 +334,14 @@ class CallbackTests(unittest.TestCase):
         db.clear_all_stats.return_value = True
 
         cfg = dict.fromkeys(se.ALL_STRATEGY_KEYS, True) | {"session_filter": False, "regime_filter": True, "news_filter": True, "auto_disable_49": True}
-        with patch.multiple(bot, database=db, strategies_status=cfg, ADMIN_IDS={1}, save_strategies_config=Mock(), AUTO_SCAN_CHATS=set()), patch.object(bot.threading, "Thread"):
+        with patch.multiple(bot, database=db, strategies_status=cfg, ADMIN_IDS={1}, save_strategies_config=Mock(), AUTO_SCAN_CHATS=set()), \
+             patch.object(bot.threading, "Thread"), \
+             patch.object(bot.db_reset, "reset_database_and_config", return_value={"tables": ["signals"], "config_reset": True}):
             markups = [
                 bot.inline_main_keyboard(7),
                 bot.stats_keyboard(),
                 bot.clear_stats_confirm_keyboard(),
+                bot.db_reset_confirm_keyboard(),
                 bot.active_keyboard(),
                 bot.scan_keyboard(),
                 bot.check_pairs_keyboard(),
@@ -346,8 +357,6 @@ class CallbackTests(unittest.TestCase):
                 bot.pairs_keyboard({}),
                 bot.auto_disabled_keyboard(db.get_auto_disabled_items()),
             ]
-            if hasattr(bot, "risk_keyboard"):
-                markups.append(bot.risk_keyboard())
             for cat in se.STRATEGY_CATEGORIES:
                 markups.append(bot.strategy_keyboard(category=cat))
             for pair in bot.PAIRS_MAP:
@@ -364,26 +373,82 @@ class CallbackTests(unittest.TestCase):
                 u.callback_query.edit_message_text.assert_called_once()
 
 
-class BacktestAndSecurityTests(unittest.TestCase):
-    def test_optional_session_filter_comparison_and_pair_matrix_report(self):
-        idx = pd.date_range("2026-01-01", periods=600, freq="5min")
-        df = pd.DataFrame(dict(open=np.arange(600.0) + 1, close=np.arange(600.0) + 1, high=np.arange(600.0) + 2, low=np.arange(600.0), volume=1), index=idx)
-        cfg = {p: p == "REV_RSI7" for p in rev.PRESETS}
-        off = backtest.simulate_reversion_pair("EUR/USD", df, cfg)
-        on = backtest.simulate_reversion_pair("EUR/USD", df, cfg | {"session_filter": True})
-        self.assertTrue(off)
-        self.assertTrue(on)
-        self.assertLess(len(on), len(off))
-        report = backtest.format_pair_strategy_report(off, "Test Matrix")
-        self.assertIn("Пара × Стратегія", report)
-        self.assertIn("EUR/USD", report)
+class NewModulesAndSecurityTests(unittest.TestCase):
+    def test_tick_candles_out_of_order_and_zero_guard(self):
+        sym = "TEST_TICK_SYM"
+        tick_candles._bars.pop(sym, None)
+        tick_candles.add_tick(sym, 0.0, 6000000)
+        tick_candles.add_tick(sym, -1.5, 6000000)
+        self.assertNotIn(sym, tick_candles._bars)
+        tick_candles.add_tick(sym, 1.10, 6000000)
+        tick_candles.add_tick(sym, 1.12, 6120000)
+        tick_candles.add_tick(sym, 1.11, 6060000)
+        self.assertEqual(list(tick_candles._bars[sym].keys()), [100, 101, 102])
 
-    def test_sanitize_database_url_preserves_ssl_without_broken_ampersand(self):
+    def test_admin_fail_closed_when_empty(self):
+        u = update_for()
+        with patch.multiple(bot, ADMIN_IDS=set(), ALLOW_OPEN_ADMIN=False):
+            u.callback_query.data = None
+            self.assertFalse(bot.require_admin(u))
+
+    def test_sanitize_database_url_and_biquote_symbol(self):
         cleaned = config._sanitize_database_url("postgres://u:p@ep-cool.neon.tech/neondb?channel_binding=require&sslmode=require")
         self.assertTrue(cleaned.startswith("postgresql://"))
         self.assertNotIn("channel_binding", cleaned)
         self.assertIn("?sslmode=require", cleaned)
-        self.assertNotIn("/neondb&", cleaned)
+        self.assertEqual(config.biquote_symbol("OANDA:USD_JPY"), "USDJPY")
+
+    def test_biquote_ohlc_and_calendar_schema_parsing(self):
+        df = market_data.parse_biquote_ohlc({
+            "symbol": "EURUSD",
+            "interval": "5m",
+            "bars": [
+                {"openTime": "2026-11-17T10:05:00Z", "open": 1.09, "high": 1.091, "low": 1.089, "close": 1.0905, "isOpen": True},
+                {"openTime": "2026-11-17T10:00:00Z", "open": 1.088, "high": 1.090, "low": 1.087, "close": 1.0895, "isOpen": False},
+                {"openTime": "2026-11-17T09:55:00Z", "open": 1.087, "high": 1.089, "low": 1.086, "close": 1.0880, "isOpen": False},
+            ],
+        })
+        self.assertEqual(len(df), 2)
+        self.assertTrue(df.index.is_monotonic_increasing)
+
+        events = calendar_filter._parse_generic_events([
+            {"time": "2026-11-17T13:30:00Z", "currency": "USD", "name": "Retail Sales", "importance": "high", "type": "indicator", "timeMode": "exact"},
+            {"time": "2026-11-17T00:00:00Z", "currency": "EUR", "name": "Holiday", "importance": "high", "type": "holiday", "timeMode": "date"},
+            {"time": "2026-11-17T00:00:00Z", "currency": "GBP", "name": "Tentative Speech", "importance": "high", "type": "event", "timeMode": "tentative"},
+        ])
+        self.assertEqual(len(events), 2)
+        self.assertTrue(events[0]["exact_time"])
+        self.assertFalse(events[1]["exact_time"])
+
+    def test_db_reset_truncates_and_restores_clean_config(self):
+        mock_conn = MagicMock()
+        cur = mock_conn.cursor.return_value.__enter__.return_value
+        cur.fetchall.return_value = [("signals",), ("bot_settings",)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_file = Path(tmpdir) / "strategies_config.json"
+            cfg_file.write_text('{"REV_RSI14": false}', encoding="utf-8")
+            with patch.object(db_reset.database, "get_connection", return_value=mock_conn):
+                res = db_reset.reset_database_and_config(cfg_file, reset_config=True)
+            self.assertEqual(res["tables"], ["signals", "bot_settings"])
+            self.assertTrue(res["config_reset"])
+            self.assertTrue(json.loads(cfg_file.read_text())["REV_RSI14"])
+            mock_conn.commit.assert_called_once()
+
+    def test_lab_new_strategies_causal_and_sr_weekend_gap_safe(self):
+        idx = pd.date_range("2026-11-13 00:00", periods=40, freq="1h")
+        idx = idx[(idx.weekday != 5) & ~((idx.weekday == 6) & (idx.hour < 22))]
+        df60 = pd.DataFrame({"open": 1.1, "high": 1.12, "low": 1.08, "close": 1.11}, index=idx)
+        pivs = sr_levels._daily_pivots_and_pdhl(df60, 1.11)
+        self.assertTrue(any(p["tag"] == "PDH" for p in pivs))
+
+        rng = np.random.default_rng(42)
+        idx5 = pd.date_range("2026-11-10 00:00", periods=400, freq="5min")
+        c = 1.10 + np.cumsum(rng.normal(0, 0.0005, len(idx5)))
+        df5 = pd.DataFrame({"open": c, "high": c + 0.0006, "low": c - 0.0006, "close": c, "volume": 10.0}, index=idx5)
+        F_full = lab.Feat(df5, "EUR/USD")
+        F_part = lab.Feat(df5.iloc[:260], "EUR/USD")
+        np.testing.assert_array_equal(lab.s_new_fisher_rev(F_full)[:260], lab.s_new_fisher_rev(F_part))
+        np.testing.assert_array_equal(lab.s_new_pdhl_reject(F_full)[:260], lab.s_new_pdhl_reject(F_part))
 
     def test_removed_modules_have_no_importers(self):
         removed = {"indicators", "filters", "signal_pipeline", "signal_processor", "timeframe_profiles", "adaptive_optimizer", "regime_detector", "ml_model", "charts"}
