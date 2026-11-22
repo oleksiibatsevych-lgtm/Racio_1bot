@@ -28,7 +28,7 @@ except ImportError:
     legacy_genai = None
     HAS_LEGACY_GENAI = False
 
-PREFERRED_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+PREFERRED_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
 SKIP_MODEL_WORDS = ("image", "tts", "live", "embedding", "aqa", "thinking", "exp", "learnlm", "gemma", "robotics", "audio")
 
 
@@ -111,7 +111,7 @@ class AIAdvisor:
                     if m.startswith("gemini") and ("flash" in m or "pro" in m)
                     and not any(w in m for w in SKIP_MODEL_WORDS)
                 ]
-                chosen.sort(key=lambda n: (0 if "flash" in n else 1, n))
+                chosen.sort(key=lambda n: (0 if "3.8" in n else (1 if "flash" in n else 2), n))
             chosen = chosen[:3] or wanted
             self._models_cache = (time.time(), chosen)
             return chosen
@@ -155,10 +155,13 @@ class AIAdvisor:
                     continue
                 try:
                     if HAS_NEW_GENAI and self._client is not None:
+                        cfg_kwargs = {"max_output_tokens": 360}
+                        if hasattr(genai_types, "ThinkingConfig") and model_name.startswith("gemini-3"):
+                            cfg_kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_level="LOW")
                         response = self._client.models.generate_content(
                             model=model_name,
                             contents=prompt,
-                            config=genai_types.GenerateContentConfig(temperature=0.2, max_output_tokens=360),
+                            config=genai_types.GenerateContentConfig(**cfg_kwargs),
                         )
                     else:
                         model = legacy_genai.GenerativeModel(model_name)
