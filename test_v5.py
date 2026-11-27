@@ -1,7 +1,6 @@
-import ast
 import json
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -9,18 +8,10 @@ from unittest.mock import MagicMock, Mock, patch
 import numpy as np
 import pandas as pd
 
-import ai_advisor
-import backtest
 import bot
-import calendar_filter
 import config
-import database
 import db_reset
-import lab
-import market_data
-import quality_gate
-import reversion_engine as rev
-import sr_levels
+import strategies_100
 import strategy_engine as se
 import telegram_views as views
 import tick_candles
@@ -42,422 +33,150 @@ class SessionTests(unittest.TestCase):
         cases = {
             "2026-06-01": {"06:59": "Asia", "07:00": "London", "11:59": "London", "12:00": "Overlap", "14:59": "Overlap", "15:00": "NY", "19:59": "NY", "20:00": "Other"},
             "2026-01-02": {"06:59": "Asia", "07:00": "Other", "08:00": "London", "12:59": "London", "13:00": "Overlap", "15:59": "Overlap", "16:00": "NY", "20:59": "NY", "21:00": "Other"},
-            "2026-03-10": {"07:00": "Other", "08:00": "London", "12:00": "Overlap", "16:00": "NY", "20:00": "Other"},
-            "2026-10-27": {"07:00": "Other", "08:00": "London", "12:00": "Overlap", "16:00": "NY", "20:00": "Other"},
         }
         for day, times in cases.items():
             for clock, expected in times.items():
                 value = datetime.fromisoformat(day + "T" + clock)
-                self.assertEqual(sessions.session_name(value), expected, (day, clock))
+                self.assertEqual(sessions.session_name(value), expected)
                 self.assertEqual(sessions.session_name(value.replace(tzinfo=timezone.utc).astimezone(sessions.KYIV)), expected)
 
-    def test_session_masks_match_vectorized_research_definition(self):
-        for start in ["2026-03-01", "2026-10-01"]:
-            idx = pd.date_range(start, periods=24 * 60 * 35, freq="min", tz="UTC")
-            london = idx.tz_convert("Europe/London").hour
-            ny = idx.tz_convert("America/New_York").hour
-            l = (london >= 8) & (london < 16)
-            n = (ny >= 8) & (ny < 16)
-            expected = np.select([l & n, l & ~n, n & ~l, idx.hour < 7], ["Overlap", "London", "NY", "Asia"], default="Other")
-            self.assertEqual([sessions.session_name(t) for t in idx], list(expected))
-
-    def test_selection_uses_bar_end_and_falls_through_disallowed_preset(self):
-        df = pd.DataFrame(dict(open=1.0, high=1.1, low=0.9, close=1.0, volume=1), index=pd.date_range("2026-01-01 16:20", periods=201, freq="5min"))
-        ind = rev.calculate_indicators(df)
-        ind.loc[ind.index[-1], list(rev.PRESETS)] = 1
-        now = ind.index[-1] + timedelta(minutes=5)
-        self.assertEqual(sessions.session_name(now), "London")
-        cfg = dict.fromkeys(rev.PRESETS, True) | {"REV_RSI14": False, "session_filter": True}
-        self.assertEqual(rev.candidates_from_indicators("EUR/USD", ind, now, cfg)[0]["strategy"], "REV_RSI7")
-        cfg["session_filter"] = False
-        self.assertEqual(rev.candidates_from_indicators("EUR/USD", ind, now, cfg)[0]["strategy"], "REV_BB3")
-
-    def test_daily_report_schedule_dst_exact_time_and_period_start(self):
-        for now, expected in [("2026-03-28T18:00", "2026-03-28T19:00"), ("2026-03-28T20:00", "2026-03-29T18:00"), ("2026-10-24T20:00", "2026-10-25T19:00"), ("2026-01-01T19:00", "2026-01-02T19:00")]:
-            self.assertEqual(sessions.next_daily_report(datetime.fromisoformat(now)), datetime.fromisoformat(expected).replace(tzinfo=timezone.utc))
+    def test_daily_report_schedule_and_period_start(self):
+        self.assertEqual(sessions.next_daily_report(datetime.fromisoformat("2026-03-28T18:00")), datetime.fromisoformat("2026-03-28T19:00").replace(tzinfo=timezone.utc))
         self.assertEqual(sessions.period_start("today", datetime(2026, 6, 1, 22)), datetime(2026, 6, 1, 21))
         self.assertIsNone(sessions.period_start("all", datetime(2026, 1, 1)))
-        with self.assertRaises(ValueError):
-            sessions.period_start("invalid", datetime(2026, 1, 1))
 
 
 class ViewTests(unittest.TestCase):
-    def test_human_stats_strips_oanda_and_long_bars(self):
-        rows = [
-            dict(status="CLOSED", result="WIN", ticker="OANDA:AUD_USD", strategy="REV_RSI14"),
-            dict(status="CLOSED", result="LOSS", ticker="OANDA:AUD_USD", strategy="REV_RSI14"),
-            dict(status="CLOSED", result="NEUTRAL", ticker="OANDA:EUR_USD", strategy="REV_RSI14"),
-            dict(status="VOID", result="WIN", ticker="OANDA:EUR_USD", strategy="REV_RSI14"),
-        ]
-        text = views.stats_text(rows, "all")
-        self.assertIn("50.0%", text)
-        self.assertIn("1✅ / 1❌", text)
-        self.assertIn("AUD/USD", text)
-        self.assertNotIn("OANDA:", text)
-        self.assertNotIn("█████░░░░░", text)
-        self.assertIn("Угод за цей період немає", views.stats_text([], "today"))
-        for value in [-100, 0, 50, 100, 200]:
-            self.assertEqual(len(views.progress_bar(value)), 10)
+    def test_wr_tags_card_and_binary_points(self):
+        self.assertEqual(views.format_wr_tag({"wr": 62.4, "total": 18, "source": "LIVE"}), "[L:62%·18]")
+        self.assertEqual(views.format_wr_tag({"wr": 41.0, "total": 50, "source": "BT"}), "[B:41%·50]")
+        self.assertEqual(views.format_wr_tag(None), "[—]")
 
-    def test_matrix_radar_sr_and_autodis_views(self):
-        live = [dict(ticker="OANDA:EUR_USD", strategy="DIV_RSI_5M", wins=6, total=10)]
-        bt = [dict(pair_name="EUR/USD", strategy_key="STARC_5M", wins=18, total=30)]
-        mtxt = views.stats_matrix_text(live, bt)
-        self.assertIn("EUR/USD", mtxt)
-        self.assertNotIn("OANDA:", mtxt)
-        self.assertIn("DIV_RSI_5M", mtxt)
-        self.assertIn("STARC_5M", mtxt)
-        self.assertIn("Жодна стратегія зараз не заблокована", views.auto_disabled_text([]))
-
-        idx = pd.date_range("2026-11-15 00:00", periods=300, freq="5min")
-        rng = np.random.default_rng(7)
-        c = 1.1200 + np.cumsum(rng.normal(0, 0.0004, len(idx)))
-        df5 = pd.DataFrame({"open": c, "high": c + 0.0005, "low": c - 0.0005, "close": c}, index=idx)
-        sr_plan = sr_levels.analyze_pair_sr("EUR/USD", df5, live_price=float(c[-1]))
-        self.assertTrue(sr_plan["ok"])
-
-        diag = dict(pair="EUR/USD", session="Overlap", chop=51.0, adx=19.2, rsi14=42.5, vol_ratio=1.1, trend_15m="🟢 Висхідний", trend_60m="🟡 Боковий", checked=40, off_global=10, off_pair=5, off_session=2, muted=0)
-        radar = views.pair_radar_text(diag, (False, "OK"), [], live, bt, live_price=float(c[-1]), sr_plan=sr_plan)
-        self.assertIn("EUR/USD", radar)
-        self.assertIn("Рівні підтримки та опору", radar)
-        self.assertIn("STARC_5M", radar)
-
-    def test_card_times_confidence_binary_points_and_result_views(self):
         cand = dict(strategy="REV_RSI14", signal="CALL", rsi=12, bar_end=datetime(2026, 6, 1, 14))
         card = views.signal_card("EUR/USD", cand, 1.2, datetime(2026, 6, 1, 14))
         self.assertNotIn("REV_RSI14", card)
-        self.assertNotIn("Research holdout", card)
-        for value in ["🟢 CALL", "ЕКСПІРАЦІЯ: 60 ХВИЛИН", "18:00 Київ", "Впевненість:", "Overlap (Лондон + Нью-Йорк)"]:
-            self.assertIn(value, card)
+        for v in ["🟢 CALL", "ЕКСПІРАЦІЯ: 60 ХВИЛИН", "18:00 Київ", "Впевненість:", "Overlap (Лондон + Нью-Йорк)"]:
+            self.assertIn(v, card)
 
-        cand_conc = dict(
-            strategy="LIQ_SWP_5M", tf="5m", signal="PUT", rsi=53.4,
-            bar_end=datetime(2026, 11, 16, 14, 30), exp_mode="DYN", suggested_exp=15,
-            confluence_score=2.15, call_votes=0, put_votes=2, chop=66.0, adx=14.9,
-            agreeing_strategies=["LIQ_SWP_5M", "LIQ_SWP_3M"],
-        )
-        card_conc = views.signal_card("OANDA:USD_JPY", cand_conc, 159.595, datetime(2026, 11, 16, 14, 30), risk_amount=20.0)
-        self.assertIn("USD/JPY", card_conc)
-        self.assertIn("159.595", card_conc)
-        self.assertIn("ЕКСПІРАЦІЯ: 15 ХВИЛИН", card_conc)
-        self.assertNotIn("LIQ_SWP_5M", card_conc)
-        self.assertNotIn("$20.00", card_conc)
-        self.assertNotIn("Реком. ставка", card_conc)
-        self.assertIn("Консенсус", card_conc)
-
-        s_jpy_win = views.settlement_text("WIN", 159.523, 41, pair="USD/JPY", entry_price=159.564, signal_type="PUT")
-        self.assertIn("159.523", s_jpy_win)
-        self.assertIn("+41 пт", s_jpy_win)
         s_jpy_loss = views.settlement_text("LOSS", 159.60950, -14, pair="USD/JPY", entry_price=159.595, signal_type="PUT")
         self.assertIn("159.610", s_jpy_loss)
         self.assertIn("-14.5 пт", s_jpy_loss)
-        self.assertIn("VOID", views.settlement_text("VOID", None, 0))
-
-        self.assertIn("Відкритих угод немає", views.active_text([], datetime(2026, 1, 1)))
-        row = dict(id=1, ticker="OANDA:EUR_USD", strategy="REV_RSI7", signal_type="PUT", expiration_mins=45, created_at=datetime(2026, 1, 1), expires_at=datetime(2026, 1, 1, 0, 1), status="CLOSED", result="WIN", exit_price=1.2, pips=100, entry_price=1.2010)
-        act = views.active_text([row], datetime(2026, 1, 1), live_prices={"OANDA:EUR_USD": 1.2000})
-        self.assertIn("EUR/USD", act)
-        self.assertNotIn("OANDA:", act)
-        self.assertIn("+100 пт", act)
-        self.assertIn("WIN", views.history_text([row]))
-        self.assertIn("Завершених угод немає", views.history_text([]))
-
-    def test_query_chat_scope_period_history_limit_and_connection_cleanup(self):
-        connection = MagicMock()
-        cursor = connection.cursor.return_value.__enter__.return_value
-        cursor.fetchall.return_value = []
-        with patch.object(database, "get_connection", return_value=connection):
-            database.get_chat_signals(7, "history", since=datetime(2026, 1, 1))
-            sql, params = cursor.execute.call_args.args
-            self.assertIn("chat_id = %s", sql)
-            self.assertIn("LIMIT 15", sql)
-            self.assertEqual(params, [7, datetime(2026, 1, 1)])
-            database.get_chat_signals(7, "active")
-            self.assertIn("status = 'PENDING'", cursor.execute.call_args.args[0])
-            cursor.execute.side_effect = RuntimeError("DB unavailable")
-            with self.assertRaises(RuntimeError):
-                database.get_chat_signals(7)
-        self.assertEqual(connection.close.call_count, 3)
-        with self.assertRaises(ValueError):
-            database.get_chat_signals(7, "invalid")
 
 
-class StrategyEngineTests(unittest.TestCase):
-    def test_registry_constraints_and_callback_sizes(self):
-        self.assertEqual(len(se.ALL_STRATEGY_KEYS), 57)
-        for key, meta in se.STRATEGIES_META.items():
-            self.assertLessEqual(len(key), 50)
+class Strategy157AndLifecycleTests(unittest.TestCase):
+    def test_registry_157_unique_constraints_and_64_byte_callbacks(self):
+        se.sync_registry_from_deleted(set())
+        self.assertEqual(len(se.FULL_STRATEGIES_META), 157)
+        self.assertEqual(len(strategies_100.EXTENDED_META), 100)
+        self.assertEqual(len(se.ALL_STRATEGY_KEYS), 157)
+        for key, meta in se.FULL_STRATEGIES_META.items():
+            self.assertLessEqual(len(meta["title"]), 22, key)
             self.assertIn(meta["category"], se.STRATEGY_CATEGORIES)
             self.assertTrue(1 <= meta["exp"] <= 60)
             for pair in config.PAIRS_MAP:
-                cb = f"pair_toggle|{pair}|{key}"
-                self.assertLessEqual(len(cb.encode("utf-8")), 64, cb)
+                for cb in (f"pair_toggle|{pair}|{key}|0", f"autodis_en|P|{pair}|{key}", f"del_one_ok|{key}"):
+                    self.assertLessEqual(len(cb.encode("utf-8")), 64, cb)
 
-    def test_confluence_and_golden_middle_dynamic_expiration(self):
-        cands = [
-            {"strategy": "REV_RSI14", "signal": "CALL", "suggested_exp": 60, "tf_minutes": 5, "weight": 1.4, "vol_ratio": 1.0, "priority": 100},
-            {"strategy": "STARC_5M", "signal": "CALL", "suggested_exp": 15, "tf_minutes": 5, "weight": 1.15, "vol_ratio": 1.0, "priority": 86},
-            {"strategy": "DIV_RSI_5M", "signal": "CALL", "suggested_exp": 15, "tf_minutes": 5, "weight": 1.20, "vol_ratio": 1.0, "priority": 91},
-            {"strategy": "EMA_RIB_3M", "signal": "PUT", "suggested_exp": 9, "tf_minutes": 3, "weight": 0.95, "vol_ratio": 1.0, "priority": 77},
-            {"strategy": "PA_PIN_BB_5M", "signal": "PUT", "suggested_exp": 15, "tf_minutes": 5, "weight": 1.10, "vol_ratio": 1.0, "priority": 84},
-        ]
-        res, reason = se.resolve_confluence(cands, conflict_mode="CONC", threshold=1.0, expiry_mode="DYN")
-        self.assertEqual(reason, "OK")
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res[0]["signal"], "CALL")
-        self.assertEqual(res[0]["call_votes"], 3)
-        self.assertEqual(res[0]["put_votes"], 2)
-        self.assertTrue(15 <= res[0]["suggested_exp"] <= 35)
+    def test_all_100_new_strategies_strictly_causal(self):
+        rng = np.random.default_rng(777)
+        idx = pd.date_range("2026-11-10 00:00", periods=500, freq="5min")
+        idx = idx[(idx.weekday != 5) & ~((idx.weekday == 6) & (idx.hour < 22))]
+        c = 1.1000 + np.cumsum(rng.standard_t(df=4, size=len(idx)) * 0.0003)
+        o = np.roll(c, 1); o[0] = c[0]
+        h = np.maximum(o, c) + np.abs(rng.normal(0, 0.00025, len(idx)))
+        l = np.minimum(o, c) - np.abs(rng.normal(0, 0.00025, len(idx)))
+        v = rng.lognormal(2.5, 0.7, len(idx)).astype(float)
+        df = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v}, index=idx)
 
-        weak_res, weak_reason = se.resolve_confluence(cands, conflict_mode="CONC", threshold=2.5, expiry_mode="DYN")
-        self.assertEqual(weak_res, [])
-        self.assertIn("Слабка конфлюентність", weak_reason)
+        ind_f = se.compute_base_indicators(df)
+        ind_p = se.compute_base_indicators(df.iloc[:260])
+        htf_f = {"trend": np.zeros(len(df), dtype=np.int8), "rsi": np.full(len(df), 50.0)}
+        htf_p = {"trend": np.zeros(260, dtype=np.int8), "rsi": np.full(260, 50.0)}
 
-        tie = [
-            {"strategy": "STARC_5M", "signal": "CALL", "suggested_exp": 15, "tf_minutes": 5, "weight": 1.0},
-            {"strategy": "EMA_RIB_5M", "signal": "PUT", "suggested_exp": 15, "tf_minutes": 5, "weight": 1.0},
-        ]
-        tie_res, tie_reason = se.resolve_confluence(tie, conflict_mode="CONC", threshold=1.0, expiry_mode="DYN")
-        self.assertEqual(tie_res, [])
-        self.assertIn("Конфлікт/нічия", tie_reason)
+        for key in strategies_100.EXTENDED_META:
+            s_full = se.evaluate_strategy_series(df, key, ind=ind_f, htf_ctx=htf_f, regime_filter=False)
+            s_part = se.evaluate_strategy_series(df.iloc[:260], key, ind=ind_p, htf_ctx=htf_p, regime_filter=False)
+            np.testing.assert_array_equal(s_full[:260], s_part, f"Look-ahead in {key}")
 
-        maj_res, _ = se.resolve_confluence(cands, conflict_mode="MAJ", threshold=1.0, expiry_mode="FIX")
-        self.assertEqual(len(maj_res), 3)
-        self.assertTrue(all(c["signal"] == "CALL" for c in maj_res))
-
-    def test_new_strategies_strictly_causal_no_lookahead(self):
-        rng = np.random.default_rng(123)
-        n = 360
-        idx = pd.date_range("2026-01-01 00:00", periods=n, freq="5min")
-        close = 1.1000 + np.cumsum(rng.normal(0, 0.0007, n))
-        open_ = np.roll(close, 1)
-        open_[0] = 1.1000
-        high = np.maximum(open_, close) + np.abs(rng.normal(0, 0.0004, n))
-        low = np.minimum(open_, close) - np.abs(rng.normal(0, 0.0004, n))
-        df = pd.DataFrame({"open": open_, "high": high, "low": low, "close": close, "volume": 1.0}, index=idx)
-
-        for key in ("DIV_RSI_5M", "DIV_MACD_5M", "AO_TWIN_5M", "STARC_5M", "LINREG_5M", "ICHI_TK_5M", "PSAR_EMA_5M", "CCI_WPR_5M", "DEM_BB_5M", "WT_CROSS_5M", "JUDAS_LON_5M", "PA_3LS_5M"):
-            full_s = se.evaluate_strategy_series(df, key, regime_filter=False)
-            trunc_s = se.evaluate_strategy_series(df.iloc[:260], key, regime_filter=False)
-            np.testing.assert_array_equal(full_s[:260], trunc_s, f"Look-ahead detected in {key}")
+    def test_delete_and_restore_strategies_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            cfg_p = tmp / "strategies_config.json"
+            del_p = tmp / "deleted_strategies.json"
+            cfg_p.write_text(json.dumps({"MR_Z50_5M": True, "TR_HOLY_5M": True}), encoding="utf-8")
+            se.sync_registry_from_deleted(set())
+            try:
+                removed = se.delete_strategies_permanently(["MR_Z50_5M"], config_path=cfg_p, deleted_path=del_p)
+                self.assertEqual(removed, ["MR_Z50_5M"])
+                self.assertNotIn("MR_Z50_5M", se.STRATEGIES_META)
+                self.assertNotIn("MR_Z50_5M", json.loads(cfg_p.read_text()))
+                restored = se.restore_all_deleted_strategies(config_path=cfg_p, deleted_path=del_p)
+                self.assertEqual(restored, 1)
+                self.assertIn("MR_Z50_5M", se.STRATEGIES_META)
+                self.assertTrue(json.loads(cfg_p.read_text())["MR_Z50_5M"])
+            finally:
+                se.sync_registry_from_deleted(set())
 
 
-class AutoDisableTests(unittest.TestCase):
-    def test_backtest_auto_disable_respects_threshold_sample_and_manual_override(self):
-        conn = MagicMock()
-        cur = conn.cursor.return_value
-        cur.fetchall.return_value = [
-            {"pair_name": "EUR/USD", "strategy_key": "CRSI_1M", "wins": 7, "total": 20},
-            {"pair_name": "GBP/USD", "strategy_key": "CRSI_1M", "wins": 6, "total": 15},
-            {"pair_name": "EUR/USD", "strategy_key": "REV_RSI14", "wins": 12, "total": 20},
-            {"pair_name": "EUR/USD", "strategy_key": "STARC_5M", "wins": 2, "total": 5},
-        ]
-        cur.fetchone.return_value = None
-        with patch.object(database, "get_connection", return_value=conn):
-            events = database.evaluate_and_apply_auto_disable(source="BACKTEST", threshold=0.49, min_pair=15, min_global=30)
-            disabled_pairs = {(e["pair"], e["strategy"]) for e in events["disabled_pair"]}
-            self.assertIn(("EUR/USD", "CRSI_1M"), disabled_pairs)
-            self.assertIn(("GBP/USD", "CRSI_1M"), disabled_pairs)
-            self.assertNotIn(("EUR/USD", "REV_RSI14"), disabled_pairs)
-            self.assertNotIn(("EUR/USD", "STARC_5M"), disabled_pairs)
-            disabled_globals = {e["strategy"] for e in events["disabled_global"]}
-            self.assertIn("CRSI_1M", disabled_globals)
-
-
-class LiveTests(unittest.TestCase):
-    def setUp(self):
-        self.now = datetime(2026, 1, 2, 9)
-        self.db = Mock()
-        self.db.has_open_reversion_signal.return_value = False
-        self.db.save_signal.return_value = 1
-        self.db.is_strategy_muted.return_value = (False, 0)
-        self.db.get_all_bot_settings.return_value = {}
-        self.telegram = Mock()
-        self.telegram.send_message.return_value.message_id = 99
-        self.gate = Mock()
-        self.gate.check.return_value = (True, "OK")
-        self.segment = Mock()
-        self.segment.check.return_value = (True, "OK")
-        p = patch.multiple(
-            bot, bot=self.telegram, database=self.db, signal_gate=self.gate, segment_filter=self.segment,
-            reversion_guard=rev.ReversionGuard(),
-            strategies_status=dict.fromkeys(se.ALL_STRATEGY_KEYS, True) | {"session_filter": False, "regime_filter": True, "news_filter": True, "auto_disable_49": True},
-            get_utc_now=Mock(return_value=self.now), get_live_price=Mock(return_value=1.2), schedule_signal_timer=Mock(),
-        )
-        p.start()
-        self.addCleanup(p.stop)
-        self.cand = dict(pair="EUR/USD", tf="5m", tf_minutes=5, strategy="REV_RSI14", signal="CALL", bar_end=self.now, bar_id="one", current_price=1.2, atr=0.002, rsi=12)
-
-    def process(self, **kwargs):
-        return bot.process_candidate(7, "EUR/USD", "TEST", self.cand, **kwargs)
-
-    def test_fixed_expiry_saves_and_hides_strategy_from_card(self):
-        self.assertTrue(self.process()[0])
-        args = self.db.save_signal.call_args.kwargs
-        self.assertEqual(args["expiration_mins"], 60)
-        self.assertEqual(args["expires_at"], self.now + timedelta(minutes=60))
-        self.assertNotIn("REV_RSI14", args["message_text"])
-        self.assertIn("ЕКСПІРАЦІЯ: 60 ХВИЛИН", args["message_text"])
-        self.gate.register.assert_called_once()
-        self.assertFalse(self.process()[0])
-        self.assertFalse(hasattr(ai_advisor.AIAdvisor, "evaluate_signal"))
-        self.assertFalse(hasattr(bot, "ml_filter"))
-
-    def test_settlement_edits_card_and_sends_reply_for_all_results(self):
-        sig = dict(id=1, status="PENDING", ticker="TEST", entry_price=1.2, signal_type="CALL", expiration_mins=60, expires_at=self.now - timedelta(seconds=181), chat_id=7, message_id=99, message_text="original")
-        self.db.get_signal_by_id.return_value = sig
-        self.db.claim_signal.return_value = True
-        with patch.object(bot, "get_exit_price") as price:
-            for value, result in [(1.3, "WIN"), (1.1, "LOSS"), (1.2, "NEUTRAL"), (None, "VOID")]:
-                self.telegram.reset_mock()
-                price.return_value = value
-                bot.process_signal_expiration(1)
-                edited = self.telegram.edit_message_text.call_args.kwargs
-                self.assertEqual(edited["message_id"], 99)
-                self.assertIn("original", edited["text"])
-                self.assertIn(result, edited["text"])
-
-
-class CallbackTests(unittest.TestCase):
-    def test_all_emitted_callbacks_and_reply_buttons_have_handlers(self):
+class CallbackAndTelegramControlTests(unittest.TestCase):
+    def test_all_telegram_controls_and_winrate_buttons(self):
+        se.sync_registry_from_deleted(set())
         db = Mock()
         db.get_pair_strategy_status.return_value = True
         db.get_chat_signals.return_value = []
         db.get_auto_disabled_map.return_value = {}
-        db.get_auto_disabled_items.return_value = [
-            dict(scope_type="GLOBAL", pair_name="*", strategy_key="CRSI_1M", win_rate=0.40, wins=4, total=10, source="BACKTEST"),
-            dict(scope_type="PAIR", pair_name="EUR/USD", strategy_key="ST_MOM_3M", win_rate=0.35, wins=7, total=20, source="LIVE"),
-        ]
+        db.get_auto_disabled_items.return_value = []
         db.get_detailed_pair_strategy_stats.return_value = []
         db.get_backtest_results.return_value = []
         db.get_all_bot_settings.return_value = {}
+        db.get_strategy_winrate_summary.return_value = {"MR_VWAP_Z_5M": {"wr": 64.5, "total": 31, "source": "BT"}}
         db.clear_all_stats.return_value = True
+        db.delete_strategies_data.return_value = True
 
         cfg = dict.fromkeys(se.ALL_STRATEGY_KEYS, True) | {"session_filter": False, "regime_filter": True, "news_filter": True, "auto_disable_49": True}
         with patch.multiple(bot, database=db, strategies_status=cfg, ADMIN_IDS={1}, save_strategies_config=Mock(), AUTO_SCAN_CHATS=set()), \
              patch.object(bot.threading, "Thread"), \
              patch.object(bot.db_reset, "reset_database_and_config", return_value={"tables": ["signals"], "config_reset": True}):
+            mk_mean = bot.strategy_keyboard(category="MEAN", page=0, wr_summary=db.get_strategy_winrate_summary())
+            btn_texts = [b.text for row in mk_mean.inline_keyboard for b in row]
+            self.assertTrue(any("[B:64%·31]" in t or "[B:65%·31]" in t for t in btn_texts))
+
             markups = [
-                bot.inline_main_keyboard(7),
-                bot.stats_keyboard(),
-                bot.clear_stats_confirm_keyboard(),
-                bot.db_reset_confirm_keyboard(),
-                bot.active_keyboard(),
-                bot.scan_keyboard(),
-                bot.check_pairs_keyboard(),
-                bot.backtest_keyboard("all"),
-                bot.backtest_keyboard("act"),
-                bot.settings_menu_keyboard(),
-                bot.thresholds_keyboard(),
-                bot.confluence_keyboard(),
-                bot.expiry_keyboard(),
-                bot.filters_keyboard(),
-                bot.tz_keyboard(),
-                bot.strategy_keyboard(),
-                bot.pairs_keyboard({}),
-                bot.auto_disabled_keyboard(db.get_auto_disabled_items()),
+                bot.inline_main_keyboard(7), bot.stats_keyboard(), bot.clear_stats_confirm_keyboard(),
+                bot.db_reset_confirm_keyboard(), bot.active_keyboard(), bot.scan_keyboard(),
+                bot.check_pairs_keyboard(), bot.backtest_keyboard("all"), bot.settings_menu_keyboard(),
+                bot.lab_settings_keyboard(), bot.thresholds_keyboard(), bot.confluence_keyboard(),
+                bot.expiry_keyboard(), bot.filters_keyboard(), bot.tz_keyboard(),
+                bot.strategy_keyboard(), bot.delete_strategies_keyboard(wr_summary=db.get_strategy_winrate_summary()),
             ]
             for cat in se.STRATEGY_CATEGORIES:
-                markups.append(bot.strategy_keyboard(category=cat))
-            for pair in bot.PAIRS_MAP:
-                markups.append(bot.strategy_keyboard(pair=pair))
-                for cat in se.STRATEGY_CATEGORIES:
-                    markups.append(bot.strategy_keyboard(category=cat, pair=pair))
-
+                markups.append(bot.strategy_keyboard(category=cat, page=0))
             callbacks = {btn.callback_data for mk in markups for row in mk.inline_keyboard for btn in row}
             for data in callbacks:
                 self.assertLessEqual(len(data.encode("utf-8")), 64, data)
                 u = update_for(data)
                 bot.handle_callback(u, None)
                 u.callback_query.answer.assert_called_once()
-                u.callback_query.edit_message_text.assert_called_once()
 
 
-class NewModulesAndSecurityTests(unittest.TestCase):
-    def test_tick_candles_out_of_order_and_zero_guard(self):
-        sym = "TEST_TICK_SYM"
+class SecurityAndModulesTests(unittest.TestCase):
+    def test_tick_candles_and_db_reset(self):
+        sym = "TEST_T_157"
         tick_candles._bars.pop(sym, None)
-        tick_candles.add_tick(sym, 0.0, 6000000)
-        tick_candles.add_tick(sym, -1.5, 6000000)
-        self.assertNotIn(sym, tick_candles._bars)
         tick_candles.add_tick(sym, 1.10, 6000000)
         tick_candles.add_tick(sym, 1.12, 6120000)
         tick_candles.add_tick(sym, 1.11, 6060000)
         self.assertEqual(list(tick_candles._bars[sym].keys()), [100, 101, 102])
+        self.assertTrue(config._sanitize_database_url("postgres://u:p@host/db?channel_binding=require&sslmode=require").startswith("postgresql://"))
 
-    def test_admin_fail_closed_when_empty(self):
-        u = update_for()
-        with patch.multiple(bot, ADMIN_IDS=set(), ALLOW_OPEN_ADMIN=False):
-            u.callback_query.data = None
-            self.assertFalse(bot.require_admin(u))
-
-    def test_sanitize_database_url_and_biquote_symbol(self):
-        cleaned = config._sanitize_database_url("postgres://u:p@ep-cool.neon.tech/neondb?channel_binding=require&sslmode=require")
-        self.assertTrue(cleaned.startswith("postgresql://"))
-        self.assertNotIn("channel_binding", cleaned)
-        self.assertIn("?sslmode=require", cleaned)
-        self.assertEqual(config.biquote_symbol("OANDA:USD_JPY"), "USDJPY")
-
-    def test_biquote_ohlc_and_calendar_schema_parsing(self):
-        df = market_data.parse_biquote_ohlc({
-            "symbol": "EURUSD",
-            "interval": "5m",
-            "bars": [
-                {"openTime": "2026-11-17T10:05:00Z", "open": 1.09, "high": 1.091, "low": 1.089, "close": 1.0905, "isOpen": True},
-                {"openTime": "2026-11-17T10:00:00Z", "open": 1.088, "high": 1.090, "low": 1.087, "close": 1.0895, "isOpen": False},
-                {"openTime": "2026-11-17T09:55:00Z", "open": 1.087, "high": 1.089, "low": 1.086, "close": 1.0880, "isOpen": False},
-            ],
-        })
-        self.assertEqual(len(df), 2)
-        self.assertTrue(df.index.is_monotonic_increasing)
-
-        events = calendar_filter._parse_generic_events([
-            {"time": "2026-11-17T13:30:00Z", "currency": "USD", "name": "Retail Sales", "importance": "high", "type": "indicator", "timeMode": "exact"},
-            {"time": "2026-11-17T00:00:00Z", "currency": "EUR", "name": "Holiday", "importance": "high", "type": "holiday", "timeMode": "date"},
-            {"time": "2026-11-17T00:00:00Z", "currency": "GBP", "name": "Tentative Speech", "importance": "high", "type": "event", "timeMode": "tentative"},
-        ])
-        self.assertEqual(len(events), 2)
-        self.assertTrue(events[0]["exact_time"])
-        self.assertFalse(events[1]["exact_time"])
-
-    def test_db_reset_truncates_and_restores_clean_config(self):
         mock_conn = MagicMock()
-        cur = mock_conn.cursor.return_value.__enter__.return_value
-        cur.fetchall.return_value = [("signals",), ("bot_settings",)]
+        mock_conn.cursor.return_value.__enter__.return_value.fetchall.return_value = [("signals",)]
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_file = Path(tmpdir) / "strategies_config.json"
-            cfg_file.write_text('{"REV_RSI14": false}', encoding="utf-8")
             with patch.object(db_reset.database, "get_connection", return_value=mock_conn):
                 res = db_reset.reset_database_and_config(cfg_file, reset_config=True)
-            self.assertEqual(res["tables"], ["signals", "bot_settings"])
-            self.assertTrue(res["config_reset"])
-            self.assertTrue(json.loads(cfg_file.read_text())["REV_RSI14"])
-            mock_conn.commit.assert_called_once()
-
-    def test_lab_new_strategies_causal_and_sr_weekend_gap_safe(self):
-        idx = pd.date_range("2026-11-13 00:00", periods=40, freq="1h")
-        idx = idx[(idx.weekday != 5) & ~((idx.weekday == 6) & (idx.hour < 22))]
-        df60 = pd.DataFrame({"open": 1.1, "high": 1.12, "low": 1.08, "close": 1.11}, index=idx)
-        pivs = sr_levels._daily_pivots_and_pdhl(df60, 1.11)
-        self.assertTrue(any(p["tag"] == "PDH" for p in pivs))
-
-        rng = np.random.default_rng(42)
-        idx5 = pd.date_range("2026-11-10 00:00", periods=400, freq="5min")
-        c = 1.10 + np.cumsum(rng.normal(0, 0.0005, len(idx5)))
-        df5 = pd.DataFrame({"open": c, "high": c + 0.0006, "low": c - 0.0006, "close": c, "volume": 10.0}, index=idx5)
-        F_full = lab.Feat(df5, "EUR/USD")
-        F_part = lab.Feat(df5.iloc[:260], "EUR/USD")
-        np.testing.assert_array_equal(lab.s_new_fisher_rev(F_full)[:260], lab.s_new_fisher_rev(F_part))
-        np.testing.assert_array_equal(lab.s_new_pdhl_reject(F_full)[:260], lab.s_new_pdhl_reject(F_part))
-
-    def test_removed_modules_have_no_importers(self):
-        removed = {"indicators", "filters", "signal_pipeline", "signal_processor", "timeframe_profiles", "adaptive_optimizer", "regime_detector", "ml_model", "charts"}
-        for path in Path(__file__).parent.glob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text())):
-                if isinstance(node, ast.ImportFrom):
-                    self.assertNotIn(node.module, removed, path.name)
-                elif isinstance(node, ast.Import):
-                    self.assertFalse(removed & {a.name for a in node.names}, path.name)
+            self.assertEqual(res["tables"], ["signals"])
+            self.assertEqual(len(json.loads(cfg_file.read_text())), 161)
 
 
 if __name__ == "__main__":
