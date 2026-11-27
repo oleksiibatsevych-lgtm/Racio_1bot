@@ -56,6 +56,10 @@ BIQUOTE_ENABLED = os.environ.get("BIQUOTE_ENABLED", "true").lower() in ("1", "tr
 DUKASCOPY_ENABLED = os.environ.get("DUKASCOPY_ENABLED", "true").lower() in ("1", "true", "yes")
 
 PRUNE_WR_THRESHOLD = float(os.environ.get("PRUNE_WR_THRESHOLD", "0.45"))
+PRUNE_MIN_TRADES = int(os.environ.get("PRUNE_MIN_TRADES", "20"))
+LAB_SOURCE = os.environ.get("LAB_SOURCE", "dukascopy").lower()
+LAB_DAYS = int(os.environ.get("LAB_DAYS", "90"))
+
 AUTO_DISABLE_WR_THRESHOLD = float(os.environ.get("AUTO_DISABLE_WR_THRESHOLD", "0.52"))
 AUTO_DISABLE_MIN_LIVE_PAIR = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_PAIR", "8"))
 AUTO_DISABLE_MIN_LIVE_GLOBAL = int(os.environ.get("AUTO_DISABLE_MIN_LIVE_GLOBAL", "15"))
