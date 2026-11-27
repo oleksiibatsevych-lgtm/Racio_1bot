@@ -43,8 +43,7 @@ def clear_in_memory_caches():
 def get_connection():
     if not DATABASE_URL:
         raise ValueError("DATABASE_URL не вказано у змінних оточення!")
-    clean_url = _sanitize_database_url(DATABASE_URL)
-    return psycopg2.connect(clean_url)
+    return psycopg2.connect(_sanitize_database_url(DATABASE_URL))
 
 
 def init_db():
@@ -52,137 +51,40 @@ def init_db():
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    username VARCHAR(255),
-                    auto_scan BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
+            cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, username VARCHAR(255), auto_scan BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
             cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_scan BOOLEAN DEFAULT FALSE;")
-
-            cursor.execute(
-                """
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
-                    id SERIAL PRIMARY KEY,
-                    chat_id BIGINT,
-                    message_id BIGINT,
-                    ticker VARCHAR(50),
-                    signal_type VARCHAR(10),
-                    entry_price NUMERIC,
-                    primary_tf VARCHAR(10),
-                    score INT,
-                    expiration_mins INT,
-                    timestamp_str VARCHAR(50),
-                    status VARCHAR(20) DEFAULT 'PENDING',
-                    result VARCHAR(10),
-                    exit_price NUMERIC,
-                    pips DOUBLE PRECISION,
-                    message_text TEXT,
-                    rsi NUMERIC,
-                    adx NUMERIC,
-                    bb_width NUMERIC,
-                    session_code INT,
-                    hour INT,
-                    divergence VARCHAR(50),
-                    dist_pivot NUMERIC,
-                    volatility_ratio NUMERIC,
-                    wick_ratio NUMERIC,
-                    ema_dist NUMERIC,
-                    strategy VARCHAR(50),
-                    ai_review TEXT,
-                    expires_at TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    id SERIAL PRIMARY KEY, chat_id BIGINT, message_id BIGINT, ticker VARCHAR(50),
+                    signal_type VARCHAR(10), entry_price NUMERIC, primary_tf VARCHAR(10), score INT,
+                    expiration_mins INT, timestamp_str VARCHAR(50), status VARCHAR(20) DEFAULT 'PENDING',
+                    result VARCHAR(10), exit_price NUMERIC, pips DOUBLE PRECISION, message_text TEXT,
+                    rsi NUMERIC, adx NUMERIC, bb_width NUMERIC, session_code INT, hour INT,
+                    divergence VARCHAR(50), dist_pivot NUMERIC, volatility_ratio NUMERIC,
+                    wick_ratio NUMERIC, ema_dist NUMERIC, strategy VARCHAR(50), ai_review TEXT,
+                    expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                """
-            )
-
+            """)
             cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(50);")
             cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS ai_review TEXT;")
             cursor.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;")
             cursor.execute("ALTER TABLE signals ALTER COLUMN pips TYPE DOUBLE PRECISION USING pips::double precision;")
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS pair_strategy_settings (
-                    pair_name VARCHAR(50),
-                    strategy_key VARCHAR(50),
-                    is_active BOOLEAN DEFAULT TRUE,
-                    PRIMARY KEY (pair_name, strategy_key)
-                );
-                """
-            )
-
-            cursor.execute(
-                """
+            cursor.execute("CREATE TABLE IF NOT EXISTS pair_strategy_settings (pair_name VARCHAR(50), strategy_key VARCHAR(50), is_active BOOLEAN DEFAULT TRUE, PRIMARY KEY (pair_name, strategy_key));")
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS strategy_auto_status (
-                    scope_type VARCHAR(10) NOT NULL,
-                    pair_name VARCHAR(50) NOT NULL,
-                    strategy_key VARCHAR(50) NOT NULL,
-                    is_auto_disabled BOOLEAN DEFAULT FALSE,
-                    source VARCHAR(20),
-                    wins INT DEFAULT 0,
-                    total INT DEFAULT 0,
-                    win_rate NUMERIC DEFAULT 0,
-                    reason TEXT,
-                    reset_after_signal_id BIGINT DEFAULT 0,
-                    manual_override BOOLEAN DEFAULT FALSE,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    scope_type VARCHAR(10) NOT NULL, pair_name VARCHAR(50) NOT NULL, strategy_key VARCHAR(50) NOT NULL,
+                    is_auto_disabled BOOLEAN DEFAULT FALSE, source VARCHAR(20), wins INT DEFAULT 0, total INT DEFAULT 0,
+                    win_rate NUMERIC DEFAULT 0, reason TEXT, reset_after_signal_id BIGINT DEFAULT 0,
+                    manual_override BOOLEAN DEFAULT FALSE, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (scope_type, pair_name, strategy_key)
                 );
-                """
-            )
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS backtest_results (
-                    pair_name VARCHAR(50) NOT NULL,
-                    strategy_key VARCHAR(50) NOT NULL,
-                    wins INT NOT NULL DEFAULT 0,
-                    total INT NOT NULL DEFAULT 0,
-                    win_rate NUMERIC NOT NULL DEFAULT 0,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (pair_name, strategy_key)
-                );
-                """
-            )
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS bot_settings (
-                    setting_key VARCHAR(64) PRIMARY KEY,
-                    setting_value TEXT NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            )
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS filtered_logs (
-                    id SERIAL PRIMARY KEY,
-                    chat_id BIGINT,
-                    log_text TEXT,
-                    timestamp REAL
-                );
-                """
-            )
-
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS system_prompts (
-                    prompt_key VARCHAR(100) PRIMARY KEY,
-                    prompt_text TEXT
-                );
-                """
-            )
-
+            """)
+            cursor.execute("CREATE TABLE IF NOT EXISTS backtest_results (pair_name VARCHAR(50) NOT NULL, strategy_key VARCHAR(50) NOT NULL, wins INT NOT NULL DEFAULT 0, total INT NOT NULL DEFAULT 0, win_rate NUMERIC NOT NULL DEFAULT 0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (pair_name, strategy_key));")
+            cursor.execute("CREATE TABLE IF NOT EXISTS bot_settings (setting_key VARCHAR(64) PRIMARY KEY, setting_value TEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
+            cursor.execute("CREATE TABLE IF NOT EXISTS filtered_logs (id SERIAL PRIMARY KEY, chat_id BIGINT, log_text TEXT, timestamp REAL);")
+            cursor.execute("CREATE TABLE IF NOT EXISTS system_prompts (prompt_key VARCHAR(100) PRIMARY KEY, prompt_text TEXT);")
             cursor.execute("UPDATE signals SET status = 'PENDING' WHERE status = 'PROCESSING';")
         conn.commit()
-        logger.info("✅ Базу даних PostgreSQL успішно ініціалізовано.")
     except Exception as e:
         logger.error(f"⚠️ Помилка ініціалізації БД: {e}")
         if conn is not None:
@@ -200,15 +102,7 @@ def register_user(user_id, username=None):
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO users (user_id, username)
-                VALUES (%s, %s)
-                ON CONFLICT (user_id) DO UPDATE
-                SET username = COALESCE(EXCLUDED.username, users.username);
-                """,
-                (user_id, username),
-            )
+            cursor.execute("INSERT INTO users (user_id, username) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET username = COALESCE(EXCLUDED.username, users.username);", (user_id, username))
         conn.commit()
     except Exception as e:
         logger.error(f"⚠️ Помилка реєстрації користувача: {e}")
@@ -222,18 +116,10 @@ def set_user_autoscan(user_id, enabled: bool):
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO users (user_id, auto_scan)
-                VALUES (%s, %s)
-                ON CONFLICT (user_id) DO UPDATE
-                SET auto_scan = EXCLUDED.auto_scan;
-                """,
-                (user_id, bool(enabled)),
-            )
+            cursor.execute("INSERT INTO users (user_id, auto_scan) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET auto_scan = EXCLUDED.auto_scan;", (user_id, bool(enabled)))
         conn.commit()
     except Exception as e:
-        logger.error(f"⚠️ Помилка збереження стану автоскану: {e}")
+        logger.error(f"⚠️ Помилка збереження автоскану: {e}")
     finally:
         if conn is not None:
             conn.close()
@@ -245,10 +131,8 @@ def get_autoscan_chats() -> set[int]:
         conn = get_connection()
         with conn.cursor() as cursor:
             cursor.execute("SELECT user_id FROM users WHERE auto_scan = TRUE;")
-            rows = cursor.fetchall()
-        return {int(r[0]) for r in rows}
-    except Exception as e:
-        logger.error(f"⚠️ Помилка завантаження чатів автоскану: {e}")
+            return {int(r[0]) for r in cursor.fetchall()}
+    except Exception:
         return set()
     finally:
         if conn is not None:
@@ -294,13 +178,8 @@ def set_bot_setting(key: str, value):
         conn = get_connection()
         with conn.cursor() as cursor:
             cursor.execute(
-                """
-                INSERT INTO bot_settings (setting_key, setting_value, updated_at)
-                VALUES (%s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (setting_key) DO UPDATE
-                SET setting_value = EXCLUDED.setting_value,
-                    updated_at = CURRENT_TIMESTAMP;
-                """,
+                "INSERT INTO bot_settings (setting_key, setting_value, updated_at) VALUES (%s, %s, CURRENT_TIMESTAMP) "
+                "ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value, updated_at = CURRENT_TIMESTAMP;",
                 (str(key), val_str),
             )
         conn.commit()
@@ -338,30 +217,11 @@ def is_strategy_muted(strategy_key: str, now_ts: float | None = None) -> tuple[b
 
 
 def save_signal(
-    chat_id=None,
-    message_id=None,
-    ticker=None,
-    signal_type=None,
-    entry_price=None,
-    primary_tf=None,
-    score=None,
-    expiration_mins=None,
-    timestamp_str=None,
-    expires_at=None,
-    message_text=None,
-    rsi=None,
-    adx=None,
-    bb_width=None,
-    session_code=None,
-    hour=None,
-    divergence=None,
-    dist_pivot=None,
-    volatility_ratio=None,
-    wick_ratio=None,
-    ema_dist=None,
-    strategy="QUANTUM_MATRIX",
-    status="PENDING",
-    **kwargs,
+    chat_id=None, message_id=None, ticker=None, signal_type=None, entry_price=None,
+    primary_tf=None, score=None, expiration_mins=None, timestamp_str=None, expires_at=None,
+    message_text=None, rsi=None, adx=None, bb_width=None, session_code=None, hour=None,
+    divergence=None, dist_pivot=None, volatility_ratio=None, wick_ratio=None, ema_dist=None,
+    strategy="QUANTUM_MATRIX", status="PENDING", **kwargs,
 ):
     conn = None
     try:
@@ -401,8 +261,7 @@ def get_signal_by_id(signal_id):
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("SELECT * FROM signals WHERE id = %s;", (signal_id,))
             return cursor.fetchone()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка отримання сигналу #{signal_id}: {e}")
+    except Exception:
         return None
     finally:
         if conn is not None:
@@ -442,8 +301,7 @@ def has_open_reversion_signal(ticker, strategy):
     try:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT EXISTS (SELECT 1 FROM signals WHERE ticker = %s AND strategy = %s "
-                "AND status IN ('PENDING', 'PROCESSING'));",
+                "SELECT EXISTS (SELECT 1 FROM signals WHERE ticker = %s AND strategy = %s AND status IN ('PENDING', 'PROCESSING'));",
                 (ticker, strategy),
             )
             return bool(cursor.fetchone()[0])
@@ -458,8 +316,7 @@ def get_pending_signals():
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("SELECT * FROM signals WHERE status = 'PENDING' ORDER BY created_at ASC;")
             return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка PENDING сигналів: {e}")
+    except Exception:
         return []
     finally:
         if conn is not None:
@@ -471,14 +328,7 @@ def update_signal_result(signal_id, result, exit_price, pips=0.0, status="CLOSED
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE signals
-                SET status = %s, result = %s, exit_price = %s, pips = %s
-                WHERE id = %s;
-                """,
-                (status, result, exit_price, float(pips or 0.0), signal_id),
-            )
+            cursor.execute("UPDATE signals SET status = %s, result = %s, exit_price = %s, pips = %s WHERE id = %s;", (status, result, exit_price, float(pips or 0.0), signal_id))
         conn.commit()
     except Exception as e:
         logger.error(f"⚠️ Помилка оновлення результату: {e}")
@@ -494,57 +344,8 @@ def save_signal_ai_review(signal_id, review_text):
         with conn.cursor() as cursor:
             cursor.execute("UPDATE signals SET ai_review = %s WHERE id = %s;", (review_text, signal_id))
         conn.commit()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка збереження AI-огляду: {e}")
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-def get_recent_failed_reviews_summary(ticker: str, limit=3) -> str:
-    conn = None
-    try:
-        conn = get_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT ai_review, signal_type, strategy FROM signals
-                WHERE ticker = %s AND result = 'LOSS' AND ai_review IS NOT NULL
-                ORDER BY id DESC LIMIT %s;
-                """,
-                (ticker, limit),
-            )
-            rows = cursor.fetchall()
-        if not rows:
-            return "Немає попередніх помилок для аналізу."
-        return "\n".join(
-            f"- Стратегія [{r['strategy']} ({r['signal_type']})]: {r['ai_review']}" for r in rows
-        )
     except Exception:
-        return "Помилка завантаження історії помилок."
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-def get_stats():
-    conn = None
-    try:
-        conn = get_connection()
-        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE result = 'WIN') as wins,
-                    COUNT(*) FILTER (WHERE result = 'LOSS') as losses,
-                    COUNT(*) FILTER (WHERE status = 'PENDING') as pending
-                FROM signals WHERE status NOT IN ('SHADOW', 'VOID');
-                """
-            )
-            return cursor.fetchone()
-    except Exception:
-        return {"total": 0, "wins": 0, "losses": 0, "pending": 0}
+        pass
     finally:
         if conn is not None:
             conn.close()
@@ -556,14 +357,10 @@ def get_detailed_pair_strategy_stats(ticker_filter=None, strategy_filter=None):
         conn = get_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             query = """
-                SELECT
-                    ticker,
-                    COALESCE(strategy, 'QUANTUM_MATRIX') as strategy,
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE result = 'WIN') as wins,
-                    COUNT(*) FILTER (WHERE result = 'LOSS') as losses
-                FROM signals
-                WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
+                SELECT ticker, COALESCE(strategy, 'QUANTUM_MATRIX') as strategy,
+                       COUNT(*) as total, COUNT(*) FILTER (WHERE result = 'WIN') as wins,
+                       COUNT(*) FILTER (WHERE result = 'LOSS') as losses
+                FROM signals WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
             """
             params = []
             if ticker_filter:
@@ -575,8 +372,7 @@ def get_detailed_pair_strategy_stats(ticker_filter=None, strategy_filter=None):
             query += " GROUP BY ticker, strategy ORDER BY ticker ASC, wins DESC;"
             cursor.execute(query, tuple(params))
             return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка вибірки деталізованої статистики: {e}")
+    except Exception:
         return []
     finally:
         if conn is not None:
@@ -594,12 +390,8 @@ def export_resolved_signals():
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT " + ", ".join(EXPORT_COLUMNS) +
-                " FROM signals WHERE result IN ('WIN', 'LOSS', 'NEUTRAL') ORDER BY id ASC;"
-            )
-            rows = cursor.fetchall()
-        return EXPORT_COLUMNS, rows
+            cursor.execute("SELECT " + ", ".join(EXPORT_COLUMNS) + " FROM signals WHERE result IN ('WIN', 'LOSS', 'NEUTRAL') ORDER BY id ASC;")
+            return EXPORT_COLUMNS, cursor.fetchall()
     finally:
         conn.close()
 
@@ -609,21 +401,14 @@ def get_segment_stats():
     try:
         conn = get_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT ticker,
-                       COALESCE(primary_tf, '5m') AS tf,
-                       COALESCE(strategy, 'QUANTUM_MATRIX') AS strategy,
-                       COUNT(*) AS total,
-                       COUNT(*) FILTER (WHERE result = 'WIN') AS wins
-                FROM signals
-                WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
+            cursor.execute("""
+                SELECT ticker, COALESCE(primary_tf, '5m') AS tf, COALESCE(strategy, 'QUANTUM_MATRIX') AS strategy,
+                       COUNT(*) AS total, COUNT(*) FILTER (WHERE result = 'WIN') AS wins
+                FROM signals WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
                 GROUP BY ticker, COALESCE(primary_tf, '5m'), COALESCE(strategy, 'QUANTUM_MATRIX');
-                """
-            )
+            """)
             return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка статистики сегментів: {e}")
+    except Exception:
         return []
     finally:
         if conn is not None:
@@ -635,15 +420,11 @@ def claim_signal(signal_id) -> bool:
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
-            cursor.execute(
-                "UPDATE signals SET status = 'PROCESSING' WHERE id = %s AND status = 'PENDING' RETURNING id;",
-                (signal_id,),
-            )
+            cursor.execute("UPDATE signals SET status = 'PROCESSING' WHERE id = %s AND status = 'PENDING' RETURNING id;", (signal_id,))
             got = cursor.fetchone() is not None
         conn.commit()
         return got
-    except Exception as e:
-        logger.error(f"⚠️ Помилка claim_signal: {e}")
+    except Exception:
         return False
     finally:
         if conn is not None:
@@ -657,8 +438,8 @@ def release_signal(signal_id):
         with conn.cursor() as cursor:
             cursor.execute("UPDATE signals SET status = 'PENDING' WHERE id = %s AND status = 'PROCESSING';", (signal_id,))
         conn.commit()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка release_signal: {e}")
+    except Exception:
+        pass
     finally:
         if conn is not None:
             conn.close()
@@ -698,20 +479,12 @@ def set_pair_strategy_status(pair_name: str, strategy_key: str, is_active: bool)
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (pair_name, strategy_key) DO UPDATE
-                SET is_active = EXCLUDED.is_active;
-                """,
-                (pair_name, strategy_key, is_active),
-            )
+            cursor.execute("INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active) VALUES (%s, %s, %s) ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = EXCLUDED.is_active;", (pair_name, strategy_key, is_active))
         conn.commit()
         with _STATUS_LOCK:
             _STATUS_CACHE[(pair_name, strategy_key)] = bool(is_active)
-    except Exception as e:
-        logger.error(f"⚠️ Помилка збереження налаштування пари та стратегії: {e}")
+    except Exception:
+        pass
     finally:
         if conn is not None:
             conn.close()
@@ -725,21 +498,13 @@ def set_pair_bulk_strategy_status(pair_name: str, strategy_keys: list[str], is_a
         conn = get_connection()
         with conn.cursor() as cursor:
             for key in strategy_keys:
-                cursor.execute(
-                    """
-                    INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (pair_name, strategy_key) DO UPDATE
-                    SET is_active = EXCLUDED.is_active;
-                    """,
-                    (pair_name, key, bool(is_active)),
-                )
+                cursor.execute("INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active) VALUES (%s, %s, %s) ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = EXCLUDED.is_active;", (pair_name, key, bool(is_active)))
         conn.commit()
         with _STATUS_LOCK:
             for key in strategy_keys:
                 _STATUS_CACHE[(pair_name, key)] = bool(is_active)
-    except Exception as e:
-        logger.error(f"⚠️ Помилка групового збереження налаштувань пари: {e}")
+    except Exception:
+        pass
     finally:
         if conn is not None:
             conn.close()
@@ -754,25 +519,16 @@ def upsert_backtest_results(rows: list[dict]):
         with conn.cursor() as cursor:
             for r in rows:
                 pair = normalize_pair_name(r["pair"])
-                strategy = r["strategy"]
-                wins = int(r["wins"])
-                total = int(r["total"])
+                wins, total = int(r["wins"]), int(r["total"])
                 wr = float(wins / total) if total > 0 else 0.0
                 cursor.execute(
-                    """
-                    INSERT INTO backtest_results (pair_name, strategy_key, wins, total, win_rate, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-                    ON CONFLICT (pair_name, strategy_key) DO UPDATE
-                    SET wins = EXCLUDED.wins,
-                        total = EXCLUDED.total,
-                        win_rate = EXCLUDED.win_rate,
-                        updated_at = CURRENT_TIMESTAMP;
-                    """,
-                    (pair, strategy, wins, total, wr),
+                    "INSERT INTO backtest_results (pair_name, strategy_key, wins, total, win_rate, updated_at) VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT (pair_name, strategy_key) DO UPDATE SET wins = EXCLUDED.wins, total = EXCLUDED.total, win_rate = EXCLUDED.win_rate, updated_at = CURRENT_TIMESTAMP;",
+                    (pair, r["strategy"], wins, total, wr),
                 )
         conn.commit()
     except Exception as e:
-        logger.error(f"⚠️ Помилка збереження результатів бектесту: {e}")
+        logger.error(f"⚠️ Помилка збереження бектесту: {e}")
     finally:
         if conn is not None:
             conn.close()
@@ -783,8 +539,7 @@ def get_backtest_results(pair_filter: str | None = None, strategy_filter: str | 
     try:
         conn = get_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            clauses = []
-            params = []
+            clauses, params = [], []
             if pair_filter:
                 clauses.append("pair_name = %s")
                 params.append(normalize_pair_name(pair_filter))
@@ -794,9 +549,65 @@ def get_backtest_results(pair_filter: str | None = None, strategy_filter: str | 
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
             cursor.execute(f"SELECT * FROM backtest_results{where} ORDER BY pair_name ASC, win_rate DESC, total DESC;", tuple(params))
             return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка читання результатів бектесту: {e}")
+    except Exception:
         return []
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def get_strategy_winrate_summary(pair_filter: str | None = None) -> dict[str, dict]:
+    norm_pair = normalize_pair_name(pair_filter) if pair_filter else None
+    agg = {}
+    for r in get_detailed_pair_strategy_stats() or []:
+        if norm_pair and normalize_pair_name(r.get("ticker")) != norm_pair:
+            continue
+        sk = r.get("strategy")
+        if not sk:
+            continue
+        d = agg.setdefault(sk, {"live_w": 0, "live_t": 0, "bt_w": 0, "bt_t": 0})
+        d["live_w"] += int(r.get("wins") or 0)
+        d["live_t"] += int(r.get("total") or 0)
+
+    for r in get_backtest_results(pair_filter=norm_pair) or []:
+        sk = r.get("strategy_key")
+        if not sk:
+            continue
+        d = agg.setdefault(sk, {"live_w": 0, "live_t": 0, "bt_w": 0, "bt_t": 0})
+        d["bt_w"] += int(r.get("wins") or 0)
+        d["bt_t"] += int(r.get("total") or 0)
+
+    out = {}
+    for sk, d in agg.items():
+        if d["live_t"] >= 5:
+            wr, tot, src = (d["live_w"] / d["live_t"]) * 100.0, d["live_t"], "LIVE"
+        elif d["bt_t"] > 0:
+            wr, tot, src = (d["bt_w"] / d["bt_t"]) * 100.0, d["bt_t"], "BT"
+        elif d["live_t"] > 0:
+            wr, tot, src = (d["live_w"] / d["live_t"]) * 100.0, d["live_t"], "LIVE"
+        else:
+            wr, tot, src = None, 0, ""
+        out[sk] = {**d, "wr": wr, "total": tot, "source": src}
+    return out
+
+
+def delete_strategies_data(strategy_keys: list[str] | set[str]) -> bool:
+    keys = [str(k) for k in (strategy_keys or []) if k]
+    if not keys:
+        return True
+    conn = None
+    try:
+        conn = get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM backtest_results WHERE strategy_key = ANY(%s);", (keys,))
+            cursor.execute("DELETE FROM strategy_auto_status WHERE strategy_key = ANY(%s);", (keys,))
+            cursor.execute("DELETE FROM pair_strategy_settings WHERE strategy_key = ANY(%s);", (keys,))
+        conn.commit()
+        clear_in_memory_caches()
+        return True
+    except Exception as e:
+        logger.error(f"⚠️ Помилка видалення записів стратегій із БД: {e}")
+        return False
     finally:
         if conn is not None:
             conn.close()
@@ -807,18 +618,9 @@ def get_auto_disabled_items() -> list[dict]:
     try:
         conn = get_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT scope_type, pair_name, strategy_key, is_auto_disabled, source,
-                       wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at
-                FROM strategy_auto_status
-                WHERE is_auto_disabled = TRUE
-                ORDER BY scope_type ASC, pair_name ASC, win_rate ASC;
-                """
-            )
+            cursor.execute("SELECT scope_type, pair_name, strategy_key, is_auto_disabled, source, wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at FROM strategy_auto_status WHERE is_auto_disabled = TRUE ORDER BY scope_type ASC, pair_name ASC, win_rate ASC;")
             return cursor.fetchall()
-    except Exception as e:
-        logger.error(f"⚠️ Помилка читання авто-вимкнених стратегій: {e}")
+    except Exception:
         return []
     finally:
         if conn is not None:
@@ -826,29 +628,17 @@ def get_auto_disabled_items() -> list[dict]:
 
 
 def get_auto_disabled_map() -> dict[tuple[str, str, str], dict]:
-    rows = get_auto_disabled_items()
-    return {(r["scope_type"], r["pair_name"], r["strategy_key"]): r for r in rows}
+    return {(r["scope_type"], r["pair_name"], r["strategy_key"]): r for r in get_auto_disabled_items()}
 
 
 def _get_auto_status_record(cursor, scope_type: str, pair_name: str, strategy_key: str) -> dict | None:
-    cursor.execute(
-        """
-        SELECT scope_type, pair_name, strategy_key, is_auto_disabled, source,
-               wins, total, win_rate, reset_after_signal_id, manual_override
-        FROM strategy_auto_status
-        WHERE scope_type = %s AND pair_name = %s AND strategy_key = %s;
-        """,
-        (scope_type, pair_name, strategy_key),
-    )
+    cursor.execute("SELECT scope_type, pair_name, strategy_key, is_auto_disabled, source, wins, total, win_rate, reset_after_signal_id, manual_override FROM strategy_auto_status WHERE scope_type = %s AND pair_name = %s AND strategy_key = %s;", (scope_type, pair_name, strategy_key))
     row = cursor.fetchone()
     if not row:
         return None
     if isinstance(row, dict):
         return row
-    cols = (
-        "scope_type", "pair_name", "strategy_key", "is_auto_disabled", "source",
-        "wins", "total", "win_rate", "reset_after_signal_id", "manual_override",
-    )
+    cols = ("scope_type", "pair_name", "strategy_key", "is_auto_disabled", "source", "wins", "total", "win_rate", "reset_after_signal_id", "manual_override")
     return dict(zip(cols, row))
 
 
@@ -862,204 +652,103 @@ def mark_strategy_manual_enable(scope_type: str, pair_name: str, strategy_key: s
             max_row = cursor.fetchone()
             max_sig_id = int(max_row[0]) if max_row and max_row[0] is not None else 0
             cursor.execute(
-                """
-                INSERT INTO strategy_auto_status (
-                    scope_type, pair_name, strategy_key, is_auto_disabled, source,
-                    wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at
-                )
-                VALUES (%s, %s, %s, FALSE, 'MANUAL', 0, 0, 0, 'Ввімкнено вручну', %s, TRUE, CURRENT_TIMESTAMP)
-                ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
-                SET is_auto_disabled = FALSE,
-                    manual_override = TRUE,
-                    reset_after_signal_id = GREATEST(strategy_auto_status.reset_after_signal_id, EXCLUDED.reset_after_signal_id),
-                    reason = 'Ввімкнено вручну',
-                    updated_at = CURRENT_TIMESTAMP;
-                """,
+                "INSERT INTO strategy_auto_status (scope_type, pair_name, strategy_key, is_auto_disabled, source, wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at) "
+                "VALUES (%s, %s, %s, FALSE, 'MANUAL', 0, 0, 0, 'Ввімкнено вручну', %s, TRUE, CURRENT_TIMESTAMP) "
+                "ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE SET is_auto_disabled = FALSE, manual_override = TRUE, "
+                "reset_after_signal_id = GREATEST(strategy_auto_status.reset_after_signal_id, EXCLUDED.reset_after_signal_id), reason = 'Ввімкнено вручну', updated_at = CURRENT_TIMESTAMP;",
                 (scope_type, norm_pair, strategy_key, max_sig_id),
             )
             if scope_type == "PAIR":
-                cursor.execute(
-                    """
-                    INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
-                    VALUES (%s, %s, TRUE)
-                    ON CONFLICT (pair_name, strategy_key) DO UPDATE
-                    SET is_active = TRUE;
-                    """,
-                    (norm_pair, strategy_key),
-                )
+                cursor.execute("INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active) VALUES (%s, %s, TRUE) ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = TRUE;", (norm_pair, strategy_key))
         conn.commit()
         if scope_type == "PAIR":
             with _STATUS_LOCK:
                 _STATUS_CACHE[(norm_pair, strategy_key)] = True
-    except Exception as e:
-        logger.error(f"⚠️ Помилка ручного ввімкнення стратегії {strategy_key}: {e}")
+    except Exception:
+        pass
     finally:
         if conn is not None:
             conn.close()
 
 
-def evaluate_and_apply_auto_disable(
-    source: str = "LIVE",
-    pair_filter: str | None = None,
-    strategy_filter: str | None = None,
-    threshold: float = AUTO_DISABLE_WR_THRESHOLD,
-    min_pair: int | None = None,
-    min_global: int | None = None,
-) -> dict[str, list[dict]]:
+def evaluate_and_apply_auto_disable(source: str = "LIVE", pair_filter: str | None = None, strategy_filter: str | None = None, threshold: float = AUTO_DISABLE_WR_THRESHOLD, min_pair: int | None = None, min_global: int | None = None) -> dict[str, list[dict]]:
     src = source.upper()
-    req_pair = min_pair if min_pair is not None else (
-        AUTO_DISABLE_MIN_BT_PAIR if src == "BACKTEST" else AUTO_DISABLE_MIN_LIVE_PAIR
-    )
-    req_global = min_global if min_global is not None else (
-        AUTO_DISABLE_MIN_BT_GLOBAL if src == "BACKTEST" else AUTO_DISABLE_MIN_LIVE_GLOBAL
-    )
+    req_pair = min_pair if min_pair is not None else (AUTO_DISABLE_MIN_BT_PAIR if src == "BACKTEST" else AUTO_DISABLE_MIN_LIVE_PAIR)
+    req_global = min_global if min_global is not None else (AUTO_DISABLE_MIN_BT_GLOBAL if src == "BACKTEST" else AUTO_DISABLE_MIN_LIVE_GLOBAL)
     events = {"disabled_global": [], "disabled_pair": []}
     norm_filter = normalize_pair_name(pair_filter) if pair_filter else None
-
     conn = None
     try:
         conn = get_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-
         if src == "BACKTEST":
             cursor.execute("SELECT pair_name, strategy_key, wins, total FROM backtest_results;")
-            bt_rows = cursor.fetchall()
-            pair_agg = {}
-            global_agg = {}
-            for r in bt_rows:
-                p = normalize_pair_name(r["pair_name"])
-                s = r["strategy_key"]
-                w, t = int(r["wins"]), int(r["total"])
+            pair_agg, global_agg = {}, {}
+            for r in cursor.fetchall():
+                p, s, w, t = normalize_pair_name(r["pair_name"]), r["strategy_key"], int(r["wins"]), int(r["total"])
                 pair_agg[(p, s)] = [w, t]
                 g = global_agg.setdefault(s, [0, 0])
                 g[0] += w
                 g[1] += t
-
             for (p, s), (w, t) in pair_agg.items():
-                if norm_filter and p != norm_filter:
-                    continue
-                if strategy_filter and s != strategy_filter:
-                    continue
-                if t < req_pair or (w / t) >= threshold:
+                if (norm_filter and p != norm_filter) or (strategy_filter and s != strategy_filter) or t < req_pair or (w / t) >= threshold:
                     continue
                 rec = _get_auto_status_record(cursor, "PAIR", p, s)
                 if rec and (rec.get("manual_override") or rec.get("is_auto_disabled")):
                     continue
                 wr = w / t
-                reason = f"Бектест {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"
                 cursor.execute(
-                    """
-                    INSERT INTO strategy_auto_status (
-                        scope_type, pair_name, strategy_key, is_auto_disabled, source,
-                        wins, total, win_rate, reason, manual_override, updated_at
-                    )
-                    VALUES ('PAIR', %s, %s, TRUE, 'BACKTEST', %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP)
-                    ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
-                    SET is_auto_disabled = TRUE, source = 'BACKTEST',
-                        wins = EXCLUDED.wins, total = EXCLUDED.total,
-                        win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason,
-                        manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;
-                    """,
-                    (p, s, w, t, wr, reason),
+                    "INSERT INTO strategy_auto_status (scope_type, pair_name, strategy_key, is_auto_disabled, source, wins, total, win_rate, reason, manual_override, updated_at) "
+                    "VALUES ('PAIR', %s, %s, TRUE, 'BACKTEST', %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP) ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE "
+                    "SET is_auto_disabled = TRUE, source = 'BACKTEST', wins = EXCLUDED.wins, total = EXCLUDED.total, win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason, manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;",
+                    (p, s, w, t, wr, f"Бектест {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"),
                 )
-                cursor.execute(
-                    """
-                    INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
-                    VALUES (%s, %s, FALSE)
-                    ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = FALSE;
-                    """,
-                    (p, s),
-                )
+                cursor.execute("INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active) VALUES (%s, %s, FALSE) ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = FALSE;", (p, s))
                 with _STATUS_LOCK:
                     _STATUS_CACHE[(p, s)] = False
                 events["disabled_pair"].append({"pair": p, "strategy": s, "wins": w, "total": t, "wr": wr, "source": "BACKTEST"})
-
             if not norm_filter:
                 for s, (w, t) in global_agg.items():
-                    if strategy_filter and s != strategy_filter:
-                        continue
-                    if t < req_global or (w / t) >= threshold:
+                    if (strategy_filter and s != strategy_filter) or t < req_global or (w / t) >= threshold:
                         continue
                     rec = _get_auto_status_record(cursor, "GLOBAL", "*", s)
                     if rec and (rec.get("manual_override") or rec.get("is_auto_disabled")):
                         continue
                     wr = w / t
-                    reason = f"Бектест {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"
                     cursor.execute(
-                        """
-                        INSERT INTO strategy_auto_status (
-                            scope_type, pair_name, strategy_key, is_auto_disabled, source,
-                            wins, total, win_rate, reason, manual_override, updated_at
-                        )
-                        VALUES ('GLOBAL', '*', %s, TRUE, 'BACKTEST', %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP)
-                        ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
-                        SET is_auto_disabled = TRUE, source = 'BACKTEST',
-                            wins = EXCLUDED.wins, total = EXCLUDED.total,
-                            win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason,
-                            manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;
-                        """,
-                        (s, w, t, wr, reason),
+                        "INSERT INTO strategy_auto_status (scope_type, pair_name, strategy_key, is_auto_disabled, source, wins, total, win_rate, reason, manual_override, updated_at) "
+                        "VALUES ('GLOBAL', '*', %s, TRUE, 'BACKTEST', %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP) ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE "
+                        "SET is_auto_disabled = TRUE, source = 'BACKTEST', wins = EXCLUDED.wins, total = EXCLUDED.total, win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason, manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;",
+                        (s, w, t, wr, f"Бектест {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"),
                     )
                     events["disabled_global"].append({"strategy": s, "wins": w, "total": t, "wr": wr, "source": "BACKTEST"})
-
         else:
-            cursor.execute(
-                """
-                SELECT id, ticker, COALESCE(strategy, 'QUANTUM_MATRIX') AS strategy, result
-                FROM signals
-                WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS')
-                ORDER BY id ASC;
-                """
-            )
+            cursor.execute("SELECT id, ticker, COALESCE(strategy, 'QUANTUM_MATRIX') AS strategy, result FROM signals WHERE status = 'CLOSED' AND result IN ('WIN', 'LOSS') ORDER BY id ASC;")
             sig_rows = cursor.fetchall()
-            strategies_seen = {r["strategy"] for r in sig_rows}
-            pairs_seen = {(normalize_pair_name(r["ticker"]), r["strategy"]) for r in sig_rows}
-
-            for p, s in pairs_seen:
-                if norm_filter and p != norm_filter:
-                    continue
-                if strategy_filter and s != strategy_filter:
+            for p, s in {(normalize_pair_name(r["ticker"]), r["strategy"]) for r in sig_rows}:
+                if (norm_filter and p != norm_filter) or (strategy_filter and s != strategy_filter):
                     continue
                 rec = _get_auto_status_record(cursor, "PAIR", p, s)
                 if rec and rec.get("is_auto_disabled"):
                     continue
                 reset_id = int(rec["reset_after_signal_id"]) if rec and rec.get("reset_after_signal_id") else 0
                 sub = [r for r in sig_rows if normalize_pair_name(r["ticker"]) == p and r["strategy"] == s and int(r["id"]) > reset_id]
-                t = len(sub)
-                if t < req_pair:
+                if len(sub) < req_pair:
                     continue
                 w = sum(1 for r in sub if r["result"] == "WIN")
-                wr = w / t
+                wr = w / len(sub)
                 if wr < threshold:
-                    reason = f"Живі угоди {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"
                     cursor.execute(
-                        """
-                        INSERT INTO strategy_auto_status (
-                            scope_type, pair_name, strategy_key, is_auto_disabled, source,
-                            wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at
-                        )
-                        VALUES ('PAIR', %s, %s, TRUE, 'LIVE', %s, %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP)
-                        ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
-                        SET is_auto_disabled = TRUE, source = 'LIVE',
-                            wins = EXCLUDED.wins, total = EXCLUDED.total,
-                            win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason,
-                            manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;
-                        """,
-                        (p, s, w, t, wr, reason, reset_id),
+                        "INSERT INTO strategy_auto_status (scope_type, pair_name, strategy_key, is_auto_disabled, source, wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at) "
+                        "VALUES ('PAIR', %s, %s, TRUE, 'LIVE', %s, %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP) ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE "
+                        "SET is_auto_disabled = TRUE, source = 'LIVE', wins = EXCLUDED.wins, total = EXCLUDED.total, win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason, manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;",
+                        (p, s, w, len(sub), wr, f"Живі угоди {wr * 100:.1f}% ({w}/{len(sub)}) < {threshold * 100:.0f}%", reset_id),
                     )
-                    cursor.execute(
-                        """
-                        INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active)
-                        VALUES (%s, %s, FALSE)
-                        ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = FALSE;
-                        """,
-                        (p, s),
-                    )
+                    cursor.execute("INSERT INTO pair_strategy_settings (pair_name, strategy_key, is_active) VALUES (%s, %s, FALSE) ON CONFLICT (pair_name, strategy_key) DO UPDATE SET is_active = FALSE;", (p, s))
                     with _STATUS_LOCK:
                         _STATUS_CACHE[(p, s)] = False
-                    events["disabled_pair"].append({"pair": p, "strategy": s, "wins": w, "total": t, "wr": wr, "source": "LIVE"})
-
-            for s in strategies_seen:
+                    events["disabled_pair"].append({"pair": p, "strategy": s, "wins": w, "total": len(sub), "wr": wr, "source": "LIVE"})
+            for s in {r["strategy"] for r in sig_rows}:
                 if strategy_filter and s != strategy_filter:
                     continue
                 rec = _get_auto_status_record(cursor, "GLOBAL", "*", s)
@@ -1067,30 +756,18 @@ def evaluate_and_apply_auto_disable(
                     continue
                 reset_id = int(rec["reset_after_signal_id"]) if rec and rec.get("reset_after_signal_id") else 0
                 sub = [r for r in sig_rows if r["strategy"] == s and int(r["id"]) > reset_id]
-                t = len(sub)
-                if t < req_global:
+                if len(sub) < req_global:
                     continue
                 w = sum(1 for r in sub if r["result"] == "WIN")
-                wr = w / t
+                wr = w / len(sub)
                 if wr < threshold:
-                    reason = f"Живі угоди {wr * 100:.1f}% ({w}/{t}) < {threshold * 100:.0f}%"
                     cursor.execute(
-                        """
-                        INSERT INTO strategy_auto_status (
-                            scope_type, pair_name, strategy_key, is_auto_disabled, source,
-                            wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at
-                        )
-                        VALUES ('GLOBAL', '*', %s, TRUE, 'LIVE', %s, %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP)
-                        ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE
-                        SET is_auto_disabled = TRUE, source = 'LIVE',
-                            wins = EXCLUDED.wins, total = EXCLUDED.total,
-                            win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason,
-                            manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;
-                        """,
-                        (s, w, t, wr, reason, reset_id),
+                        "INSERT INTO strategy_auto_status (scope_type, pair_name, strategy_key, is_auto_disabled, source, wins, total, win_rate, reason, reset_after_signal_id, manual_override, updated_at) "
+                        "VALUES ('GLOBAL', '*', %s, TRUE, 'LIVE', %s, %s, %s, %s, %s, FALSE, CURRENT_TIMESTAMP) ON CONFLICT (scope_type, pair_name, strategy_key) DO UPDATE "
+                        "SET is_auto_disabled = TRUE, source = 'LIVE', wins = EXCLUDED.wins, total = EXCLUDED.total, win_rate = EXCLUDED.win_rate, reason = EXCLUDED.reason, manual_override = FALSE, updated_at = CURRENT_TIMESTAMP;",
+                        (s, w, len(sub), wr, f"Живі угоди {wr * 100:.1f}% ({w}/{len(sub)}) < {threshold * 100:.0f}%", reset_id),
                     )
-                    events["disabled_global"].append({"strategy": s, "wins": w, "total": t, "wr": wr, "source": "LIVE"})
-
+                    events["disabled_global"].append({"strategy": s, "wins": w, "total": len(sub), "wr": wr, "source": "LIVE"})
         conn.commit()
         cursor.close()
     except Exception as e:
@@ -1106,40 +783,12 @@ def get_strategy_time_stats():
     try:
         conn = get_connection()
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    COALESCE(strategy, 'MATRIX') as strategy,
-                    EXTRACT(HOUR FROM created_at) as trade_hour,
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE result = 'WIN') as wins,
-                    COUNT(*) FILTER (WHERE result = 'LOSS') as losses
-                FROM signals
-                WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
-                GROUP BY strategy, trade_hour
-                ORDER BY strategy, trade_hour;
-                """
-            )
-            hour_rows = cursor.fetchall()
-
-            cursor.execute(
-                """
-                SELECT
-                    COALESCE(strategy, 'MATRIX') as strategy,
-                    EXTRACT(DOW FROM created_at) as trade_dow,
-                    COUNT(*) as total,
-                    COUNT(*) FILTER (WHERE result = 'WIN') as wins,
-                    COUNT(*) FILTER (WHERE result = 'LOSS') as losses
-                FROM signals
-                WHERE result IN ('WIN', 'LOSS') AND status != 'VOID'
-                GROUP BY strategy, trade_dow
-                ORDER BY strategy, trade_dow;
-                """
-            )
-            dow_rows = cursor.fetchall()
-        return {"hours": hour_rows, "dow": dow_rows}
-    except Exception as e:
-        logger.error(f"⚠️ Помилка вибірки статистики за часом: {e}")
+            cursor.execute("SELECT COALESCE(strategy, 'MATRIX') as strategy, EXTRACT(HOUR FROM created_at) as trade_hour, COUNT(*) as total, COUNT(*) FILTER (WHERE result = 'WIN') as wins, COUNT(*) FILTER (WHERE result = 'LOSS') as losses FROM signals WHERE result IN ('WIN', 'LOSS') AND status != 'VOID' GROUP BY strategy, trade_hour ORDER BY strategy, trade_hour;")
+            hours = cursor.fetchall()
+            cursor.execute("SELECT COALESCE(strategy, 'MATRIX') as strategy, EXTRACT(DOW FROM created_at) as trade_dow, COUNT(*) as total, COUNT(*) FILTER (WHERE result = 'WIN') as wins, COUNT(*) FILTER (WHERE result = 'LOSS') as losses FROM signals WHERE result IN ('WIN', 'LOSS') AND status != 'VOID' GROUP BY strategy, trade_dow ORDER BY strategy, trade_dow;")
+            dow = cursor.fetchall()
+        return {"hours": hours, "dow": dow}
+    except Exception:
         return {"hours": [], "dow": []}
     finally:
         if conn is not None:
@@ -1165,10 +814,8 @@ def get_system_logs(chat_id, minutes=120):
     try:
         conn = get_connection()
         with conn.cursor() as cursor:
-            cutoff = time.time() - (minutes * 60)
-            cursor.execute("SELECT log_text FROM filtered_logs WHERE chat_id = %s AND timestamp > %s ORDER BY timestamp DESC LIMIT 20", (chat_id, cutoff))
-            rows = cursor.fetchall()
-        return [row[0] for row in rows]
+            cursor.execute("SELECT log_text FROM filtered_logs WHERE chat_id = %s AND timestamp > %s ORDER BY timestamp DESC LIMIT 20", (chat_id, time.time() - (minutes * 60)))
+            return [row[0] for row in cursor.fetchall()]
     except Exception:
         return []
     finally:
@@ -1199,8 +846,7 @@ def clear_all_stats():
         conn.commit()
         clear_in_memory_caches()
         return True
-    except Exception as e:
-        logger.error(f"⚠️ Помилка очищення статистики: {e}")
+    except Exception:
         return False
     finally:
         if conn is not None:
