@@ -3,8 +3,7 @@ import html
 import math
 from datetime import timedelta
 
-from config import AUTO_DISABLE_WR_THRESHOLD, PAYOUT, normalize_pair_name
-from reversion_engine import PRESETS
+from config import AUTO_DISABLE_WR_THRESHOLD, PAYOUT, PRUNE_WR_THRESHOLD, normalize_pair_name
 from strategy_engine import STRATEGIES_META, STRATEGY_CATEGORIES, get_strategy_expiration
 from trading_sessions import get_tz_info, session_name, utc_datetime
 
@@ -60,6 +59,15 @@ def wr_badge(wins: int, total: int, payout: float = PAYOUT, wr_threshold: float 
     return "🔴"
 
 
+def format_wr_tag(wr_entry: dict | None, payout: float = PAYOUT, prune_th: float = PRUNE_WR_THRESHOLD) -> str:
+    if not wr_entry or not wr_entry.get("total") or wr_entry.get("wr") is None:
+        return "[—]"
+    wr_pct = float(wr_entry["wr"])
+    tot = int(wr_entry["total"])
+    src = "L" if wr_entry.get("source") == "LIVE" else "B"
+    return f"[{src}:{wr_pct:.0f}%·{tot}]"
+
+
 def progress_bar(percent):
     filled = max(0, min(10, round(percent / 10)))
     return "█" * filled + "░" * (10 - filled)
@@ -105,34 +113,20 @@ def compute_signal_confidence(cand: dict, payout: float = PAYOUT) -> tuple[int, 
     cat = str(meta.get("category") or "").upper()
     is_reversion_style = (
         regime in ("REVERSION", "RANGE", "SMC", "PA")
-        or cat in ("REVERSION", "OSCILLATOR", "SMC", "PA")
-        or preset.startswith(("REV_", "LIQ_", "DIV_", "BB_", "CRSI_", "PIVOT_"))
+        or cat in ("REVERSION", "OSCILLATOR", "SMC", "PA", "MEAN", "DIV")
+        or preset.startswith(("REV_", "LIQ_", "DIV_", "BB_", "CRSI_", "PIVOT_", "MR_", "SM_", "DV_"))
     )
 
     if is_reversion_style:
         if chop is not None:
-            if float(chop) >= 52.0:
-                score += 5.0
-            elif float(chop) >= 45.0:
-                score += 2.0
-            elif float(chop) < 38.0:
-                score -= 6.0
+            score += 5.0 if float(chop) >= 52.0 else (2.0 if float(chop) >= 45.0 else (-6.0 if float(chop) < 38.0 else 0.0))
         if adx is not None:
-            if float(adx) < 22.0:
-                score += 3.0
-            elif float(adx) > 32.0:
-                score -= 5.0
+            score += 3.0 if float(adx) < 22.0 else (-5.0 if float(adx) > 32.0 else 0.0)
     else:
         if adx is not None:
-            if float(adx) >= 25.0:
-                score += 5.0
-            elif float(adx) < 18.0:
-                score -= 6.0
+            score += 5.0 if float(adx) >= 25.0 else (-6.0 if float(adx) < 18.0 else 0.0)
         if chop is not None:
-            if float(chop) < 45.0:
-                score += 4.0
-            elif float(chop) >= 58.0:
-                score -= 6.0
+            score += 4.0 if float(chop) < 45.0 else (-6.0 if float(chop) >= 58.0 else 0.0)
 
     rsi = cand.get("rsi")
     if rsi is not None:
@@ -151,15 +145,12 @@ def compute_signal_confidence(cand: dict, payout: float = PAYOUT) -> tuple[int, 
                 score += 2.5
 
     be = 1.0 / (1.0 + float(payout))
-    hw = cand.get("hist_wins")
-    ht = cand.get("hist_total")
+    hw, ht = cand.get("hist_wins"), cand.get("hist_total")
     if hw is not None and ht:
-        lo = _wilson_lower(int(hw), int(ht))
-        score += max(-10.0, min(10.0, (lo - be) * 80.0))
+        score += max(-10.0, min(10.0, (_wilson_lower(int(hw), int(ht)) - be) * 80.0))
     elif preset in HOLDOUT:
         n_h, wr_h = HOLDOUT[preset]
-        lo = _wilson_lower(round(n_h * wr_h / 100.0), n_h)
-        score += max(-10.0, min(10.0, (lo - be) * 80.0))
+        score += max(-10.0, min(10.0, (_wilson_lower(round(n_h * wr_h / 100.0), n_h) - be) * 80.0))
 
     pct = int(round(max(25.0, min(92.0, score))))
     if pct >= 76:
@@ -203,9 +194,7 @@ def signal_card(pair, cand, entry, now, tz_name: str = "Europe/Kyiv", risk_amoun
 
     conf_pct, conf_label, conf_ico = compute_signal_confidence(cand)
     conf_bar = progress_bar(conf_pct)
-
-    bar_end = cand.get("bar_end") or now
-    sess_txt = localized_session_name(bar_end)
+    sess_txt = localized_session_name(cand.get("bar_end") or now)
 
     parts = [
         f"<b>{html.escape(clean_pair)} · {direction}</b>",
@@ -236,40 +225,25 @@ def signal_card(pair, cand, entry, now, tz_name: str = "Europe/Kyiv", risk_amoun
     return "\n".join(parts)
 
 
-def settlement_text(
-    result,
-    exit_price,
-    pips,
-    pair: str | None = None,
-    entry_price: float | None = None,
-    signal_type: str | None = None,
-):
+def settlement_text(result, exit_price, pips, pair: str | None = None, entry_price: float | None = None, signal_type: str | None = None):
     icon = {"WIN": "✅", "LOSS": "❌", "NEUTRAL": "➖", "VOID": "⚪"}.get(result, "⚪")
     price_str = format_price(exit_price, pair) if exit_price is not None else "немає котирування"
-
     if exit_price is None:
         return f"🏁 <b>{icon} {html.escape(str(result))}</b> · Вихід: {price_str} · пункти: —"
 
-    is_jpy = _is_jpy_pair(pair, exit_price)
-    pt_mult = 1000.0 if is_jpy else 100000.0
-
+    pt_mult = 1000.0 if _is_jpy_pair(pair, exit_price) else 100000.0
     if entry_price is not None:
         raw_diff = float(exit_price) - float(entry_price)
         if str(signal_type or "").upper() == "PUT":
             raw_diff = -raw_diff
-        elif str(signal_type or "").upper() != "CALL" and pips is not None and float(pips) != 0:
-            if (raw_diff > 0) != (float(pips) > 0):
-                raw_diff = -raw_diff
+        elif str(signal_type or "").upper() != "CALL" and pips is not None and float(pips) != 0 and (raw_diff > 0) != (float(pips) > 0):
+            raw_diff = -raw_diff
         pts = raw_diff * pt_mult
     else:
         pts = float(pips or 0.0)
 
     pts_str = f"{pts:+.1f}" if abs(pts - round(pts)) >= 0.05 else f"{round(pts):+d}"
-    classic_pips = pts / 10.0
-    return (
-        f"🏁 <b>{icon} {html.escape(str(result))}</b> · Вихід: {price_str} · "
-        f"пункти: <b>{pts_str} пт</b> ({classic_pips:+.1f} піпс)"
-    )
+    return f"🏁 <b>{icon} {html.escape(str(result))}</b> · Вихід: {price_str} · пункти: <b>{pts_str} пт</b> ({pts / 10.0:+.1f} піпс)"
 
 
 def stats_text(rows, period, auto_disabled_global=None, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD):
@@ -284,17 +258,11 @@ def stats_text(rows, period, auto_disabled_global=None, payout: float = PAYOUT, 
 
     lines = [f"📊 <b>Статистика · {PERIODS[period]}</b>"]
     if not total:
-        lines.append("⚪ <b>Загалом:</b> немає завершених угод")
-        lines.append("Угод за цей період немає.")
+        lines.append("⚪ <b>Загалом:</b> немає завершених угод\nУгод за цей період немає.")
         return "\n".join(lines)
 
-    lines.append(
-        f"{wr_badge(wins, total, payout, wr_threshold)} <b>Загалом:</b> <b>{wr_pct:.1f}%</b> ({wins}✅ / {losses}❌ · {total} угод)"
-    )
-    lines.append(
-        f"<i>Очікування ({int(float(payout) * 100)}% випл.): {ev_pct:+.1f}% · Беззбиток: {be_pct:.1f}% · Авто-вимк: &lt;{float(wr_threshold) * 100:.0f}%</i>"
-    )
-
+    lines.append(f"{wr_badge(wins, total, payout, wr_threshold)} <b>Загалом:</b> <b>{wr_pct:.1f}%</b> ({wins}✅ / {losses}❌ · {total} угод)")
+    lines.append(f"<i>Очікування ({int(float(payout) * 100)}% випл.): {ev_pct:+.1f}% · Беззбиток: {be_pct:.1f}% · Авто-вимк: &lt;{float(wr_threshold) * 100:.0f}%</i>")
     lines.append("\n<b>📌 По стратегіях</b>")
     for cat_key, cat_title in STRATEGY_CATEGORIES.items():
         cat_items = []
@@ -305,39 +273,22 @@ def stats_text(rows, period, auto_disabled_global=None, payout: float = PAYOUT, 
             if not sub:
                 continue
             sw = sum(r["result"] == "WIN" for r in sub)
-            sn = len(sub)
-            cat_items.append((sw / sn, sn, sw, s_key, meta["title"]))
+            cat_items.append((sw / len(sub), len(sub), sw, s_key, meta["title"]))
         if not cat_items:
             continue
         cat_items.sort(reverse=True)
         lines.append(f"<i>{html.escape(cat_title)}</i>")
         for wr, sn, sw, s_key, title in cat_items:
             tag = " ⛔" if s_key in disabled_set else ""
-            lines.append(
-                f"  {wr_badge(sw, sn, payout, wr_threshold)} {html.escape(title)} — <b>{wr * 100:.1f}%</b> ({sw}✅/{sn - sw}❌){tag}"
-            )
-
-    unknown_keys = sorted({r.get("strategy") for r in decisive if r.get("strategy") not in STRATEGIES_META})
-    for uk in unknown_keys:
-        if not uk:
-            continue
-        sub = [r for r in decisive if r.get("strategy") == uk]
-        sw = sum(r["result"] == "WIN" for r in sub)
-        sn = len(sub)
-        lines.append(f"  {wr_badge(sw, sn, payout, wr_threshold)} {html.escape(uk)} — <b>{sw / sn * 100:.1f}%</b> ({sw}✅/{sn - sw}❌)")
+            lines.append(f"  {wr_badge(sw, sn, payout, wr_threshold)} {html.escape(title)} — <b>{wr * 100:.1f}%</b> ({sw}✅/{sn - sw}❌){tag}")
 
     pair_groups = {}
     for r in decisive:
-        p = format_pair_name(r.get("ticker"))
-        pair_groups.setdefault(p, []).append(r)
-
-    ranked_pairs = []
-    for p, grp in pair_groups.items():
-        pw = sum(r["result"] == "WIN" for r in grp)
-        pn = len(grp)
-        ranked_pairs.append((pw / pn, pw, pn, p))
-    ranked_pairs.sort(reverse=True)
-
+        pair_groups.setdefault(format_pair_name(r.get("ticker")), []).append(r)
+    ranked_pairs = sorted(
+        ((sum(x["result"] == "WIN" for x in grp) / len(grp), sum(x["result"] == "WIN" for x in grp), len(grp), p) for p, grp in pair_groups.items()),
+        reverse=True,
+    )
     if len(ranked_pairs) <= 8:
         lines.append("\n<b>💱 По валютних парах</b>")
         for wr, pw, pn, p in ranked_pairs:
@@ -349,41 +300,52 @@ def stats_text(rows, period, auto_disabled_global=None, payout: float = PAYOUT, 
         lines.append("\n<b>⚠️ Низ-5 пар</b>")
         for wr, pw, pn, p in ranked_pairs[-5:]:
             lines.append(f"  {wr_badge(pw, pn, payout, wr_threshold)} <b>{html.escape(p)}</b> — <b>{wr * 100:.1f}%</b> ({pw}✅/{pn - pw}❌)")
-
     return "\n".join(lines)
+
+
+def strategy_ranks_text(wr_summary: dict, page: int = 0, per_page: int = 20, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD) -> tuple[str, int]:
+    items = []
+    for sk, meta in STRATEGIES_META.items():
+        d = wr_summary.get(sk) or {}
+        tot = int(d.get("total") or 0)
+        wr = float(d["wr"]) if d.get("wr") is not None else -1.0
+        items.append((wr, tot, sk, meta))
+    items.sort(key=lambda x: (x[0] >= 0, x[0], x[1]), reverse=True)
+    total_pages = max(1, (len(items) + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+    chunk = items[page * per_page : (page + 1) * per_page]
+
+    lines = [f"📊 <b>Рейтинг усіх {len(items)} стратегій (стор. {page + 1}/{total_pages})</b>"]
+    for wr, tot, sk, meta in chunk:
+        if wr < 0:
+            lines.append(f"⚪ {html.escape(meta['title'])} (<code>{html.escape(sk)}</code>) — <i>немає даних</i>")
+        else:
+            w_cnt = round(wr * tot / 100.0)
+            ico = wr_badge(w_cnt, tot, payout, wr_threshold)
+            src = "Live" if (wr_summary.get(sk) or {}).get("source") == "LIVE" else "BT"
+            lines.append(f"{ico} <b>{wr:.1f}%</b> ({tot} угод, {src}) · {html.escape(meta['title'])}")
+    return "\n".join(lines), total_pages
 
 
 def stats_matrix_text(live_rows, bt_rows, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD) -> str:
     live_list = live_rows if isinstance(live_rows, (list, tuple)) else []
     bt_list = bt_rows if isinstance(bt_rows, (list, tuple)) else []
-
     by_pair = {}
     for r in live_list:
-        p = format_pair_name(r.get("ticker"))
-        s = r.get("strategy") or "?"
-        w, t = int(r.get("wins") or 0), int(r.get("total") or 0)
-        by_pair.setdefault(p, {}).setdefault(s, {})["live"] = (w, t)
-
+        by_pair.setdefault(format_pair_name(r.get("ticker")), {}).setdefault(r.get("strategy") or "?", {})["live"] = (int(r.get("wins") or 0), int(r.get("total") or 0))
     for r in bt_list:
-        p = format_pair_name(r.get("pair_name") or r.get("pair"))
-        s = r.get("strategy_key") or r.get("strategy") or "?"
-        w, t = int(r.get("wins") or 0), int(r.get("total") or 0)
-        by_pair.setdefault(p, {}).setdefault(s, {})["bt"] = (w, t)
-
+        by_pair.setdefault(format_pair_name(r.get("pair_name") or r.get("pair")), {}).setdefault(r.get("strategy_key") or r.get("strategy") or "?", {})["bt"] = (int(r.get("wins") or 0), int(r.get("total") or 0))
     if not by_pair:
         return "📋 <b>Матриця Пара × Стратегія</b>\nПоки що немає статистики живих угод або бектесту."
 
     lines = ["📋 <b>Матриця Пара × Стратегія (Живі | Бектест)</b>"]
     for pair in sorted(by_pair):
         lines.append(f"\n💱 <b>{html.escape(pair)}</b>")
-        items = []
-        for s_key, d in by_pair[pair].items():
-            lw, lt = d.get("live", (0, 0))
-            bw, bt = d.get("bt", (0, 0))
-            sort_wr = (lw / lt) if lt else ((bw / bt) if bt else 0.0)
-            items.append((sort_wr, s_key, lw, lt, bw, bt))
-        items.sort(reverse=True)
-        for _, s_key, lw, lt, bw, bt in items:
+        items = sorted(
+            (((lw / lt if lt else (bw / bt if bt else 0.0)), sk, lw, lt, bw, bt) for sk, d in by_pair[pair].items() for lw, lt in [d.get("live", (0, 0))] for bw, bt in [d.get("bt", (0, 0))]),
+            reverse=True,
+        )
+        for _, s_key, lw, lt, bw, bt in items[:15]:
             parts = []
             if lt:
                 parts.append(f"Live {wr_badge(lw, lt, payout, wr_threshold)} {lw / lt * 100:.1f}% ({lw}/{lt})")
@@ -396,21 +358,12 @@ def stats_matrix_text(live_rows, bt_rows, payout: float = PAYOUT, wr_threshold: 
 def auto_disabled_text(items: list, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD) -> str:
     pct = float(wr_threshold) * 100.0
     if not isinstance(items, (list, tuple)) or not items:
-        return (
-            f"🛡 <b>Авто-вимкнення (&lt;{pct:.0f}% WR)</b>\n"
-            "✅ Жодна стратегія зараз не заблокована."
-        )
-    lines = [
-        f"🚫 <b>Авто-вимкнені стратегії (&lt;{pct:.0f}% WR)</b>",
-        "Натисніть на кнопку нижче, щоб вручну ввімкнути стратегію знову:",
-    ]
-    for it in items:
+        return f"🛡 <b>Авто-вимкнення (&lt;{pct:.0f}% WR)</b>\n✅ Жодна стратегія зараз не заблокована."
+    lines = [f"🚫 <b>Авто-вимкнені стратегії (&lt;{pct:.0f}% WR)</b>", "Натисніть на кнопку нижче, щоб вручну ввімкнути стратегію знову:"]
+    for it in items[:30]:
         scope = "Глобально" if it["scope_type"] == "GLOBAL" else format_pair_name(it["pair_name"])
         wr = float(it.get("win_rate") or 0.0) * 100.0
-        lines.append(
-            f"⛔ <b>{html.escape(scope)}</b> · <code>{html.escape(it['strategy_key'])}</code> — "
-            f"{wr:.1f}% ({it['wins']}/{it['total']}, {html.escape(it.get('source') or '')})"
-        )
+        lines.append(f"⛔ <b>{html.escape(scope)}</b> · <code>{html.escape(it['strategy_key'])}</code> — {wr:.1f}% ({it['wins']}/{it['total']}, {html.escape(it.get('source') or '')})")
     return "\n".join(lines)
 
 
@@ -430,12 +383,8 @@ def active_text(rows, now, live_prices: dict | None = None):
             move = lp - entry if r.get("signal_type") == "CALL" else entry - lp
             pts = move * (1000.0 if _is_jpy_pair(pair, lp) else 100000.0)
             ico = "🟢 +" if pts > 0 else ("🔴 " if pts < 0 else "⚪ ")
-            p_fmt = format_price(lp, pair)
-            live_str = f"\n  📍 Зараз: {p_fmt} · {ico}{round(pts)} пт"
-        lines.append(
-            f"#{r['id']} {html.escape(pair)} · ⏱ {r['expiration_mins']} хв\n"
-            f"  {html.escape(r['signal_type'])} · {status_line}{live_str}"
-        )
+            live_str = f"\n  📍 Зараз: {format_price(lp, pair)} · {ico}{round(pts)} пт"
+        lines.append(f"#{r['id']} {html.escape(pair)} · ⏱ {r['expiration_mins']} хв\n  {html.escape(r['signal_type'])} · {status_line}{live_str}")
     if not rows:
         lines.append("Відкритих угод немає.")
     return "\n".join(lines)
@@ -448,29 +397,13 @@ def history_text(rows):
         result = "VOID" if r["status"] == "VOID" else r["result"]
         lines.append(
             f"#{r['id']} {html.escape(pair)} · {html.escape(r.get('signal_type') or '')} ({r.get('expiration_mins') or '?'} хв)\n"
-            + settlement_text(
-                result,
-                float(r["exit_price"]) if r.get("exit_price") is not None else None,
-                r.get("pips") or 0,
-                pair=pair,
-                entry_price=float(r["entry_price"]) if r.get("entry_price") is not None else None,
-                signal_type=r.get("signal_type"),
-            )
+            + settlement_text(result, float(r["exit_price"]) if r.get("exit_price") is not None else None, r.get("pips") or 0,
+                              pair=pair, entry_price=float(r["entry_price"]) if r.get("entry_price") is not None else None, signal_type=r.get("signal_type"))
         )
     return "\n".join(lines) if rows else lines[0] + "\nЗавершених угод немає."
 
 
-def pair_radar_text(
-    diag: dict,
-    news_status: tuple[bool, str],
-    upcoming_news: list,
-    live_rows: list,
-    bt_rows: list,
-    live_price: float | None = None,
-    payout: float = PAYOUT,
-    wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD,
-    sr_plan: dict | None = None,
-) -> str:
+def pair_radar_text(diag: dict, news_status: tuple[bool, str], upcoming_news: list, live_rows: list, bt_rows: list, live_price: float | None = None, payout: float = PAYOUT, wr_threshold: float = AUTO_DISABLE_WR_THRESHOLD, sr_plan: dict | None = None) -> str:
     pair = diag["pair"]
     price = live_price or diag.get("price")
     p_str = format_price(price, pair) if price else "—"
@@ -478,7 +411,6 @@ def pair_radar_text(
     adx_s = f"{diag['adx']:.1f}" if diag.get("adx") is not None else "—"
     rsi_s = f"{diag['rsi14']:.1f}" if diag.get("rsi14") is not None else "—"
     vr_s = f"{diag['vol_ratio']:.2f}x" if diag.get("vol_ratio") is not None else "—"
-
     regime_desc = "Флет/діапазон" if (diag.get("chop") or 50) >= 48 else "Трендовий рух"
     news_bad, news_reason = news_status
     news_line = f"⛔ {html.escape(news_reason)}" if news_bad else "🟢 Спокійно (карантин не активний)"
@@ -491,53 +423,39 @@ def pair_radar_text(
         f"📊 5m: CHOP <b>{chop_s}</b> ({regime_desc}) · ADX <b>{adx_s}</b> · RSI14 <b>{rsi_s}</b> · Vol <b>{vr_s}</b>",
         f"🧭 Тренд: 15m {diag.get('trend_15m', '—')} | 60m {diag.get('trend_60m', '—')}",
         f"📰 Новини: {news_line}",
-        f"⚙️ Стратегій в роботі: <b>{diag['checked']}</b> (глобально вимк: {diag['off_global']}, по парі: {diag['off_pair']}, пауза 1г: {diag.get('muted', 0)})",
+        f"⚙️ Стратегій в роботі: <b>{diag['checked']}</b> (глоб.вимк: {diag['off_global']}, пара: {diag['off_pair']}, пауза: {diag.get('muted', 0)})",
     ]
-
     if sr_plan and sr_plan.get("ok"):
         def _lvl_str(item):
             if not item:
                 return "—"
             tags = ",".join(item.get("tags", [])[:2])
             return f"<b>{format_price(item['price'], pair)}</b> ({html.escape(tags)} · x{item['touches']})"
-
         lines.append("\n📐 <b>Рівні підтримки та опору (S/R):</b>")
         lines.append(f"  🔹 Локальні (M5/M15): Підтр. {_lvl_str(sr_plan.get('local_support'))} | Опір {_lvl_str(sr_plan.get('local_resistance'))}")
         lines.append(f"  🔸 Глобальні (H1/PDH): Підтр. {_lvl_str(sr_plan.get('global_support'))} | Опір {_lvl_str(sr_plan.get('global_resistance'))}")
-
-        rec_dir = sr_plan.get("recommended_direction", "WAIT")
-        rec_price = sr_plan.get("recommended_price")
-        rec_exp = sr_plan.get("recommended_exp", 10)
+        rec_dir, rec_price, rec_exp = sr_plan.get("recommended_direction", "WAIT"), sr_plan.get("recommended_price"), sr_plan.get("recommended_exp", 10)
         scope_ua = "Глобальний рівень" if sr_plan.get("recommended_scope") == "GLOBAL" else "Локальний рівень"
-
         if rec_dir in ("CALL", "PUT") and rec_price is not None:
             dir_badge = "🟢 CALL ↑" if rec_dir == "CALL" else "🔴 PUT ↓"
-            lines.append(
-                f"🎯 <b>Торговий план ({scope_ua}):</b> {dir_badge}\n"
-                f"  📍 Реком. ціна входу: <b>{format_price(rec_price, pair)}</b>\n"
-                f"  ⏳ <b>ЕКСПІРАЦІЯ: {rec_exp} ХВ</b>\n"
-                f"  <i>{html.escape(sr_plan.get('setup_desc', ''))}</i>"
-            )
+            lines.append(f"🎯 <b>Торговий план ({scope_ua}):</b> {dir_badge}\n  📍 Реком. ціна входу: <b>{format_price(rec_price, pair)}</b>\n  ⏳ <b>ЕКСПІРАЦІЯ: {rec_exp} ХВ</b>\n  <i>{html.escape(sr_plan.get('setup_desc', ''))}</i>")
         else:
             lines.append(f"⏳ <b>Сценарій:</b> {html.escape(sr_plan.get('setup_desc', 'Очікування підходу до рівня'))}")
-            ct = sr_plan.get("call_target")
-            pt = sr_plan.get("put_target")
-            if ct:
+            if sr_plan.get("call_target"):
+                ct = sr_plan["call_target"]
                 lines.append(f"  🟢 CALL від <b>{format_price(ct['price'], pair)}</b> · Експ. <b>{ct['exp']} ХВ</b>")
-            if pt:
+            if sr_plan.get("put_target"):
+                pt = sr_plan["put_target"]
                 lines.append(f"  🔴 PUT від <b>{format_price(pt['price'], pair)}</b> · Експ. <b>{pt['exp']} ХВ</b>")
 
     if upcoming_news:
         lines.append("\n<b>🗓 Найближчі події (High):</b>")
         for ev in upcoming_news[:3]:
             lines.append(f"  • {ev['dt']:%H:%M} UTC ({ev['country']}): {html.escape(ev['title'])}")
-
     if live_rows:
-        lw = sum(int(r.get("wins") or 0) for r in live_rows)
-        lt = sum(int(r.get("total") or 0) for r in live_rows)
+        lw, lt = sum(int(r.get("wins") or 0) for r in live_rows), sum(int(r.get("total") or 0) for r in live_rows)
         if lt:
             lines.append(f"\n📈 <b>Жива статистика пари:</b> {wr_badge(lw, lt, payout, wr_threshold)} {lw / lt * 100:.1f}% ({lw}✅/{lt - lw}❌)")
-
     if bt_rows:
         top_bt = sorted(bt_rows, key=lambda r: (float(r.get("win_rate") or 0.0), int(r.get("total") or 0)), reverse=True)[:5]
         lines.append("\n<b>🧪 Топ стратегій за бектестом:</b>")
@@ -545,16 +463,13 @@ def pair_radar_text(
             bw, bt = int(r.get("wins") or 0), int(r.get("total") or 0)
             if bt:
                 lines.append(f"  {wr_badge(bw, bt, payout, wr_threshold)} <code>{html.escape(r['strategy_key'])}</code> — {bw / bt * 100:.1f}% ({bw}/{bt})")
-
     return "\n".join(lines)
 
 
 def strategy_stat_text(strategy_key: str, live_rows: list, bt_rows: list, payout: float = PAYOUT) -> str:
-    lw = sum(int(r.get("wins") or 0) for r in live_rows)
-    lt = sum(int(r.get("total") or 0) for r in live_rows)
-    bw = sum(int(r.get("wins") or 0) for r in bt_rows)
-    bt = sum(int(r.get("total") or 0) for r in bt_rows)
+    lw, lt = sum(int(r.get("wins") or 0) for r in live_rows), sum(int(r.get("total") or 0) for r in live_rows)
+    bw, bt = sum(int(r.get("wins") or 0) for r in bt_rows), sum(int(r.get("total") or 0) for r in bt_rows)
     be = break_even_pct(payout)
     l_str = f"{lw / lt * 100:.1f}% ({lw}/{lt})" if lt else "немає даних"
     b_str = f"{bw / bt * 100:.1f}% ({bw}/{bt})" if bt else "немає даних"
-    return f"📊 {html.escape(str(strategy_key))}\nLive: {l_str}\nBT: {b_str}\nБеззбиток ({int(payout * 100)}%): {be:.1f}%"
+    return f"📊 Статистика стратегії\nLive: {l_str}\nBT: {b_str}\nБеззбиток ({int(payout * 100)}%): {be:.1f}%"
