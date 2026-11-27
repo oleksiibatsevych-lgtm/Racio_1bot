@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Повне безпечне очищення PostgreSQL (схема public) та скидання strategies_config.json до чистого еталона GitHub."""
+"""Повне безпечне очищення PostgreSQL (схема public), скидання deleted_strategies.json та strategies_config.json до еталона GitHub."""
 import argparse
 import json
 import logging
@@ -8,72 +8,25 @@ import sys
 from pathlib import Path
 
 import database
+from strategy_engine import FULL_STRATEGIES_META, restore_all_deleted_strategies
 
 logger = logging.getLogger(__name__)
 
-CLEAN_GITHUB_CONFIG = {
-    "REV_RSI14": True,
-    "REV_BB3": True,
-    "REV_RSI7": True,
-    "CRSI_5M": True,
-    "CRSI_1M": False,
-    "VALUE_CH_5M": True,
-    "VALUE_CH_1M": False,
-    "OSC_CONS_5M": True,
-    "OSC_CONS_3M": True,
-    "BB_KC_REV_5M": True,
-    "BB_KC_REV_15M": True,
-    "PIVOT_REV_5M": True,
-    "EXH_STRK_1M": False,
-    "EXH_STRK_3M": False,
-    "STARC_5M": True,
-    "STARC_15M": True,
-    "LINREG_5M": True,
-    "HUBBA_5M": True,
-    "MTF_PB_1M_15": False,
-    "MTF_PB_3M_15": True,
-    "MTF_PB_5M_60": True,
-    "EMA_RIB_3M": False,
-    "EMA_RIB_5M": True,
-    "MACD_ADX_5M": True,
-    "MACD_ADX_15M": True,
-    "ST_MOM_3M": False,
-    "ST_MOM_5M": True,
-    "PSAR_EMA_5M": True,
-    "PSAR_EMA_15M": True,
-    "ICHI_TK_5M": True,
-    "ICHI_TK_15M": True,
-    "HA_EMA_5M": True,
-    "TTM_SQZ_5M": True,
-    "TTM_SQZ_15M": True,
-    "ORB_LON_5M": True,
-    "ORB_NY_5M": True,
-    "DONCH_BRK_5M": True,
-    "JUDAS_LON_5M": True,
-    "DIV_RSI_5M": True,
-    "DIV_RSI_15M": True,
-    "DIV_MACD_5M": True,
-    "DIV_MACD_15M": True,
-    "AO_TWIN_5M": True,
-    "AO_ZERO_3M": True,
-    "CCI_WPR_5M": True,
-    "CCI_WPR_3M": True,
-    "DEM_BB_5M": True,
-    "WT_CROSS_5M": True,
-    "LIQ_SWP_3M": True,
-    "LIQ_SWP_5M": True,
-    "FVG_IMP_3M": True,
-    "FVG_IMP_5M": True,
-    "PA_PIN_BB_5M": True,
-    "PA_ENG_SR_5M": True,
-    "PA_FAKEY_5M": True,
-    "PA_MHI_1M": False,
-    "PA_3LS_5M": True,
-    "session_filter": True,
-    "regime_filter": True,
-    "news_filter": True,
-    "auto_disable_49": True,
+LEGACY_DISABLED = {
+    "CRSI_1M", "VALUE_CH_1M", "EXH_STRK_1M", "EXH_STRK_3M",
+    "MTF_PB_1M_15", "EMA_RIB_3M", "ST_MOM_3M", "PA_MHI_1M",
 }
+
+
+def build_clean_github_config() -> dict:
+    cfg = {k: (k not in LEGACY_DISABLED) for k in FULL_STRATEGIES_META}
+    cfg.update({
+        "session_filter": True,
+        "regime_filter": True,
+        "news_filter": True,
+        "auto_disable_49": True,
+    })
+    return cfg
 
 
 def _safe_ident(name: str) -> str:
@@ -114,8 +67,9 @@ def reset_database_and_config(config_path: str | Path | None = None, reset_confi
     config_reset = False
     if reset_config:
         cfg_file = Path(config_path) if config_path else Path(__file__).with_name("strategies_config.json")
+        restore_all_deleted_strategies(config_path=cfg_file, deleted_path=cfg_file.with_name("deleted_strategies.json"))
         tmp_file = cfg_file.with_suffix(".tmp")
-        tmp_file.write_text(json.dumps(CLEAN_GITHUB_CONFIG, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_file.write_text(json.dumps(build_clean_github_config(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp_file, cfg_file)
         config_reset = True
 
