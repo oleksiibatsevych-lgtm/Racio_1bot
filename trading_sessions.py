@@ -79,6 +79,10 @@ STRATEGY_SESSIONS = {
     "PA_FAKEY_5M": ACTIVE_FLOW,
     "PA_MHI_1M": ANY_SESSION,
     "PA_3LS_5M": ALL_EXCEPT_DEAD,
+    "VL_ASIA_SWP_5M": {"London", "Overlap"},
+    "VL_NY_SWP_5M": {"Overlap", "NY"},
+    "VL_ORB_NY30_5M": {"Overlap", "NY"},
+    "VL_ORB_LN30_5M": {"London", "Overlap"},
 }
 
 
@@ -118,7 +122,11 @@ def is_killzone(value):
 def session_allowed(preset, value):
     if preset in ALLOWED_SESSIONS:
         return session_name(value) in ALLOWED_SESSIONS[preset]
-    return session_name(value) in STRATEGY_SESSIONS.get(preset, ACTIVE_FLOW)
+    if preset in STRATEGY_SESSIONS:
+        return session_name(value) in STRATEGY_SESSIONS[preset]
+    if str(preset).startswith(("MR_", "DV_", "PA_", "QN_HURST", "QN_ENTROPY", "QN_SKEW", "QN_KURT", "QN_MULT")):
+        return session_name(value) in ALL_EXCEPT_DEAD
+    return session_name(value) in ACTIVE_FLOW
 
 
 def next_daily_report(now):
